@@ -55,12 +55,13 @@
 
 ## Task 1: Establish a clean baseline
 
-- [ ] Record `git status --short` and preserve unrelated changes.
-- [ ] Create `backend/.venv` and install `backend/requirements.txt`.
-- [ ] Run the full backend suite with plugin autoload disabled.
-- [ ] Run `backend/scripts/run_bundle.py`; require `FINAL SCORE = 1.0000`.
-- [ ] Run `npm install` and `npm run build` in `frontend/`.
-- [ ] Record actual test count instead of trusting conflicting documentation.
+- [x] Record `git status --short` and preserve unrelated changes.
+- [x] Create `backend/.venv` and install `backend/requirements.txt`.
+- [x] Run the full backend suite with plugin autoload disabled.
+- [x] Run `backend/scripts/run_bundle.py` across all 520 emails.
+- [ ] Recompute `FINAL SCORE = 1.0000` (blocked because the organiser ground-truth file is not present in this checkout).
+- [x] Run `npm install` and `npm run build` in `frontend/`.
+- [x] Record actual test count instead of trusting conflicting documentation.
 
 Commands:
 
@@ -266,19 +267,19 @@ Review only the P2 diff. No secrets, comparator changes, Supabase changes, or un
 
 ## Definition of Done
 
-- [ ] Ask AI cites evidence and only reports comparator results.
-- [ ] Send/bypass/delegated-approval/invention/other-case prompts are refused.
-- [ ] RAG never returns a different case.
-- [ ] Communication policy and operator FAQ are indexed and retrievable.
-- [ ] Translation preserves company, port, weight, and reference values.
-- [ ] External sharing contains selected fields only and requires approval.
-- [ ] Role and policy boundaries pass automated and manual checks.
-- [ ] Backend tests, bundle score, RAG build, and frontend build pass.
-- [ ] `docs/P2_VERIFICATION.md` contains reproducible evidence.
+- [x] Ask AI cites evidence and only reports comparator results.
+- [x] Send/bypass/delegated-approval/invention/other-case prompts are refused.
+- [x] RAG never returns a different case.
+- [x] Communication policy and operator FAQ are indexed and retrievable.
+- [x] Translation preserves company, port, weight, and reference values.
+- [x] External sharing contains selected fields only and requires approval.
+- [x] Role and policy boundaries pass automated and manual checks.
+- [x] Backend tests, bundle execution, RAG build, and frontend build pass.
+- [ ] Private organiser score is recomputed (ground-truth file unavailable locally).
+- [x] `docs/P2_VERIFICATION.md` contains reproducible evidence.
 
 ## Execution order
 
 Default: `1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11`.
 
 Tasks 3, 4, and 6 are independent after Task 2, but inline execution keeps the default order. Task 10 starts only after Tasks 3–9 pass. Task 11 is mandatory before completion.
-

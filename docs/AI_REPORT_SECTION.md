@@ -46,7 +46,7 @@ The runtime order is rules, then the trained model for weak or ambiguous rule ou
 
 | Check | Result |
 |---|---|
-| Full automated suite | 96 passed |
+| Full automated suite | 119 passed |
 | Organiser bundle scoreboard | Recorded result: 1.0000 across all 520 cases; not locally recomputed because the private ground truth is absent |
 | `pytest -k container_3_vs_4` | Covered by the full suite |
 | `pytest -k all_seven_match` | Covered by the full suite |
