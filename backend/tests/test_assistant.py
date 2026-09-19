@@ -94,6 +94,69 @@ def test_current_case_reference_is_allowed(case_bundle):
     assert response.refused is False
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Why is this a mismatch?",
+        "Which six fields match?",
+        "Show the SI evidence",
+        "Who is the Notify Party?",
+        "Who should review this?",
+        "Summarize this case",
+        "Draft a correction email",
+        "What changed since the last review?",
+        "Translate this email to Chinese",
+        "What policy applies?",
+    ],
+)
+def test_all_suggested_questions_are_grounded_and_cited(case_bundle, question):
+    repo, case, email, policy = case_bundle
+
+    response = answer_question(
+        question,
+        case,
+        email,
+        repo.list_audit(case.id),
+        policy,
+    )
+
+    assert response.refused is False
+    assert response.grounded is True
+    assert response.answer.strip()
+    assert response.citations
+
+
+@pytest.mark.parametrize(
+    ("case_id", "expected_text"),
+    [
+        ("case_email_001", "No mismatch detected."),
+        ("case_email_015", "No comparison has been run"),
+        ("case_email_507", "No comparison has been run"),
+        ("case_email_512", "No comparison has been run"),
+    ],
+)
+def test_acceptance_cases_never_invent_a_mismatch(case_id, expected_text):
+    repo = MemoryRepository()
+    repo.load_file(SNAPSHOT)
+    case = repo.get_case(case_id)
+    assert case is not None
+    email = repo.get_email(case.source_email_id)
+    assert email is not None
+
+    response = answer_question(
+        "Why is this a mismatch?",
+        case,
+        email,
+        repo.list_audit(case.id),
+        merged_policy(repo.get_active_policy().values),
+    )
+
+    assert response.grounded is True
+    assert expected_text in response.answer
+    assert "field(s) differ" not in response.answer
+    assert response.citations
+
+
 def test_p2_knowledge_files_are_indexable():
     chunks = knowledge_chunks(ROOT / "backend" / "data")
     files = {chunk.metadata["file"] for chunk in chunks if chunk.metadata}
@@ -174,6 +237,27 @@ def test_translation_offline_returns_original(monkeypatch):
 
     assert "requires LLM_PROVIDER" in translated
     assert source in translated
+
+
+def test_case_055_offline_translation_preserves_the_source_email(monkeypatch):
+    monkeypatch.setattr(assistant, "get_llm", lambda: SimpleNamespace(enabled=False))
+    repo = MemoryRepository()
+    repo.load_file(SNAPSHOT)
+    case = repo.get_case("case_email_055")
+    assert case is not None
+    email = repo.get_email(case.source_email_id)
+    assert email is not None
+
+    response = answer_question(
+        "Translate this email to Chinese",
+        case,
+        email,
+        repo.list_audit(case.id),
+        merged_policy(repo.get_active_policy().values),
+    )
+
+    assert email.body in response.answer
+    assert response.citations[0]["ref"] == email.id
 
 
 def test_external_share_contains_only_selected_fields(case_bundle):

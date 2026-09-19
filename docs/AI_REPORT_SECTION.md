@@ -42,14 +42,14 @@ Confusion-matrix label order is BL comparison, SI request, invoice query, genera
 
 The runtime order is rules, then the trained model for weak or ambiguous rule outcomes, then the LLM only if confidence is still low. Strong deterministic matches remain deterministic. The model artifact records its training fingerprint and dependency versions and is copied into the API Docker image.
 
-## Verification results, 19 September 2026
+## Verification results, updated 20 September 2026
 
 | Check | Result |
 |---|---|
-| Full automated suite | 58 passed |
-| Organiser bundle scoreboard | 1.0000 across all 520 cases |
-| `pytest -k container_3_vs_4` | 1 passed, 57 deselected |
-| `pytest -k all_seven_match` | 1 passed, 57 deselected |
+| Full automated suite | 96 passed |
+| Organiser bundle scoreboard | Recorded result: 1.0000 across all 520 cases; not locally recomputed because the private ground truth is absent |
+| `pytest -k container_3_vs_4` | Covered by the full suite |
+| `pytest -k all_seven_match` | Covered by the full suite |
 | Three real APRIL document pairs | TXT (`email_004`), XLSX (`email_005`), and PDF (`email_059`) extracted all seven SI and BL fields; no missing synonym found |
 | Gemini RAG | Reindexed 1,418 chunks at 768 dimensions; policy search returned grounded hits |
 
@@ -71,4 +71,3 @@ Docker is the reproducible execution environment, not the training algorithm. Tr
 For deployment, only `backend/models/intent_classifier.joblib` is required for inference. The metrics and split manifests are audit artifacts. Retraining also needs the labelled organiser dataset, which is intentionally not required by the running service. If the artifact is absent or incompatible, ingestion continues using rules.
 
 The Compose deployment fixes bundle and seed locations to `/data/bundle` and `/data/seed/snapshot.json`; otherwise host-relative `.env` values can override the paths inside the container and make valid attachments appear unreadable. An embedding-provider change also requires a full RAG reindex because local, Gemini, and OpenAI vectors have different dimensions.
-
