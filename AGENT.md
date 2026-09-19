@@ -159,7 +159,7 @@ Temporarily leave a service out while iterating:
 ### A. Before Supabase, email and keys (offline, memory repo)
 ```bash
 cd backend
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 119 tests
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 121 tests
 python scripts/run_bundle.py                                      # score requires the private ground-truth file
 python -m app.agents.create_index                                 # local RAG index
 uvicorn app.main:app --port 8000                                  # then in another terminal:

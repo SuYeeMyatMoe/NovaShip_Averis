@@ -122,7 +122,23 @@ class MemoryRepository(BaseRepository):
         self.errors.append(err)
 
     def save_share(self, share: ShareRecord) -> None:
-        self.shares[share.id] = share
+        with self._lock:
+            self.shares[share.id] = share
+
+    def mark_share_sent_if_pending(
+        self,
+        share_id: str,
+        sent_at: datetime,
+    ) -> Optional[ShareRecord]:
+        """Atomically claim a pending share confirmation in this repository."""
+        with self._lock:
+            share = self.shares.get(share_id)
+            if not share or share.status != "PENDING_CONFIRMATION":
+                return None
+            share.status = "SENT"
+            share.sent_at = sent_at
+            self.shares[share.id] = share
+            return share.model_copy(deep=True)
 
     def list_shares(self, case_id: Optional[str] = None) -> list[ShareRecord]:
         return [s for s in self.shares.values() if case_id is None or s.case_id == case_id]

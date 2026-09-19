@@ -26,10 +26,10 @@ Verified branch: `codex/p2-completion`
 
 | Check | Command | Result |
 |---|---|---|
-| Full backend suite | `backend/.venv/bin/python -m pytest backend/tests -q` | 119 passed in 6.41 seconds |
+| Full backend suite | `backend/.venv/bin/python -m pytest backend/tests -q` | 121 passed in 6.38 seconds |
 | Focused P2 suite | `backend/.venv/bin/python -m pytest backend/tests/test_assistant.py -q` | 52 passed in 3.67 seconds |
 | Frontend production build | `npm run build` in `frontend/` | Passed; compilation, lint, and type validation succeeded |
-| Bundle execution | `backend/.venv/bin/python backend/scripts/run_bundle.py --out /tmp/novaship-p2-submission.json` | 520 emails processed in 1.7 seconds, approximately 3 ms per email |
+| Bundle execution | `backend/.venv/bin/python backend/scripts/run_bundle.py --out /tmp/novaship-p2-submission.json` | 520 emails processed in 1.9 seconds, approximately 4 ms per email |
 | RAG rebuild | `backend/.venv/bin/python -m app.agents.create_index` from `backend/` | 19 knowledge chunks plus 1,408 case chunks; 1,427 total |
 | Patch integrity | `git diff --check` | Passed |
 
@@ -57,7 +57,7 @@ The locally generated case-status totals were:
 | Translation protection | Full labelled shipping values are masked; mixed-case/FZE company forms are protected; missing, duplicated, or reordered protection tokens cause a safe return to the original text | Passed |
 | Offline translation | The original text is retained with a clear provider note | Passed |
 | External share preview | Only explicitly selected fields appear; an explicit empty selection remains empty; subject, summary, original email body, and unselected values are absent | Passed |
-| Human approval | Confirmation sends the exact frozen message and payload under the same share ID; repeated confirmation is idempotent | Passed |
+| Human approval | Confirmation sends the exact frozen message and payload under the same share ID; sequential and concurrent confirmation are idempotent through an atomic repository transition | Passed |
 | Policy roles | Supervisor view is read-only; automated RBAC tests enforce Admin-only policy mutation and deny unauthorised external sharing | Passed |
 | Optional LLM post-check | Unsupported mismatch/match verdicts, invented field values, POL/POD/Weight aliases, and active or passive send/approval claims are rejected across multiple phrasings; supported verdicts remain accepted | Passed |
 | Current-case aliases | `case_email_004`, `case-email-004`, and `case 004` resolve to the current case without weakening cross-case isolation | Passed |
@@ -89,7 +89,7 @@ The local UI was exercised with Operations and Admin accounts against the 520-ca
 - Strengthened translation masking for complete labelled values and additional legal company forms, with fail-safe token integrity and ordering checks.
 - Removed subject and summary data from external share payloads.
 - Made explicit empty field selections disclose no comparison fields.
-- Made preview confirmation finalize the same frozen share record and remain idempotent on retry.
+- Made preview confirmation finalize the same frozen share record and remain idempotent under sequential retries and concurrent confirmation requests.
 - Prevented Operations dashboards from calling the Admin-only audit endpoint.
 - Corrected internal collaboration preview language so it does not imply an external notification.
 - Added focused tests for grounded answers, every suggested question, adversarial prompts, RAG isolation, translation, minimum disclosure, exact preview confirmation, policy language, representative acceptance cases, and unsafe LLM output.

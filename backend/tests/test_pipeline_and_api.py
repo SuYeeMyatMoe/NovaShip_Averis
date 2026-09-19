@@ -1,7 +1,11 @@
 """Pipeline, extraction, security, Notify Party, RBAC and E2E API tests (spec section 27)."""
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import threading
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,9 +16,18 @@ os.environ["LLM_PROVIDER"] = "none"
 
 from app.ai.extractor import extract_seven_fields  # noqa: E402
 from app.ai.security_precheck import assess_security  # noqa: E402
-from app.contracts.schemas import CaseStatus, EmailMessage, SecurityOutcome  # noqa: E402
+from app.contracts.schemas import (  # noqa: E402
+    CaseStatus,
+    EmailMessage,
+    RecipientType,
+    SecurityOutcome,
+    ShareRequest,
+)
 from app.main import app  # noqa: E402
 from app.readers.document_reader import read_document  # noqa: E402
+from app.repositories.memory import MemoryRepository  # noqa: E402
+from app.repositories.supabase_repo import SupabaseRepository  # noqa: E402
+from app.services.case_service import CaseService  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = ROOT / "sdoc-hackathon-bundle"
@@ -221,6 +234,131 @@ def test_explicit_empty_external_share_discloses_no_fields():
     assert "Container Count:" not in body["preview"]
     assert "3 x 40'HC" not in body["preview"]
     assert "4 x 40'HC" not in body["preview"]
+
+
+def test_concurrent_share_confirmation_emits_one_send_event():
+    class DetachedShareRepository(MemoryRepository):
+        """Model database reads by returning separate record instances."""
+
+        def __init__(self):
+            super().__init__()
+            self.confirm_barrier: threading.Barrier | None = None
+            self.confirm_reads = 0
+
+        def get_share(self, share_id):
+            with self._lock:
+                share = self.shares.get(share_id)
+                detached = share.model_copy(deep=True) if share else None
+                barrier = self.confirm_barrier
+                if barrier is not None:
+                    self.confirm_reads += 1
+                    if self.confirm_reads == barrier.parties:
+                        self.confirm_barrier = None
+            if barrier is not None:
+                barrier.wait()
+            return detached
+
+    repo = DetachedShareRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+    before = sum(
+        event.action == "NOTIFY_PARTY_SENT"
+        for event in repo.list_audit("case_email_004")
+    )
+
+    repo.confirm_barrier = threading.Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _: service.confirm_share(
+                    "case_email_004",
+                    share_id,
+                    supervisor,
+                ),
+                range(2),
+            )
+        )
+
+    after = sum(
+        event.action == "NOTIFY_PARTY_SENT"
+        for event in repo.list_audit("case_email_004")
+    )
+    assert after - before == 1
+    assert {result["share"]["id"] for result in results} == {share_id}
+    assert {result["share"]["status"] for result in results} == {"SENT"}
+
+
+def test_supabase_share_confirmation_uses_conditional_status_update():
+    class FakeQuery:
+        def __init__(self):
+            self.payload = None
+            self.filters = []
+
+        def update(self, payload):
+            self.payload = payload
+            return self
+
+        def eq(self, field, value):
+            self.filters.append((field, value))
+            return self
+
+        def execute(self):
+            return SimpleNamespace(
+                data=[
+                    {
+                        "id": "share_atomic_1",
+                        "case_id": "case_email_004",
+                        "shared_by": "u_sup_1",
+                        "recipient_type": "NOTIFY_PARTY_CONTACT",
+                        "recipient_party_id": "p_safqa",
+                        "recipient_label": "SAFQA LIMITED",
+                        "is_external": True,
+                        "message": "Frozen preview",
+                        "payload_preview": {"fields": []},
+                        "status": "SENT",
+                        "sent_at": self.payload["sent_at"],
+                        "tenant_id": "tenant_april",
+                    }
+                ]
+            )
+
+    class FakeClient:
+        def __init__(self):
+            self.query = FakeQuery()
+
+        def table(self, name):
+            assert name == "shares"
+            return self.query
+
+    repo = object.__new__(SupabaseRepository)
+    repo.client = FakeClient()
+    repo.tenant = "tenant_april"
+    sent_at = datetime(2026, 9, 20, 12, 0, 0)
+
+    share = repo.mark_share_sent_if_pending("share_atomic_1", sent_at)
+
+    assert share is not None and share.status == "SENT"
+    assert repo.client.query.payload == {
+        "status": "SENT",
+        "sent_at": sent_at.isoformat(),
+    }
+    assert repo.client.query.filters == [
+        ("id", "share_atomic_1"),
+        ("tenant_id", "tenant_april"),
+        ("status", "PENDING_CONFIRMATION"),
+    ]
 
 
 def test_missing_bl_waits_for_documents_then_upload_recovers():

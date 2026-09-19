@@ -549,7 +549,8 @@ class ShareRequest(BaseModel):
     recipient_party_id: Optional[str] = None
     message: Optional[str] = None
     due_date: Optional[str] = None
-    include_fields: list[str] = Field(default_factory=list)  # empty = mismatches only
+    # Omitted defaults to mismatch fields; an explicitly supplied [] discloses none.
+    include_fields: list[str] = Field(default_factory=list)
     confirm_external: bool = False
     preview_only: bool = False
 

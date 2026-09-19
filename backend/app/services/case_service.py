@@ -311,9 +311,27 @@ class CaseService:
                 },
             )
 
-        share.status = "SENT"
-        share.sent_at = datetime.utcnow()
-        self.repo.save_share(share)
+        confirmed_share = self.repo.mark_share_sent_if_pending(
+            share.id,
+            datetime.utcnow(),
+        )
+        if confirmed_share is None:
+            latest_share = self.repo.get_share(share.id)
+            if latest_share and latest_share.status == "SENT":
+                return {
+                    "share": latest_share.model_dump(mode="json"),
+                    "requires_confirmation": False,
+                    "preview": latest_share.message,
+                    "payload": latest_share.payload_preview,
+                }
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "share confirmation was not applied",
+                    "category": "NOTIFICATION_ERROR",
+                },
+            )
+        share = confirmed_share
         if share.recipient_user_id and share.recipient_user_id not in case.shared_with:
             case.shared_with.append(share.recipient_user_id)
         if share.recipient_party_id and share.recipient_party_id not in case.shared_with:
