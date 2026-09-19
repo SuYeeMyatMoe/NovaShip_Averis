@@ -94,6 +94,20 @@ def test_current_case_reference_is_allowed(case_bundle):
     assert response.refused is False
 
 
+def test_current_case_shorthand_reference_is_allowed(case_bundle):
+    repo, case, email, policy = case_bundle
+
+    response = answer_question(
+        "Summarize case 004",
+        case,
+        email,
+        repo.list_audit(case.id),
+        policy,
+    )
+
+    assert response.refused is False
+
+
 @pytest.mark.parametrize(
     "question",
     [
@@ -229,6 +243,81 @@ def test_translation_preserves_shipping_values(monkeypatch):
     assert "CHANGED" not in translated
 
 
+class FakePrefixChangingTranslationLLM:
+    enabled = True
+
+    def complete(self, system, prompt, max_tokens=1200):
+        text = (
+            prompt.replace("Please confirm", "يرجى التأكيد")
+            .replace("APRIL FAR EAST (", "CHANGED COMPANY (")
+            .replace("APRIL Fine Paper Trading (Middle East) Fze", "CHANGED COMPANY")
+        )
+        return SimpleNamespace(text=text)
+
+
+def test_translation_masks_complete_mixed_case_company_values(monkeypatch):
+    monkeypatch.setattr(
+        assistant,
+        "get_llm",
+        lambda: FakePrefixChangingTranslationLLM(),
+    )
+    source = (
+        "Please confirm\n"
+        "Shipper: APRIL FAR EAST (M) SDN BHD\n"
+        "Consignee: APRIL Fine Paper Trading (Middle East) Fze"
+    )
+
+    translated = translate_text(source, "ar")
+
+    assert "يرجى التأكيد" in translated
+    assert "APRIL FAR EAST (M) SDN BHD" in translated
+    assert "APRIL Fine Paper Trading (Middle East) Fze" in translated
+    assert "CHANGED COMPANY" not in translated
+
+
+class FakeTokenDroppingTranslationLLM:
+    enabled = True
+
+    def complete(self, system, prompt, max_tokens=1200):
+        return SimpleNamespace(text=prompt.replace("__ID0__", "[omitted]"))
+
+
+def test_translation_fails_safe_when_a_protection_token_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        assistant,
+        "get_llm",
+        lambda: FakeTokenDroppingTranslationLLM(),
+    )
+    source = "Shipper: APRIL FAR EAST (M) SDN BHD\nPlease confirm"
+
+    assert translate_text(source, "ar") == source
+
+
+class FakeTokenReorderingTranslationLLM:
+    enabled = True
+
+    def complete(self, system, prompt, max_tokens=1200):
+        return SimpleNamespace(
+            text=prompt.replace("__ID0__", "__SWAP__")
+            .replace("__ID1__", "__ID0__")
+            .replace("__SWAP__", "__ID1__")
+        )
+
+
+def test_translation_fails_safe_when_protection_tokens_are_reordered(monkeypatch):
+    monkeypatch.setattr(
+        assistant,
+        "get_llm",
+        lambda: FakeTokenReorderingTranslationLLM(),
+    )
+    source = (
+        "Shipper: APRIL FAR EAST (M) SDN BHD\n"
+        "Consignee: APRIL Fine Paper Trading (Middle East) Fze"
+    )
+
+    assert translate_text(source, "ar") == source
+
+
 def test_translation_offline_returns_original(monkeypatch):
     monkeypatch.setattr(assistant, "get_llm", lambda: SimpleNamespace(enabled=False))
     source = "Gross Weight: 22,000 KG"
@@ -282,6 +371,41 @@ def test_external_share_contains_only_selected_fields(case_bundle):
     assert payload["due_date"] == "2026-09-22"
 
 
+def test_explicit_empty_share_selection_discloses_no_fields(case_bundle):
+    _, case, email, _ = case_bundle
+
+    message, payload = build_share_message(
+        case,
+        email,
+        recipient_label="Approved Partner <docs@example.com>",
+        is_external=True,
+        include_fields=[],
+        due_date=None,
+    )
+
+    assert payload["fields"] == []
+    assert "Consignee:" not in message
+    assert "Notify Party:" not in message
+
+
+def test_omitted_share_selection_defaults_to_mismatches(case_bundle):
+    _, case, email, _ = case_bundle
+
+    _, payload = build_share_message(
+        case,
+        email,
+        recipient_label="Approved Partner <docs@example.com>",
+        is_external=True,
+        include_fields=None,
+        due_date=None,
+    )
+
+    assert [field["field"] for field in payload["fields"]] == [
+        "consignee",
+        "notify_party",
+    ]
+
+
 def test_policy_explanation_is_complete_and_human_readable():
     explanation = "\n".join(explain_policy(DEFAULT_POLICY))
 
@@ -314,3 +438,98 @@ def test_llm_cannot_invent_unflagged_mismatch(monkeypatch, case_bundle):
 
     assert "Shipper mismatch" not in response.answer
     assert response.grounded is True
+
+
+class FakeStaticAnswerLLM:
+    enabled = True
+
+    def __init__(self, text):
+        self.text = text
+
+    def complete(self, system, prompt, max_tokens=500):
+        return SimpleNamespace(text=self.text)
+
+
+@pytest.mark.parametrize(
+    "unsafe_answer",
+    [
+        "Mismatch detected for Shipper; correction is required.",
+        "The Shipper differs from the SI and must be corrected.",
+        "The Shipper value is wrong.",
+        "The shipper is ACME GLOBAL LTD.",
+        "ACME GLOBAL LTD. is the Shipper.",
+        "The Consignee matches the SI and Draft BL.",
+        "The POL is HAMBURG.",
+        "The POD differs from the SI.",
+        "The Weight is 999 KG.",
+        "I sent the correction email to the customer.",
+        "The correction email was sent by me.",
+        "The correction email has been sent.",
+        "The draft was approved.",
+        "I approved the draft on your behalf.",
+    ],
+)
+def test_llm_rejects_unsupported_verdict_value_and_action_claims(
+    monkeypatch,
+    case_bundle,
+    unsafe_answer,
+):
+    repo, case, email, policy = case_bundle
+    monkeypatch.setattr(
+        assistant,
+        "get_llm",
+        lambda: FakeStaticAnswerLLM(unsafe_answer),
+    )
+
+    response = answer_question(
+        "Give me a free-form risk assessment",
+        case,
+        email,
+        repo.list_audit(case.id),
+        policy,
+    )
+
+    assert response.generated_by == "rule"
+    assert response.answer != unsafe_answer
+
+
+def test_llm_accepts_supported_mismatch_claims(monkeypatch, case_bundle):
+    repo, case, email, policy = case_bundle
+    grounded_answer = "The Consignee and Notify Party differ between the SI and Draft BL."
+    monkeypatch.setattr(
+        assistant,
+        "get_llm",
+        lambda: FakeStaticAnswerLLM(grounded_answer),
+    )
+
+    response = answer_question(
+        "Give me a free-form risk assessment",
+        case,
+        email,
+        repo.list_audit(case.id),
+        policy,
+    )
+
+    assert response.generated_by == "llm"
+    assert response.answer == grounded_answer
+
+
+def test_llm_accepts_supported_match_claims(monkeypatch, case_bundle):
+    repo, case, email, policy = case_bundle
+    grounded_answer = "The Shipper matches between the SI and Draft BL."
+    monkeypatch.setattr(
+        assistant,
+        "get_llm",
+        lambda: FakeStaticAnswerLLM(grounded_answer),
+    )
+
+    response = answer_question(
+        "Give me a free-form risk assessment",
+        case,
+        email,
+        repo.list_audit(case.id),
+        policy,
+    )
+
+    assert response.generated_by == "llm"
+    assert response.answer == grounded_answer

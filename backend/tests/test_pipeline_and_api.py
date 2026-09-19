@@ -134,12 +134,38 @@ def test_e2e_mismatch_flow_with_notify_party_and_audit():
     np = client.post(f"/cases/{cid}/notify-party", headers=SUP).json()
     assert np["notify_party"]["match"] is True and np["recipients"]
     assert client.get(f"/cases/{cid}", headers=OPS).json()["status"] == "NOTIFY_PARTY"
-    preview = client.post(f"/cases/{cid}/share", json={"recipient_type": "NOTIFY_PARTY_CONTACT", "recipient_party_id": "p_safqa", "preview_only": True}, headers=SUP).json()
+    preview = client.post(
+        f"/cases/{cid}/share",
+        json={
+            "recipient_type": "NOTIFY_PARTY_CONTACT",
+            "recipient_party_id": "p_safqa",
+            "message": "CUSTOM REVIEW NOTE",
+            "preview_only": True,
+        },
+        headers=SUP,
+    ).json()
     assert preview["requires_confirmation"] is True
     assert [f["field"] for f in preview["payload"]["fields"]] == ["container_count"]  # only the mismatch is shared
     assert "Attached are the SI" not in preview["preview"]  # original email body not leaked
     sent = client.post(f"/cases/{cid}/share/{preview['share']['id']}/confirm", headers=SUP).json()
     assert sent["requires_confirmation"] is False and sent["share"]["status"] == "SENT"
+    assert sent["share"]["id"] == preview["share"]["id"]
+    assert sent["preview"] == preview["preview"]
+    assert sent["payload"] == preview["payload"]
+    assert "CUSTOM REVIEW NOTE" in sent["preview"]
+    shares = client.get(f"/cases/{cid}/audit", headers=SUP).json()["shares"]
+    assert [share["id"] for share in shares].count(preview["share"]["id"]) == 1
+    assert not any(share["status"] == "PENDING_CONFIRMATION" for share in shares)
+    repeated = client.post(
+        f"/cases/{cid}/share/{preview['share']['id']}/confirm",
+        headers=SUP,
+    ).json()
+    assert repeated["share"]["id"] == preview["share"]["id"]
+    audit_after_repeat = client.get(f"/cases/{cid}/audit", headers=SUP).json()
+    assert sum(
+        event["action"] == "NOTIFY_PARTY_SENT"
+        for event in audit_after_repeat["events"]
+    ) == 1
     assert client.get(f"/cases/{cid}", headers=OPS).json()["status"] == "AWAITING_RESPONSE"
 
     # approve draft (supervisor) -> sent (simulated) ; complete
@@ -166,6 +192,35 @@ def test_all_match_gives_no_mismatch_message_and_confirmation_draft():
     assert case["comparison"]["message"] == "No mismatch detected."
     assert case["mismatch_count"] == 0 and case["status"] == "DRAFT_READY"
     assert case["drafts"][0]["draft_type"] == "CONFIRMATION"
+
+
+def test_explicit_empty_external_share_discloses_no_fields():
+    case = _ingest(
+        "share_empty_001",
+        "TO CONFIRM DOCS _ EMPTY DISCLOSURE",
+        "Attached documents are for the explicit-empty disclosure test.",
+        "docs@vitalsolutions.sg",
+        {"share_empty_SI.txt": SI_TXT, "share_empty_BL.txt": BL_TXT},
+    )
+    cid = case["id"]
+
+    preview = client.post(
+        f"/cases/{cid}/share",
+        json={
+            "recipient_type": "NOTIFY_PARTY_CONTACT",
+            "recipient_party_id": "p_safqa",
+            "include_fields": [],
+            "preview_only": True,
+        },
+        headers=SUP,
+    )
+
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["payload"]["fields"] == []
+    assert "Container Count:" not in body["preview"]
+    assert "3 x 40'HC" not in body["preview"]
+    assert "4 x 40'HC" not in body["preview"]
 
 
 def test_missing_bl_waits_for_documents_then_upload_recovers():

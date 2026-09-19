@@ -221,7 +221,19 @@ class CaseService:
                 raise HTTPException(400, detail={"error": "recipient_user_id required for internal recipients", "category": "NOTIFICATION_ERROR"})
             label = f"{u.display_name} <{u.email}>"
 
-        message, payload = build_share_message(case, email, label, is_external, req.include_fields, req.due_date)
+        include_fields = (
+            req.include_fields
+            if "include_fields" in req.model_fields_set
+            else None
+        )
+        message, payload = build_share_message(
+            case,
+            email,
+            label,
+            is_external,
+            include_fields,
+            req.due_date,
+        )
         if req.message:
             message = req.message.strip() + "\n\n" + message
         share = ShareRecord(id=_id("share"), case_id=case.id, shared_by=user.id, recipient_type=req.recipient_type, recipient_user_id=req.recipient_user_id,
@@ -249,9 +261,91 @@ class CaseService:
         share = self.repo.get_share(share_id)
         if not share or share.case_id != case_id:
             raise HTTPException(404, detail={"error": "share not found", "category": "DATABASE_ERROR"})
-        req = ShareRequest(recipient_type=share.recipient_type, recipient_user_id=share.recipient_user_id, recipient_party_id=share.recipient_party_id,
-                           due_date=share.due_date, include_fields=[f["field"] for f in share.payload_preview.get("fields", [])], confirm_external=True)
-        return self.share(case_id, req, user)
+
+        case = self.get(case_id)
+        permission = "notify_external" if share.is_external else "share_internal"
+        if not has_permission(user, permission):
+            self.pipe.audit(
+                case.id,
+                ActorType.USER,
+                user.id,
+                "SHARE_DENIED",
+                after={
+                    "reason": f"missing permission {permission}",
+                    "share_id": share.id,
+                    "recipient_type": share.recipient_type.value,
+                },
+            )
+            raise HTTPException(
+                403,
+                detail={
+                    "error": f"permission '{permission}' required to confirm this share",
+                    "category": "AUTH_ERROR",
+                },
+            )
+
+        if share.is_external:
+            party = self.repo.get_party(share.recipient_party_id or "")
+            if not party or not party.approved:
+                raise HTTPException(
+                    403,
+                    detail={
+                        "error": "external recipient is no longer approved",
+                        "category": "AUTH_ERROR",
+                    },
+                )
+
+        if share.status == "SENT":
+            return {
+                "share": share.model_dump(mode="json"),
+                "requires_confirmation": False,
+                "preview": share.message,
+                "payload": share.payload_preview,
+            }
+        if share.status != "PENDING_CONFIRMATION":
+            raise HTTPException(
+                409,
+                detail={
+                    "error": f"share in status {share.status} cannot be confirmed",
+                    "category": "NOTIFICATION_ERROR",
+                },
+            )
+
+        share.status = "SENT"
+        share.sent_at = datetime.utcnow()
+        self.repo.save_share(share)
+        if share.recipient_user_id and share.recipient_user_id not in case.shared_with:
+            case.shared_with.append(share.recipient_user_id)
+        if share.recipient_party_id and share.recipient_party_id not in case.shared_with:
+            case.shared_with.append(share.recipient_party_id)
+        self.pipe.audit(
+            case.id,
+            ActorType.USER,
+            user.id,
+            "NOTIFY_PARTY_SENT" if share.is_external else "SHARE_SENT",
+            after={
+                "share_id": share.id,
+                "recipient_label": share.recipient_label,
+                "external": share.is_external,
+                "fields": [
+                    field["field"]
+                    for field in share.payload_preview.get("fields", [])
+                ],
+                "due_date": share.due_date,
+            },
+        )
+        self._status(
+            case,
+            CaseStatus.AWAITING_RESPONSE if share.is_external else CaseStatus.ASSIGNED,
+            user,
+        )
+        self.repo.save_case(case)
+        return {
+            "share": share.model_dump(mode="json"),
+            "requires_confirmation": False,
+            "preview": share.message,
+            "payload": share.payload_preview,
+        }
 
     def acknowledge_share(self, share_id: str, user: UserRecord, response: Optional[str]) -> ShareRecord:
         share = self.repo.get_share(share_id)

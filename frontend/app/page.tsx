@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, post, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
+import { api, post, getSession, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
 import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
 
 const STATUSES = ["RECEIVED","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","WAITING_DOCUMENTS","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
@@ -40,11 +40,16 @@ export default function Dashboard() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
+    const canViewAudit = getSession()?.user.permissions.includes("view_audit") ?? false;
     api("/users").then((d) => setUsers(d.users)).catch(() => {});
     api("/dashboard/fields").then((d) => setFields(d.fields)).catch(() => {});
     api<{ items: CaseRow[] }>("/cases?sort=priority&limit=60").then((d) => setAttention(d.items.filter((r) => r.action_required && !["COMPLETED", "NO_ACTION_INFO", "AWAITING_RESPONSE"].includes(r.status)).slice(0, 7))).catch(() => setAttention([]));
     api("/security/queue").then((d) => setSecurity(d.items)).catch(() => setSecurity([]));
-    api("/audit?limit=8").then((d) => setActivity(d.events)).catch(() => setActivity(null)); // hidden for roles without view_audit
+    if (canViewAudit) {
+      api("/audit?limit=8").then((d) => setActivity(d.events)).catch(() => setActivity(null));
+    } else {
+      setActivity(null);
+    }
   }, []);
 
   const applyPreset = (patch: Record<string, string>) => { setF({ ...EMPTY_FILTERS, ...patch }); setPage(0); document.getElementById("case-table")?.scrollIntoView({ behavior: "smooth", block: "start" }); };
