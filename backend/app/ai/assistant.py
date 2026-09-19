@@ -265,6 +265,13 @@ def _llm_answer(question: str, ctx: dict[str, Any]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 LANG_NAMES = {"en": "English", "zh": "Chinese", "ms": "Malay", "id": "Indonesian", "vi": "Vietnamese", "ko": "Korean", "ar": "Arabic", "fr": "French", "es": "Spanish", "de": "German", "ja": "Japanese"}
 _PROTECT = re.compile(r"\b[A-Z]{3,}[A-Z0-9\-]*\d[A-Z0-9\-]*\b|\b\d[\d,\.]*\s?(KG|kg|MT|x\s?\d0'[A-Z]{2})\b|\b5[A-Z]{3}-\d{5}\b")
+_COMPANY_NAME = re.compile(
+    r"\b(?:[A-Z][A-Z0-9&.,'()/-]*\s+){1,8}"
+    r"(?:LTD|LIMITED|LLC|INC|CORP|CORPORATION|SDN\s+BHD|PTE\s+LTD|CO\.,?\s+LTD)\b"
+)
+_PORT_LINE = re.compile(
+    r"(?im)^((?:Port of Loading|Load Port|POL|Port of Discharge|Discharge Port|POD)\s*:\s*)(.+)$"
+)
 
 
 def _target_language(q: str) -> Optional[str]:
@@ -293,12 +300,14 @@ def translate_text(text: str, target: str) -> str:
     llm = get_llm()
     protected: dict[str, str] = {}
 
-    def _mask(m: re.Match) -> str:
+    def _mask_value(value: str) -> str:
         key = f"__ID{len(protected)}__"
-        protected[key] = m.group(0)
+        protected[key] = value
         return key
 
-    masked = _PROTECT.sub(_mask, text)
+    masked = _PORT_LINE.sub(lambda match: match.group(1) + _mask_value(match.group(2)), text)
+    masked = _COMPANY_NAME.sub(lambda match: _mask_value(match.group(0)), masked)
+    masked = _PROTECT.sub(lambda match: _mask_value(match.group(0)), masked)
     if not llm.enabled:
         note = f"[Translation to {LANG_NAMES.get(target, target)} requires LLM_PROVIDER; showing original]\n\n"
         return note + text
