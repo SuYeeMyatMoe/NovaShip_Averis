@@ -334,18 +334,21 @@ def build_share_message(case: CaseRecord, email: EmailMessage, recipient_label: 
         for f in cmp.fields:
             if f.field in chosen:
                 fields.append({"field": f.field, "label": f.label, "result": f.result.value, "si": f.si_original, "bl": f.bl_original})
+    subject = "" if is_external else email.subject
+    summary = "" if is_external else (case.summary.text if case.summary else "")
     payload = {
         "case_id": case.id,
-        "subject": email.subject,
-        "summary": case.summary.text if case.summary else "",
+        "subject": subject,
+        "summary": summary,
         "fields": fields,
         "required_action": case.recommendation.recommended_action if case.recommendation else "",
         "due_date": due_date,
         "recipient": recipient_label,
         "external": is_external,
     }
-    lines = [f"Case {case.id} - {email.subject}", ""]
-    lines.append(payload["summary"])
+    lines = [f"Case {case.id}" + (f" - {subject}" if subject else "")]
+    if summary:
+        lines += ["", summary]
     if fields:
         lines.append("")
         lines.append("Fields requiring attention:")

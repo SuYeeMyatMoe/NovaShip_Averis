@@ -13,9 +13,9 @@ os.environ["VECTOR_STORE"] = "local"
 os.environ["EMBEDDING_PROVIDER"] = "local"
 
 from app.ai import assistant  # noqa: E402
-from app.ai.assistant import answer_question, translate_text  # noqa: E402
+from app.ai.assistant import answer_question, build_share_message, translate_text  # noqa: E402
 from app.agents.rag import LocalStore, RAG, knowledge_chunks  # noqa: E402
-from app.core.policy import merged_policy  # noqa: E402
+from app.core.policy import DEFAULT_POLICY, explain_policy, merged_policy  # noqa: E402
 from app.repositories.memory import MemoryRepository  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -174,3 +174,59 @@ def test_translation_offline_returns_original(monkeypatch):
 
     assert "requires LLM_PROVIDER" in translated
     assert source in translated
+
+
+def test_external_share_contains_only_selected_fields(case_bundle):
+    _, case, email, _ = case_bundle
+
+    message, payload = build_share_message(
+        case,
+        email,
+        recipient_label="Approved Partner <docs@example.com>",
+        is_external=True,
+        include_fields=["consignee"],
+        due_date="2026-09-22",
+    )
+
+    assert [field["field"] for field in payload["fields"]] == ["consignee"]
+    assert email.body not in message
+    assert email.subject not in message
+    assert "Notify Party:" not in message
+    assert payload["subject"] == ""
+    assert payload["summary"] == ""
+    assert payload["external"] is True
+    assert payload["due_date"] == "2026-09-22"
+
+
+def test_policy_explanation_is_complete_and_human_readable():
+    explanation = "\n".join(explain_policy(DEFAULT_POLICY))
+
+    assert "Shipping Instruction" in explanation
+    assert "source of truth" in explanation
+    assert "human confirmation" in explanation
+    assert "SUPERVISOR" in explanation
+    assert "ADMIN" in explanation
+    assert "never auto-sent" in explanation
+
+
+class FakeUnsafeAnswerLLM:
+    enabled = True
+
+    def complete(self, system, prompt, max_tokens=500):
+        return SimpleNamespace(text="Shipper mismatch requires correction.")
+
+
+def test_llm_cannot_invent_unflagged_mismatch(monkeypatch, case_bundle):
+    repo, case, email, policy = case_bundle
+    monkeypatch.setattr(assistant, "get_llm", lambda: FakeUnsafeAnswerLLM())
+
+    response = answer_question(
+        "Give me a free-form risk assessment",
+        case,
+        email,
+        repo.list_audit(case.id),
+        policy,
+    )
+
+    assert "Shipper mismatch" not in response.answer
+    assert response.grounded is True
