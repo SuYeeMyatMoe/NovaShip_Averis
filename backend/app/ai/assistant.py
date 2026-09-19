@@ -32,9 +32,16 @@ from app.core.policy import explain_policy
 BLOCKED_PATTERNS = [
     (r"\b(send|email|forward|dispatch)\b.*\b(now|directly|immediately|without (approval|review))", "I can prepare a draft, but sending requires a human to approve it in the Draft Actions tab."),
     (r"\b(bypass|skip|ignore)\b.*\b(approval|review|policy|check)", "I can't bypass the approval or policy gates. A supervisor can review the policy in Settings > Policies."),
-    (r"\b(other|another|different)\s+case\b|\bcase[_\s-]?\d{2,}\b(?!.*this)", "I can only answer about the current case. Open the other case to ask about it."),
+    (r"\b(approve|authorize|confirm)\b.*\b(for me|on my behalf|instead of me|this|it)\b", "I can't approve or confirm on a person's behalf. An authorised user must perform that action in the case workflow."),
+    (r"\b(other|another|different)\s+case\b", "I can only answer about the current case. Open the other case to ask about it."),
     (r"\b(make up|invent|pretend|assume)\b.*\b(value|mismatch|field)", "I only report values that appear in the documents and the deterministic comparison; I won't invent values."),
 ]
+
+_CASE_ID_RE = re.compile(r"\bcase(?:[_\s-][a-z]+)*[_\s-]?\d+\b", re.I)
+
+
+def _normalise_case_id(value: str) -> str:
+    return re.sub(r"[_\s-]+", "_", value.strip().lower())
 
 
 def _cite(kind: str, ref: str, snippet: str = "") -> dict[str, Any]:
@@ -69,6 +76,16 @@ def build_context(case: CaseRecord, email: EmailMessage, audit: list[AuditEvent]
 def answer_question(question: str, case: CaseRecord, email: EmailMessage, audit: list[AuditEvent], policy: dict[str, Any], language: Optional[str] = None) -> AskResponse:
     q = question.strip()
     ql = q.lower()
+
+    current_case_id = _normalise_case_id(case.id)
+    mentioned_case_ids = {_normalise_case_id(match.group(0)) for match in _CASE_ID_RE.finditer(q)}
+    if any(case_id != current_case_id for case_id in mentioned_case_ids):
+        return AskResponse(
+            answer="I can only answer about the current case. Open the other case to ask about it.",
+            citations=[_cite("policy", "communication")],
+            grounded=True,
+            refused=True,
+        )
 
     for pat, msg in BLOCKED_PATTERNS:
         if re.search(pat, ql):
