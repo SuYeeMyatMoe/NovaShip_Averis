@@ -50,6 +50,7 @@ from app.core.policy import confidence_threshold, merged_policy
 from app.core.recommendation import recommend
 from app.readers.document_reader import read_document
 from app.repositories.base import BaseRepository
+from app.file_security import safe_attachment_name, validate_attachment_count, validate_file_size
 
 VERIFICATION_INTENTS = {Intent.DOCUMENT_VERIFICATION, Intent.DOCUMENT_CORRECTION}
 
@@ -95,9 +96,12 @@ class Pipeline:
         checksum = hashlib.sha256(f"{raw.get('from','')}|{subject}|{body}".encode("utf-8")).hexdigest()
         dup = self.repo.find_email_by_checksum(checksum)
         atts: list[AttachmentMeta] = []
-        for path in raw.get("attachments", []) or []:
-            name = path.split("/")[-1]
+        attachment_paths = raw.get("attachments", []) or []
+        validate_attachment_count(len(attachment_paths))
+        for path in attachment_paths:
+            name = safe_attachment_name(path)
             data = attachment_bytes.get(path, b"")
+            validate_file_size(len(data))
             rr = read_document(name, data)
             pointer = f"{provider}/{eid}/{name}"
             self.repo.save_blob(pointer, data)

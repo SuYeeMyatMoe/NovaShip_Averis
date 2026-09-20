@@ -94,17 +94,17 @@ export default function Dashboard() {
   return (
     <div className="dashboard-type space-y-3">
       {toast && <Toast {...toast} />}
-      <div className="relative overflow-hidden pb-4 pt-2"><img src="/domain-logo.jpe" alt="" aria-hidden className="pointer-events-none absolute right-3 top-0 h-44 w-44 rounded-[2.5rem] object-cover opacity-[0.08] mix-blend-multiply sm:right-12 sm:h-56 sm:w-56" /><div className="relative z-10 text-xs font-bold uppercase tracking-[.18em] text-accent-fg">Dashboard</div><h1 className="hero-dashboard-number relative z-10 mt-2 max-w-5xl text-5xl font-semibold leading-[.98] tracking-[-.055em] text-[#4b2818] sm:text-6xl lg:text-7xl">Shipping operations,<br /><span className="bg-gradient-to-r from-[#e85f0b] via-[#f5832d] to-[#c97532] bg-clip-text text-transparent">under human command.</span></h1><p className="relative z-10 mt-5 text-lg text-[#927968]">Your case control center is ready.</p></div>
+      <div className="relative overflow-hidden pb-4 pt-2"><img src="/domain-logo.jpe" alt="" aria-hidden className="pointer-events-none absolute right-3 top-0 hidden h-44 w-44 rounded-[2.5rem] object-cover opacity-[0.08] mix-blend-multiply sm:block sm:right-12 sm:h-56 sm:w-56" /><div className="relative z-10 text-xs font-bold uppercase tracking-[.18em] text-accent-fg">Dashboard</div><h1 className="hero-dashboard-number relative z-10 mt-2 max-w-5xl text-4xl font-semibold leading-[.98] tracking-[-.055em] text-[#4b2818] sm:text-6xl lg:text-7xl">Shipping operations,<br /><span className="bg-gradient-to-r from-[#e85f0b] via-[#f5832d] to-[#c97532] bg-clip-text text-transparent">under human command.</span></h1><p className="relative z-10 mt-4 text-base text-[#927968] sm:mt-5 sm:text-lg">Your case control center is ready.</p></div>
 
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-[repeat(3,minmax(0,1fr))_minmax(0,1.3fr)]" aria-label="Key metrics">
+      <section className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-[repeat(3,minmax(0,1fr))_minmax(0,1.3fr)]" aria-label="Key metrics">
         {(kpis.length ? kpis : Array.from({ length: 3 }, () => null)).map((k, i) => k ? (
-          <button key={k.label} onClick={() => applyPreset(k.preset)} className={`group min-h-[122px] rounded-2xl border border-orange-100 p-3.5 text-left shadow-card transition duration-200 hover:-translate-y-1 hover:scale-[1.015] hover:shadow-glow active:scale-[0.99] ${i === 0 ? "bg-[radial-gradient(circle_at_85%_85%,rgba(230,104,19,.28),transparent_46%),linear-gradient(135deg,#fffdfb_15%,#f9eee6)]" : i === 1 ? "bg-[radial-gradient(circle_at_82%_16%,rgba(247,139,54,.25),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff2e5)]" : "bg-[radial-gradient(circle_at_80%_85%,rgba(255,154,58,.34),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff4e7)]"}`}>
+          <button key={k.label} onClick={() => applyPreset(k.preset)} className={`group min-h-[112px] rounded-2xl border border-orange-100 p-3 text-left shadow-card transition duration-200 hover:-translate-y-1 hover:scale-[1.015] hover:shadow-glow active:scale-[0.99] sm:min-h-[122px] sm:p-3.5 ${i === 0 ? "bg-[radial-gradient(circle_at_85%_85%,rgba(230,104,19,.28),transparent_46%),linear-gradient(135deg,#fffdfb_15%,#f9eee6)]" : i === 1 ? "bg-[radial-gradient(circle_at_82%_16%,rgba(247,139,54,.25),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff4e7)]" : "bg-[radial-gradient(circle_at_80%_85%,rgba(255,154,58,.34),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff2e5)]"}`}>
             <div className="text-sm font-bold uppercase tracking-[.08em] text-accent">{k.label}</div>
             <div className="mt-2 flex items-end justify-between gap-2"><div className="dashboard-number text-4xl font-semibold tabular-nums leading-none text-[#4b2818]">{k.value}</div>{i < 2 && <Trend direction={i === 0 ? "up" : "down"} />}</div>
             <div className="mt-2 text-xs text-ink-600">{k.label === "Human review" ? <>waiting for a <span className="font-bold text-accent">Human</span> decision</> : k.hint}</div>
           </button>
         ) : <div key={i} className="h-[122px] animate-pulse rounded-2xl bg-ink-100" aria-busy />)}
-        <section className="min-h-[122px] rounded-2xl border border-orange-100 bg-[radial-gradient(circle_at_82%_16%,rgba(247,139,54,.25),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff2e5)] p-3.5 shadow-card transition duration-200 hover:-translate-y-1 hover:scale-[1.015] hover:shadow-glow">
+        <section className="min-h-[112px] rounded-2xl border border-orange-100 bg-[radial-gradient(circle_at_82%_16%,rgba(247,139,54,.25),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff2e5)] p-3 shadow-card transition duration-200 hover:-translate-y-1 hover:scale-[1.015] hover:shadow-glow sm:min-h-[122px] sm:p-3.5">
           <div className="text-sm font-bold uppercase tracking-[.08em] text-accent">All email status</div>
           <div className="mt-2 text-lg font-semibold tracking-tight text-[#4b2818]">{m ? <>{m.incoming_emails} emails, {m.action_required} need a <span className="font-bold text-accent">Human</span></> : apiDown ? "API offline" : "Loading"}</div>
           <div className="mt-3 flex gap-3"><Stat label="Verified" value={verified} /><Stat label="Pipeline" value={m ? `${m.avg_processing_ms} ms` : ""} /><Stat label="Done" value={m?.completed ?? 0} /></div>
@@ -118,8 +118,8 @@ export default function Dashboard() {
             <ul className="space-y-1.5">
               {statusRows.map((r) => (
                 <li key={r.s}>
-                  <button onClick={() => applyPreset({ status: r.s })} className="group flex w-full items-center gap-2 text-xs">
-                    <span className="w-36 shrink-0 truncate text-left text-ink-700 transition group-hover:text-accent">{r.s.replace(/[_-]+/g, " ").toLowerCase()}</span>
+                  <button onClick={() => applyPreset({ status: r.s })} className="group flex min-w-0 w-full items-center gap-1.5 text-[10px] sm:gap-2 sm:text-xs">
+                    <span className="w-24 shrink-0 truncate text-left text-ink-700 transition group-hover:text-accent sm:w-36">{r.s.replace(/[_-]+/g, " ").toLowerCase()}</span>
                     <span className="h-2.5 flex-1 overflow-hidden rounded bg-ink-100"><span className={`block h-full rounded bg-gradient-to-r from-[#f68b3b] to-[#a77a72] ${STATUS_TONE[r.s] === "bg-mismatch" ? "!from-[#cb5a4f] !to-[#8e4039]" : ""}`} style={{ width: `${r.pct}%` }} /></span>
                     <span className="w-8 text-right font-mono font-semibold text-ink-800">{r.n}</span>
                   </button>
@@ -132,10 +132,9 @@ export default function Dashboard() {
         <Panel title="Needs your attention now" link={{ href: "", label: "" }}>
           {attention === null ? <Skeleton n={3} /> : attention.length === 0 ? <div className="py-8 text-center text-sm text-ink-500">Queue is clear.</div> : (
             <ul className="space-y-2">
-              {attention.slice(0, 3).map((r) => <li key={r.id} className="group flex items-center gap-2 rounded-xl border-l-4 border-mismatch bg-white/80 px-3 py-2 shadow-sm transition hover:-translate-y-0.5 hover:bg-[#fff4ed]">
+              {attention.slice(0, 3).map((r) => <li key={r.id} className="group grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-xl border-l-4 border-mismatch bg-white/80 px-3 py-2 shadow-sm transition hover:-translate-y-0.5 hover:bg-[#fff4ed]">
                 <div className="min-w-0 flex-1"><div className="text-[10px] font-bold text-mismatch">{r.priority}</div><Link href={`/cases/${r.id}`} className="block truncate text-xs font-semibold text-ink-900 group-hover:text-accent">{r.subject || "No subject"}</Link></div>
-                {r.mismatch_count > 0 && <Badge className="bg-mismatch text-white">{r.mismatch_count} mismatch</Badge>}
-                <Button kind="primary" onClick={() => router.push(`/cases/${r.id}`)}>Open</Button>
+                <div className="flex shrink-0 items-center gap-1">{r.mismatch_count > 0 && <Badge className="hidden bg-mismatch text-white sm:inline-flex">{r.mismatch_count} mismatch</Badge>}<Button kind="primary" onClick={() => router.push(`/cases/${r.id}`)}>Open</Button></div>
               </li>)}
             </ul>
           )}
@@ -179,7 +178,7 @@ export default function Dashboard() {
       <div id="case-table" className="scroll-mt-16 overflow-hidden rounded-2xl border border-ink-200 bg-white shadow-card">
         <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-3 py-2">
           <span className="mr-1 text-sm font-semibold text-ink-800">All cases</span>
-          <input placeholder="Search case, subject, sender, summary" value={f.q} onChange={(e) => setFilter("q", e.target.value)} className="w-60 rounded-md border border-ink-200 px-2 py-1.5 text-sm" aria-label="Search" />
+          <input placeholder="Search case, subject, sender, summary" value={f.q} onChange={(e) => setFilter("q", e.target.value)} className="w-full rounded-md border border-ink-200 px-2 py-1.5 text-sm sm:w-60" aria-label="Search" />
           <Sel v={f.status} on={(v) => setFilter("status", v)} opts={STATUSES} ph="Status" />
           <Sel v={f.priority} on={(v) => setFilter("priority", v)} opts={["CRITICAL","HIGH","MEDIUM","LOW"]} ph="Priority" />
           <Sel v={f.intent} on={(v) => setFilter("intent", v)} opts={INTENTS} ph="Intent" />
@@ -275,8 +274,8 @@ function Stat({ label, value }: { label: string; value: React.ReactNode }) {
 }
 function Panel({ title, children, link, right, className = "" }: { title: string; children: React.ReactNode; link: { href: string; label: string }; right?: React.ReactNode; className?: string }) {
   return (
-    <section className={`rounded-2xl border border-orange-100 bg-[radial-gradient(circle,rgba(236,122,42,.18)_1px,transparent_1.2px)] bg-[size:14px_14px] p-3.5 shadow-card transition duration-200 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-glow ${className}`}>
-      <header className="mb-3 flex items-center justify-between"><h2 className="text-lg font-bold text-accent-fg [font-family:Georgia,'Times_New_Roman',serif]">{title}</h2>{right}{link.href && link.label && <Link href={link.href} className="text-[11px] font-semibold text-accent hover:underline">{link.label} →</Link>}</header>
+    <section className={`min-w-0 overflow-hidden rounded-2xl border border-orange-100 bg-[radial-gradient(circle,rgba(236,122,42,.18)_1px,transparent_1.2px)] bg-[size:14px_14px] p-3 shadow-card transition duration-200 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-glow sm:p-3.5 ${className}`}>
+      <header className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-bold text-accent-fg [font-family:Georgia,'Times_New_Roman',serif]">{title}</h2>{right}{link.href && link.label && <Link href={link.href} className="text-[11px] font-semibold text-accent hover:underline">{link.label} →</Link>}</header>
       {children}
     </section>
   );

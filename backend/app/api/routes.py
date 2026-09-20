@@ -25,6 +25,7 @@ from app.contracts.schemas import (
     UserRecord,
 )
 from app.core.policy import explain_policy, merged_policy
+from app.file_security import UnsafeUpload, max_file_bytes, resolve_bundle_attachment, safe_filename, validate_attachment_count, validate_file_size
 from app.services.case_service import CaseService
 from app.services.submission import case_to_submission_row
 
@@ -68,18 +69,41 @@ def webhook_email(payload: dict[str, Any], user: UserRecord = Depends(require("i
     Idempotent on message content (duplicate -> returns the existing case)."""
     s = svc()
     atts_in = payload.get("attachments", []) or []
+    try:
+        validate_attachment_count(len(atts_in))
+    except UnsafeUpload as exc:
+        raise HTTPException(400, detail={"error": str(exc), "category": "ATTACHMENT_UPLOAD_ERROR"})
     blobs: dict[str, bytes] = {}
     paths: list[str] = []
     for a in atts_in:
         if isinstance(a, dict):
-            name = a.get("name", "attachment.bin")
+            try:
+                name = safe_filename(a.get("name", "attachment.bin"))
+            except UnsafeUpload as exc:
+                raise HTTPException(400, detail={"error": str(exc), "category": "ATTACHMENT_UPLOAD_ERROR"})
             path = f"attachments/{name}"
-            blobs[path] = base64.b64decode(a.get("content_base64", "")) if a.get("content_base64") else b""
+            encoded = a.get("content_base64", "")
+            if encoded and len(encoded) > ((max_file_bytes() + 2) // 3) * 4 + 4:
+                raise HTTPException(413, detail={"error": "attachment exceeds maximum size", "category": "ATTACHMENT_UPLOAD_ERROR"})
+            try:
+                blobs[path] = base64.b64decode(encoded, validate=True) if encoded else b""
+                validate_file_size(len(blobs[path]))
+            except UnsafeUpload as exc:
+                raise HTTPException(413, detail={"error": str(exc), "category": "ATTACHMENT_UPLOAD_ERROR"})
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(400, detail={"error": "attachment content_base64 is invalid", "category": "ATTACHMENT_UPLOAD_ERROR"}) from exc
             paths.append(path)
         else:
             p = str(a)
-            f = BUNDLE_DIR / p
+            try:
+                f = resolve_bundle_attachment(BUNDLE_DIR, p)
+            except UnsafeUpload as exc:
+                raise HTTPException(400, detail={"error": str(exc), "category": "ATTACHMENT_UPLOAD_ERROR"})
             blobs[p] = f.read_bytes() if f.exists() else b""
+            try:
+                validate_file_size(len(blobs[p]))
+            except UnsafeUpload as exc:
+                raise HTTPException(413, detail={"error": str(exc), "category": "ATTACHMENT_UPLOAD_ERROR"})
             paths.append(p)
     raw = {**payload, "attachments": paths}
     email = s.pipe.ingest_email(raw, blobs, provider=payload.get("provider", "webhook"))
@@ -93,16 +117,20 @@ def webhook_email(payload: dict[str, Any], user: UserRecord = Depends(require("i
 
 @router.post("/connectors/poll")
 def connectors_poll(limit: int = 25, user: UserRecord = Depends(require("ingest"))):
-    """Poll the configured email connector (EMAIL_PROVIDER=graph|bundle) and run the pipeline on new messages. Idempotent."""
+    """Poll the configured email connector (Gmail or bundle) and run the pipeline idempotently."""
     from app.connectors.email_connectors import get_connector
 
     conn = get_connector()
     if conn is None:
-        raise HTTPException(400, detail={"error": "EMAIL_PROVIDER is 'none' - set graph|bundle in .env", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Configure MS_* variables and EMAIL_PROVIDER=graph", "retryable": False})
+        raise HTTPException(400, detail={"error": "EMAIL_PROVIDER is 'none' - set gmail or bundle in .env", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Configure Gmail OAuth variables and EMAIL_PROVIDER=gmail", "retryable": False})
     s = svc()
     created, skipped = [], 0
     try:
         for msg in conn.fetch(limit=limit):
+            incoming_id = msg.raw.get("email_id") or msg.raw.get("id")
+            if incoming_id and s.repo.get_email(str(incoming_id)):
+                skipped += 1
+                continue
             email = s.pipe.ingest_email(msg.raw, msg.blobs, provider=msg.provider, received_at=msg.received_at)
             if email.is_duplicate_of:
                 skipped += 1
@@ -125,7 +153,12 @@ def ingest_bundle(limit: int = 0, user: UserRecord = Depends(require("ingest")))
     n = 0
     for p in files:
         raw = json.loads(p.read_text(encoding="utf-8"))
-        blobs = {a: (BUNDLE_DIR / a).read_bytes() for a in raw.get("attachments", []) if (BUNDLE_DIR / a).exists()}
+        blobs = {}
+        for attachment_path in raw.get("attachments", []):
+            candidate = resolve_bundle_attachment(BUNDLE_DIR, attachment_path)
+            if candidate.exists():
+                validate_file_size(candidate.stat().st_size)
+                blobs[attachment_path] = candidate.read_bytes()
         email = s.pipe.ingest_email(raw, blobs)
         s.pipe.run(email, actor_id=user.id)
         n += 1
@@ -295,7 +328,10 @@ def get_document_raw(case_id: str, attachment_id: str, user: UserRecord = Depend
         raise HTTPException(404, detail={"error": "attachment not found", "category": "ATTACHMENT_DOWNLOAD_ERROR"})
     data = s.repo.get_blob(a.storage_pointer)
     if data is None:
-        f = BUNDLE_DIR / "attachments" / a.file_name
+        try:
+            f = resolve_bundle_attachment(BUNDLE_DIR, f"attachments/{safe_filename(a.file_name)}")
+        except UnsafeUpload as exc:
+            raise HTTPException(400, detail={"error": str(exc), "category": "ATTACHMENT_DOWNLOAD_ERROR"})
         data = f.read_bytes() if f.exists() else b""
     media = {"pdf": "application/pdf", "txt": "text/plain; charset=utf-8", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}.get(a.file_type, "application/octet-stream")
     return Response(content=data, media_type=media, headers={"Content-Disposition": f'inline; filename="{a.file_name}"', "X-Content-Type-Options": "nosniff"})
@@ -339,8 +375,16 @@ async def upload_document(case_id: str, file: UploadFile = File(...), kind: str 
     s = svc()
     case = s.get(case_id)
     e = s.repo.get_email(case.source_email_id)
-    data = await file.read()
-    name = file.filename or "upload.bin"
+    try:
+        validate_attachment_count(len(e.attachments) + 1)
+        name = safe_filename(file.filename or "upload.bin")
+    except UnsafeUpload as exc:
+        raise HTTPException(400, detail={"error": str(exc), "category": "ATTACHMENT_UPLOAD_ERROR"})
+    data = await file.read(max_file_bytes() + 1)
+    try:
+        validate_file_size(len(data))
+    except UnsafeUpload as exc:
+        raise HTTPException(413, detail={"error": str(exc), "category": "ATTACHMENT_UPLOAD_ERROR"})
     if kind in ("SI", "BL") and f"_{kind}" not in name.upper():
         stem, _, ext = name.rpartition(".")
         name = f"{stem or 'upload'}_{kind}.{ext or 'txt'}"
@@ -396,21 +440,21 @@ def assign(case_id: str, req: AssignRequest, user: UserRecord = Depends(require(
 
 
 @router.post("/cases/{case_id}/no-action")
-def no_action(case_id: str, user: UserRecord = Depends(require("view_case"))):
+def no_action(case_id: str, user: UserRecord = Depends(require("mutate_case"))):
     s = svc()
     case = s.mark_no_action(case_id, user)
     return _case_view(case, s.repo.get_email(case.source_email_id))
 
 
 @router.post("/cases/{case_id}/complete")
-def complete(case_id: str, body: dict[str, Any] | None = None, user: UserRecord = Depends(require("view_case"))):
+def complete(case_id: str, body: dict[str, Any] | None = None, user: UserRecord = Depends(require("mutate_case"))):
     s = svc()
     case = s.complete(case_id, user, note=(body or {}).get("note"))
     return _case_view(case, s.repo.get_email(case.source_email_id))
 
 
 @router.post("/cases/{case_id}/request-review")
-def request_review(case_id: str, body: dict[str, Any] | None = None, user: UserRecord = Depends(require("view_case"))):
+def request_review(case_id: str, body: dict[str, Any] | None = None, user: UserRecord = Depends(require("mutate_case"))):
     s = svc()
     case = s.request_review(case_id, user, note=(body or {}).get("note"))
     return _case_view(case, s.repo.get_email(case.source_email_id))

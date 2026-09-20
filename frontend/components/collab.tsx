@@ -59,7 +59,7 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
   const visible = recips.filter((r) => filter === "all" || (filter === "external") === r.external);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[3fr_2fr]">
+    <div className="grid min-w-0 max-w-full gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
       <Card title="Notify Party" right={!started ? <Button kind="primary" disabled={busy} onClick={beginNotify}>Start Notify Party flow</Button> : <Badge className="bg-accent-soft text-accent-fg">flow active</Badge>}>
         <Stepper step={step} />
 
@@ -86,15 +86,15 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
             {(["all", "internal", "external"] as const).map((f) => (
               <button key={f} type="button" onClick={() => setFilter(f)} className={`rounded-full border px-2.5 py-1 font-semibold capitalize transition ${filter === f ? "border-accent bg-accent-bg text-accent-fg" : "border-ink-200 bg-white text-ink-600 hover:border-accent"}`}>{f}</button>
             ))}
-            <span className="ml-auto text-ink-500">{recips.filter((r) => r.allowed).length} of {recips.length} permitted for your role</span>
+            <span className="w-full text-ink-500 sm:ml-auto sm:w-auto">{recips.filter((r) => r.allowed).length} of {recips.length} permitted for your role</span>
           </div>
           <div className="mt-2 max-h-56 space-y-1 overflow-auto scrollbar-thin">
             {visible.map((r) => (
-              <label key={r.id} className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs ${pick === r.id ? "border-accent bg-accent-bg/40" : "border-ink-100"} ${!r.allowed ? "opacity-50" : "cursor-pointer"}`}>
+              <label key={r.id} className={`flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border px-2 py-1.5 text-xs ${pick === r.id ? "border-accent bg-accent-bg/40" : "border-ink-100"} ${!r.allowed ? "opacity-50" : "cursor-pointer"}`}>
                 <input type="radio" name="recip" disabled={!r.allowed} checked={pick === r.id} onChange={() => { setPick(r.id); setPreview(null); }} />
-                <span className="flex-1 truncate">{r.label}</span>
-                <Badge className={r.external ? "bg-accent-soft text-accent-fg" : "bg-ink-100 text-ink-700"}>{r.external ? "External" : "Internal"}</Badge>
-                <span className="text-[10px] text-ink-500">{r.roles.join("/")}</span>
+                <span className="min-w-0 flex-1 truncate">{r.label}</span>
+                <Badge className={`shrink-0 ${r.external ? "bg-accent-soft text-accent-fg" : "bg-ink-100 text-ink-700"}`}>{r.external ? "External" : "Internal"}</Badge>
+                <span className="hidden text-[10px] text-ink-500 sm:inline">{r.roles.join("/")}</span>
                 {!r.allowed && <span className="text-[10px] text-mismatch">not permitted</span>}
               </label>
             ))}
@@ -107,8 +107,8 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
                 <label key={f.field} className="flex items-center gap-1"><input type="checkbox" checked={fields.includes(f.field)} onChange={(e) => { setFields(e.target.checked ? [...fields, f.field] : fields.filter((x) => x !== f.field)); setPreview(null); }} />{f.label}{f.result === "MISMATCH" && <span className="text-mismatch">●</span>}</label>
               ))}
             </div>
-            <textarea value={message} onChange={(e) => { setMessage(e.target.value); setPreview(null); }} placeholder="Optional message to the recipient" className="rounded-md border border-ink-200 p-2 text-sm" rows={2} />
-            <div className="flex items-center gap-2 text-xs"><span className="text-ink-500">Due date</span><input type="date" value={due} onChange={(e) => { setDue(e.target.value); setPreview(null); }} className="rounded-md border border-ink-200 px-2 py-1" /></div>
+            <textarea value={message} onChange={(e) => { setMessage(e.target.value); setPreview(null); }} placeholder="Optional message to the recipient" className="w-full rounded-md border border-ink-200 p-2 text-sm" rows={2} />
+            <div className="flex flex-wrap items-center gap-2 text-xs"><span className="text-ink-500">Due date</span><input type="date" value={due} onChange={(e) => { setDue(e.target.value); setPreview(null); }} className="rounded-md border border-ink-200 px-2 py-1" /></div>
           </div>
         </section>
 
@@ -121,7 +121,7 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
           </div>
           {preview ? (
             <div className="mt-3 space-y-2">
-              <div className="flex items-center gap-2 text-xs"><Badge className={preview.share.is_external ? "bg-accent-soft text-accent-fg" : "bg-ink-100 text-ink-700"}>{preview.share.is_external ? "External" : "Internal"}</Badge><span className="text-ink-500">to {preview.share.recipient_label}</span></div>
+              <div className="flex min-w-0 items-center gap-2 text-xs"><Badge className={`shrink-0 ${preview.share.is_external ? "bg-accent-soft text-accent-fg" : "bg-ink-100 text-ink-700"}`}>{preview.share.is_external ? "External" : "Internal"}</Badge><span className="min-w-0 truncate text-ink-500">to {preview.share.recipient_label}</span></div>
               <pre className="whitespace-pre-wrap rounded-md bg-ink-50 p-3 font-mono text-[11px] text-ink-900">{preview.preview}</pre>
               <StepHeading n={4} title={preview.share.is_external ? "Confirm and send to the external party" : "Send / share internally"} done={false} />
               {preview.share.is_external ? (
@@ -137,29 +137,39 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
 
       <div className="space-y-4">
         <Card title="Assign owner">
-          <div className="flex gap-2">
-            <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)} className="flex-1 rounded-md border border-ink-200 px-2 py-1.5 text-sm">
+              <div className="flex w-full min-w-0 flex-col gap-2 xl:flex-row">
+            <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)} className="w-full min-w-0 flex-1 rounded-md border border-ink-200 px-2 py-1.5 text-sm">
               <option value="">Select internal user…</option>
               {users.map((u) => <option key={u.id} value={u.id}>{u.display_name} · {u.roles.join("/")}</option>)}
             </select>
-            <Button kind="primary" onClick={assign}>Assign / Reassign</Button>
+            <Button kind="primary" className="w-full xl:w-auto" onClick={assign}>Assign / Reassign</Button>
           </div>
           <div className="mt-2 text-xs text-ink-500">Currently: {users.find((u) => u.id === c.assigned_user_id)?.display_name || "unassigned"}{c.assigned_team_id ? ` · team ${c.assigned_team_id}` : ""}</div>
         </Card>
 
         <Card title="Shares & notifications" right={<span className="text-[11px] text-ink-500">audit → status</span>}>
           {shares.length ? (
-            <table className="w-full text-xs">
+            <>
+            <div className="space-y-2 sm:hidden">{shares.map((s) => (
+              <div key={s.id} className="rounded-lg border border-ink-100 p-2 text-xs">
+                <div className="break-words font-semibold text-ink-900">{s.recipient_label}</div>
+                <div className="mt-1 flex flex-wrap items-center gap-1.5"><Badge className={s.is_external ? "bg-accent-soft text-accent-fg" : "bg-ink-100 text-ink-700"}>{s.recipient_type.replace(/_/g, " ")}</Badge><span>{s.status}</span></div>
+                <div className="mt-1 text-[10px] text-ink-500">Sent {fmtDate(s.sent_at)} · {s.acknowledged_at ? `ack ${fmtDate(s.acknowledged_at)}` : s.viewed_at ? `viewed ${fmtDate(s.viewed_at)}` : "not viewed"}</div>
+                {(s.status === "SENT" || s.status === "SIMULATED") && <div className="mt-2"><Button kind="ghost" onClick={() => ack(s.id)}>Mark acknowledged</Button></div>}
+              </div>
+            ))}</div>
+            <div className="hidden max-w-full overflow-x-auto sm:block"><table className="w-full min-w-[640px] text-xs">
               <thead className="text-[11px] uppercase text-ink-500"><tr><th className="py-1 text-left">Recipient</th><th className="text-left">Type</th><th className="text-left">Status</th><th className="text-left">Sent</th><th className="text-left">Viewed / Ack</th><th /></tr></thead>
               <tbody>{shares.map((s) => (
                 <tr key={s.id} className="border-t border-ink-100">
                   <td className="py-1.5 pr-2">{s.recipient_label}<div className="text-[10px] text-ink-500">by {s.shared_by}</div></td>
                   <td><Badge className={s.is_external ? "bg-accent-soft text-accent-fg" : "bg-ink-100 text-ink-700"}>{s.recipient_type.replace(/_/g, " ")}</Badge></td>
                   <td>{s.status}</td><td className="whitespace-nowrap">{fmtDate(s.sent_at)}</td><td className="whitespace-nowrap">{s.acknowledged_at ? `ack ${fmtDate(s.acknowledged_at)}` : s.viewed_at ? fmtDate(s.viewed_at) : "—"}</td>
-                  <td>{s.status === "SENT" && <Button kind="ghost" onClick={() => ack(s.id)}>Mark acknowledged</Button>}</td>
+                  <td>{(s.status === "SENT" || s.status === "SIMULATED") && <Button kind="ghost" onClick={() => ack(s.id)}>Mark acknowledged</Button>}</td>
                 </tr>
               ))}</tbody>
-            </table>
+            </table></div>
+            </>
           ) : <Empty text="Nothing shared yet." />}
         </Card>
       </div>
@@ -171,9 +181,9 @@ function Stepper({ step }: { step: number }) {
   return (
     <ol className="flex flex-wrap items-center gap-1 text-[11px]" aria-label="Notify Party progress">
       {STEPS.map((label, i) => (
-        <li key={label} className="flex items-center gap-1">
+        <li key={label} className="flex min-w-0 items-center gap-1">
           <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${i < step ? "bg-match text-white" : i === step ? "bg-accent text-white" : "bg-ink-100 text-ink-500"}`}>{i < step ? "✓" : i + 1}</span>
-          <span className={i === step ? "font-semibold text-ink-900" : "text-ink-500"}>{label}</span>
+          <span className={`min-w-0 ${i === step ? "font-semibold text-ink-900" : "text-ink-500"}`}>{label}</span>
           {i < STEPS.length - 1 && <span className="mx-1 h-px w-4 bg-ink-200" aria-hidden />}
         </li>
       ))}
@@ -183,9 +193,9 @@ function Stepper({ step }: { step: number }) {
 
 function StepHeading({ n, title, done }: { n: number; title: string; done: boolean }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex min-w-0 items-center gap-2">
       <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${done ? "bg-match text-white" : "bg-accent-bg text-accent-fg"}`}>{done ? "✓" : n}</span>
-      <h4 className="text-sm font-semibold text-ink-800">{title}</h4>
+      <h4 className="min-w-0 break-words text-sm font-semibold text-ink-800">{title}</h4>
     </div>
   );
 }

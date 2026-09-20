@@ -12,13 +12,14 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from typing import Any, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth.accounts import DEMO_PASSWORD, REGISTER_ALLOWED_ROLES, decode_token, hash_password, issue_token, password_problem, verify_password
-from app.auth.rbac import AUTH_MODE, PERMISSIONS, current_user, has_permission
-from app.config import get_repo
+from app.auth.rbac import PERMISSIONS, current_user, has_permission
+from app.config import auth_mode, env_bool, get_repo
 from app.contracts.schemas import ActorType, AuditEvent, Role, UserRecord
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -40,8 +41,7 @@ class RegisterRequest(BaseModel):
 
 def _audit(actor_id: str, action: str, after: Optional[dict[str, Any]] = None) -> None:
     repo = get_repo()
-    n = len(repo.list_audit())
-    repo.append_audit(AuditEvent(event_id=f"evt_auth_{n + 1:06d}_{int(datetime.utcnow().timestamp())}", case_id=None, timestamp=datetime.utcnow(),
+    repo.append_audit(AuditEvent(event_id=f"evt_auth_{uuid4().hex}", case_id=None, timestamp=datetime.utcnow(),
                                  actor_type=ActorType.USER, actor_id=actor_id, action=action, after=after))
 
 
@@ -56,6 +56,8 @@ def _session_payload(user: UserRecord) -> dict[str, Any]:
 
 def seed_demo_credentials() -> int:
     """Give every seeded user without a password the shared demo password (idempotent)."""
+    if auth_mode() != "demo":
+        return 0
     repo = get_repo()
     n = 0
     for u in repo.list_users():
@@ -68,8 +70,10 @@ def seed_demo_credentials() -> int:
 @router.get("/config")
 def auth_config():
     """Register-form options. In demo mode also lists the seeded accounts so the login page can offer one-click fills."""
-    out: dict[str, Any] = {"register_roles": [r for r in REGISTER_ALLOWED_ROLES if r in Role.__members__], "min_password_length": 8, "auth_mode": AUTH_MODE}
-    if AUTH_MODE == "demo":
+    mode = auth_mode()
+    enabled = mode == "demo" or (mode == "local" and env_bool("SELF_REGISTRATION_ENABLED"))
+    out: dict[str, Any] = {"register_roles": [r for r in REGISTER_ALLOWED_ROLES if r == Role.OPERATIONS_STAFF.value] if enabled else [], "min_password_length": 8, "auth_mode": mode, "registration_enabled": enabled}
+    if mode == "demo":
         out["demo_password"] = DEMO_PASSWORD
         out["demo_accounts"] = [{"email": u.email, "display_name": u.display_name, "roles": [r.value for r in u.roles]}
                                 for u in get_repo().list_users() if u.id.startswith(("u_ops_", "u_sup_", "u_admin_", "u_audit_"))]
@@ -78,10 +82,12 @@ def auth_config():
 
 @router.post("/login")
 def login(req: LoginRequest):
+    if auth_mode() == "jwt":
+        raise HTTPException(403, detail={"error": "local login is disabled in AUTH_MODE=jwt", "category": "AUTH_ERROR"})
     repo = get_repo()
     email = req.email.strip().lower()
     user = repo.get_user_by_email(email)
-    if user and repo.get_password_hash(user.id) is None:
+    if auth_mode() == "demo" and user and repo.get_password_hash(user.id) is None:
         seed_demo_credentials()  # first login before startup seeding ran (tests / fresh Supabase)
     if not user or not verify_password(req.password, repo.get_password_hash(user.id)):
         _audit(user.id if user else email, "LOGIN_FAILED", {"email": email})
@@ -92,6 +98,9 @@ def login(req: LoginRequest):
 
 @router.post("/register", status_code=201)
 def register(req: RegisterRequest):
+    mode = auth_mode()
+    if mode == "jwt" or (mode == "local" and not env_bool("SELF_REGISTRATION_ENABLED")):
+        raise HTTPException(403, detail={"error": "self-registration is disabled", "category": "AUTH_ERROR"})
     repo = get_repo()
     email = req.email.strip().lower()
     if not _EMAIL_RE.match(email):
@@ -100,7 +109,7 @@ def register(req: RegisterRequest):
         raise HTTPException(400, detail={"error": problem, "category": "AUTH_ERROR"})
     if repo.get_user_by_email(email):
         raise HTTPException(409, detail={"error": "an account with this email already exists - log in instead", "category": "AUTH_ERROR"})
-    allowed = [r for r in REGISTER_ALLOWED_ROLES if r in Role.__members__]
+    allowed = [r for r in REGISTER_ALLOWED_ROLES if r == Role.OPERATIONS_STAFF.value]
     role_name = (req.role or (allowed[0] if allowed else "OPERATIONS_STAFF")).upper()
     if role_name not in allowed:
         raise HTTPException(403, detail={"error": f"self-registration may only pick {', '.join(allowed) or 'no role'}; ask an ADMIN for other roles", "category": "AUTH_ERROR"})

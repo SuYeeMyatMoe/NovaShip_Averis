@@ -134,18 +134,28 @@ class MemoryRepository(BaseRepository):
         with self._lock:
             self.shares[share.id] = share
 
-    def mark_share_confirming_if_pending(
+    def claim_share_confirmation(
         self,
         share_id: str,
+        expected_status: str,
+        target_status: str,
         started_at: datetime,
+        delivery_provider: Optional[str] = None,
     ) -> Optional[ShareRecord]:
-        """Atomically claim a pending confirmation for recoverable processing."""
+        """Atomically claim a retryable confirmation before any provider call."""
         with self._lock:
             share = self.shares.get(share_id)
-            if not share or share.status != "PENDING_CONFIRMATION":
+            if (
+                expected_status not in {"PENDING_CONFIRMATION", "DELIVERY_FAILED"}
+                or target_status not in {"CONFIRMING", "DELIVERING"}
+                or (target_status == "DELIVERING") != bool(delivery_provider)
+                or not share
+                or share.status != expected_status
+            ):
                 return None
-            share.status = "CONFIRMING"
+            share.status = target_status
             share.confirmation_started_at = started_at
+            share.delivery_provider = delivery_provider
             self.shares[share.id] = share
             return share.model_copy(deep=True)
 
@@ -153,16 +163,46 @@ class MemoryRepository(BaseRepository):
         self,
         share_id: str,
         actor_id: str,
+        final_status: str,
+        delivery_mode: str,
     ) -> Optional[ShareRecord]:
         """Atomically apply case/audit effects and publish a confirmed share."""
         with self._lock:
             share = self.shares.get(share_id)
             if not share:
                 return None
-            if share.status == "SENT":
+            if share.status in {"SENT", "SIMULATED"}:
                 return share.model_copy(deep=True)
-            if share.status != "CONFIRMING":
+            if share.status not in {"CONFIRMING", "DELIVERY_ACCEPTED"}:
                 return None
+            if share.is_external:
+                if final_status not in {"SENT", "SIMULATED"}:
+                    return None
+                if final_status == "SIMULATED" and (
+                    share.status != "CONFIRMING" or delivery_mode != "simulate"
+                ):
+                    return None
+                if final_status == "SENT" and (
+                    share.status != "DELIVERY_ACCEPTED"
+                    or not share.delivery_provider
+                    or delivery_mode != share.delivery_provider
+                    or not share.provider_message_id
+                    or share.delivery_accepted_at is None
+                ):
+                    return None
+                send_action = (
+                    "NOTIFY_PARTY_SENT"
+                    if final_status == "SENT"
+                    else "NOTIFY_PARTY_SIMULATED"
+                )
+            else:
+                if (
+                    share.status != "CONFIRMING"
+                    or final_status != "SENT"
+                    or delivery_mode != "internal"
+                ):
+                    return None
+                send_action = "SHARE_SENT"
 
             case = self.cases.get(share.case_id)
             if not case:
@@ -175,9 +215,6 @@ class MemoryRepository(BaseRepository):
                 CaseStatus.AWAITING_RESPONSE
                 if share.is_external
                 else CaseStatus.ASSIGNED
-            )
-            send_action = (
-                "NOTIFY_PARTY_SENT" if share.is_external else "SHARE_SENT"
             )
             before_status = case.status
 
@@ -199,6 +236,8 @@ class MemoryRepository(BaseRepository):
                                 for field in share.payload_preview.get("fields", [])
                             ],
                             "due_date": share.due_date,
+                            "mode": delivery_mode,
+                            "provider_message_id": share.provider_message_id,
                         },
                     )
                 )
@@ -221,7 +260,7 @@ class MemoryRepository(BaseRepository):
                     case.shared_with.append(recipient_id)
                 case.status = target_status
                 self.save_case(case)
-                share.status = "SENT"
+                share.status = final_status
                 share.sent_at = now
                 self.shares[share.id] = share
                 return share.model_copy(deep=True)
@@ -243,6 +282,9 @@ class MemoryRepository(BaseRepository):
 
     def get_user(self, user_id: str) -> Optional[UserRecord]:
         return self.users.get(user_id)
+
+    def get_user_by_auth_subject(self, subject: str) -> Optional[UserRecord]:
+        return next((u for u in self.users.values() if u.auth_user_id == subject), None)
 
     def save_user(self, user: UserRecord) -> None:
         with self._lock:

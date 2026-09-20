@@ -6,7 +6,9 @@ This report verifies the P2 Case Assistant, AI safety, policy, translation, and 
 
 Verification date: 20 September 2026
 
-Baseline commit: `35ffd71`
+P2 implementation commit: `c011df6`
+
+Integrated with `origin/main` at: `feeeb5b`
 
 Verified branch: `codex/p2-completion`
 
@@ -26,12 +28,12 @@ Verified branch: `codex/p2-completion`
 
 | Check | Command | Result |
 |---|---|---|
-| Full backend suite | `backend/.venv/bin/python -m pytest backend/tests -q` | 141 passed in 9.77 seconds |
-| Focused P2 suite | `backend/.venv/bin/python -m pytest backend/tests/test_assistant.py -q` | 65 passed in 4.61 seconds |
+| Full backend suite | `backend/.venv/bin/python -m pytest backend/tests -q` | 186 passed in 10.25 seconds |
+| Focused P2 suite | `backend/.venv/bin/python -m pytest backend/tests/test_assistant.py -q` | 65 passed in 5.02 seconds |
 | Docker production images | `docker compose build api web` | Passed for both API and web images |
 | API container health | New API image on isolated port, `GET /health` | Passed with `status=ok` and 520 seeded cases |
-| PostgreSQL migration and concurrency | Apply migrations `0001` and `0005` to PostgreSQL 16; finalize two different shares concurrently | Passed; both shares reached `SENT`, both recipients remained in normalized and JSON case data, and send audits were unique |
-| Frontend production build | `npm run build` in `frontend/` | Passed; compilation, lint, and type validation succeeded |
+| PostgreSQL migration and concurrency | Apply migrations `0001` and `0006` to PostgreSQL 16; finalize two different shares concurrently | Passed; both shares reached their requested final state, both recipients remained in normalized and JSON case data, and send audits were unique |
+| Frontend dependency lock + production build | `npm ci --no-audit --no-fund && npm run build` in `frontend/` | Passed with Next.js 16.3.5; the lockfile is synchronized and TypeScript validation succeeded |
 | Bundle execution | `backend/.venv/bin/python backend/scripts/run_bundle.py --out /tmp/novaship-p2-submission.json` | 520 emails processed in 1.9 seconds, approximately 4 ms per email |
 | RAG rebuild | `backend/.venv/bin/python -m app.agents.create_index` from `backend/` | 19 knowledge chunks plus 1,408 case chunks; 1,427 total |
 | Patch integrity | `git diff --check` | Passed |
@@ -60,7 +62,7 @@ The locally generated case-status totals were:
 | Translation protection | Full labelled shipping values are masked; mixed-case/FZE company forms are protected; missing, duplicated, or reordered protection tokens cause a safe return to the original text | Passed |
 | Offline translation | The original text is retained with a clear provider note | Passed |
 | External share preview | Only explicitly selected fields appear; an explicit empty selection remains empty; subject, summary, original email body, and unselected values are absent | Passed |
-| Human approval | Preview and direct sharing use the same recoverable finalizer; interrupted audit or case-save work never exposes `SENT`, retries avoid duplicate events, and concurrent different-share confirmations preserve every recipient | Passed |
+| Human approval | Preview and direct sharing use the same recoverable finalizer; interrupted audit or case-save work never exposes `SENT`, ambiguous Gmail outcomes block automatic resend, retries avoid duplicate events, and concurrent different-share confirmations preserve every recipient | Passed |
 | Policy roles | Supervisor view is read-only; automated RBAC tests enforce Admin-only policy mutation and deny unauthorised external sharing | Passed |
 | Optional LLM post-check | Unsupported mismatch/match verdicts, invented field values, POL/POD/Weight aliases, and active or passive send/approval claims are rejected across multiple phrasings; supported verdicts remain accepted | Passed |
 | Current-case aliases | `case_email_004`, `case-email-004`, and `case 004` resolve to the current case without weakening cross-case isolation | Passed |
@@ -78,7 +80,7 @@ The local UI was exercised with Operations and Admin accounts against the 520-ca
 - `Approve this for me` was refused and cited the communication policy.
 - Policies rendered with disabled controls and save action for Operations; the Admin view exposed the editable controls.
 - The Operations dashboard no longer requests the Admin-only audit endpoint, eliminating the previous `403` console error.
-- The external collaboration preview preserved a custom message, disclosed no comparison values when the user explicitly cleared every field, and required a separate confirmation action. Confirmation finalized the same frozen share record as `SENT`.
+- The external collaboration preview preserved a custom message, disclosed no comparison values when the user explicitly cleared every field, and required a separate confirmation action. Confirmation finalized the same frozen share record as `SIMULATED` in safe demo mode and as `SENT` only after Gmail acceptance in live mode.
 - The internal collaboration preview used the internal label and completed through the same preview/confirmation record without an external-notification claim.
 - The Ask AI screen was checked at 1,440 × 900 and 1,024 × 768.
 - The collaboration flow was checked at 390 × 844; navigation, labelled status text, recipient controls, field selection, preview, and confirmation remained available.
@@ -92,8 +94,8 @@ The local UI was exercised with Operations and Admin accounts against the 520-ca
 - Strengthened translation masking for complete labelled values and additional legal company forms, with fail-safe token integrity and ordering checks.
 - Removed subject and summary data from external share payloads.
 - Made explicit empty field selections disclose no comparison fields.
-- Made preview confirmation finalize the same frozen share record through `PENDING_CONFIRMATION` → `CONFIRMING` → `SENT`, repairing interrupted audit or case-save work on retry without duplicate send events.
-- Added migration `0005_recoverable_share_confirmation.sql` with a tenant-scoped PostgreSQL finalizer that locks the share and case, unions recipients, appends conflict-safe audits, updates the case payload, and publishes `SENT` in one transaction.
+- Made preview confirmation finalize the same frozen share record through recoverable delivery states. Demo mode ends as `SIMULATED`; live Gmail confirmation claims `DELIVERING` atomically before the provider call and records `DELIVERY_ACCEPTED` before the database finalizer publishes `SENT`. Interrupted provider responses become `DELIVERY_UNKNOWN` and require reconciliation instead of automatic resend.
+- Added migration `0006_recoverable_share_confirmation.sql` with a tenant-scoped PostgreSQL finalizer that locks the share and case, unions recipients, appends conflict-safe audits, updates the case payload, and publishes the requested final state in one transaction.
 - Prevented Operations dashboards from calling the Admin-only audit endpoint.
 - Corrected internal collaboration preview language so it does not imply an external notification.
 - Added focused tests for grounded answers, every suggested question, adversarial prompts, RAG isolation, translation, minimum disclosure, exact preview confirmation, policy language, representative acceptance cases, and unsafe LLM output.
@@ -103,7 +105,7 @@ The local UI was exercised with Operations and Admin accounts against the 520-ca
 
 - Real OpenAI/Gemini generation was not exercised because `OPENAI_API_KEY` and `GOOGLE_API_KEY` were unset. Deterministic behavior and LLM safety post-checks were tested with controlled fakes.
 - Real hosted Supabase pgvector was not exercised; the local store verified the case-filter contract. The share-finalization migration and concurrent RPC behavior were verified on PostgreSQL 16, while hosted Supabase deployment remains a P3 responsibility.
-- Real Outlook delivery was not exercised. External delivery remains simulated until P3 enables and validates Microsoft Graph.
+- Real Gmail delivery was not exercised against a live mailbox. The Gmail adapter, recoverable delivery states, and accept-then-timeout ambiguity were verified with controlled provider fakes; production OAuth credentials, Sent-folder reconciliation, and mailbox acceptance remain deployment validation steps.
 - The organiser score cannot be recomputed without the private ground-truth file.
 - `npm install` reports two dependency vulnerabilities in the current Next.js dependency tree (one high and one critical). A controlled framework upgrade should be handled separately because it is outside P2 behavior and may introduce breaking changes.
 

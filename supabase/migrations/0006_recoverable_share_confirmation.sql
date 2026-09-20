@@ -1,12 +1,20 @@
--- Keep confirmation recoverable: SENT is now the final state after all
--- case and audit side effects complete successfully.
+-- Keep share confirmation recoverable across provider delivery and database
+-- finalization. Provider acceptance is persisted before the atomic case/audit
+-- transaction so a retry never sends the same approved message automatically.
 alter table shares
-  add column if not exists confirmation_started_at timestamptz;
+  add column if not exists confirmation_started_at timestamptz,
+  add column if not exists delivery_provider text,
+  add column if not exists provider_message_id text,
+  add column if not exists delivery_accepted_at timestamptz;
+
+drop function if exists complete_share_confirmation(text, text, text);
 
 create or replace function complete_share_confirmation(
   p_share_id text,
   p_tenant_id text,
-  p_actor_id text
+  p_actor_id text,
+  p_final_status text,
+  p_delivery_mode text
 )
 returns setof shares
 language plpgsql
@@ -32,11 +40,34 @@ begin
   if not found then
     return;
   end if;
-  if v_share.status = 'SENT' then
+  if v_share.status in ('SENT', 'SIMULATED') then
     return next v_share;
     return;
   end if;
-  if v_share.status <> 'CONFIRMING' then
+  if v_share.status not in ('CONFIRMING', 'DELIVERY_ACCEPTED') then
+    return;
+  end if;
+  if v_share.is_external then
+    if p_final_status not in ('SENT', 'SIMULATED') then
+      return;
+    end if;
+    if p_final_status = 'SIMULATED'
+       and (v_share.status <> 'CONFIRMING' or p_delivery_mode <> 'simulate') then
+      return;
+    end if;
+    if p_final_status = 'SENT'
+       and (
+         v_share.status <> 'DELIVERY_ACCEPTED'
+         or v_share.delivery_provider is null
+         or p_delivery_mode is distinct from v_share.delivery_provider
+         or v_share.provider_message_id is null
+         or v_share.delivery_accepted_at is null
+       ) then
+      return;
+    end if;
+  elsif v_share.status <> 'CONFIRMING'
+        or p_final_status <> 'SENT'
+        or p_delivery_mode <> 'internal' then
     return;
   end if;
 
@@ -82,7 +113,11 @@ begin
     v_now,
     'USER',
     p_actor_id,
-    case when v_share.is_external then 'NOTIFY_PARTY_SENT' else 'SHARE_SENT' end,
+    case
+      when not v_share.is_external then 'SHARE_SENT'
+      when p_final_status = 'SIMULATED' then 'NOTIFY_PARTY_SIMULATED'
+      else 'NOTIFY_PARTY_SENT'
+    end,
     jsonb_build_object(
       'share_id', v_share.id,
       'recipient_label', v_share.recipient_label,
@@ -91,7 +126,9 @@ begin
         v_share.payload_preview,
         '$.fields[*].field'
       ),
-      'due_date', v_share.due_date
+      'due_date', v_share.due_date,
+      'mode', p_delivery_mode,
+      'provider_message_id', v_share.provider_message_id
     ),
     'v1'
   ) on conflict (event_id) do nothing;
@@ -145,11 +182,11 @@ begin
      and tenant_id = p_tenant_id;
 
   update shares
-     set status = 'SENT',
+     set status = p_final_status,
          sent_at = v_now
    where id = v_share.id
      and tenant_id = p_tenant_id
-     and status = 'CONFIRMING'
+     and status in ('CONFIRMING', 'DELIVERY_ACCEPTED')
   returning * into v_share;
 
   if not found then
@@ -160,7 +197,7 @@ begin
 end;
 $$;
 
-revoke execute on function complete_share_confirmation(text, text, text)
+revoke execute on function complete_share_confirmation(text, text, text, text, text)
   from public, anon, authenticated;
-grant execute on function complete_share_confirmation(text, text, text)
+grant execute on function complete_share_confirmation(text, text, text, text, text)
   to service_role;

@@ -96,11 +96,11 @@ export function PolicyEditor({ base, draft, onChange, disabled }: { base: Record
         const isOpen = openSection === section;
         const keys = [...Object.keys(spec?.fields || {}).filter((k) => k in values), ...Object.keys(values).filter((k) => !(spec?.fields && k in spec.fields))];
         return (
-          <section key={section} className={`rounded-xl border transition ${dirty ? "border-accent-ring bg-accent-bg/20" : "border-ink-200 bg-white"}`}>
-            <button type="button" onClick={() => setOpenSection(isOpen ? "" : section)} aria-expanded={isOpen} className="flex w-full items-center gap-3 px-4 py-3 text-left">
+          <section key={section} className={`rounded-xl border border-orange-200 transition duration-200 hover:-translate-y-0.5 hover:border-orange-400 hover:shadow-md ${dirty ? "bg-accent-bg/20" : "bg-white"}`}>
+            <button type="button" onClick={() => setOpenSection(isOpen ? "" : section)} aria-expanded={isOpen} className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-[#fff8f1]">
               <span className={`text-xs transition ${isOpen ? "rotate-90" : ""}`} aria-hidden>▶</span>
               <span className="flex-1">
-                <span className="text-sm font-semibold text-ink-900">{spec?.title || section}</span>
+                <span className="text-sm font-bold text-accent">{spec?.title || section}</span>
                 {spec?.blurb && <span className="mt-0.5 block text-xs text-ink-500">{spec.blurb}</span>}
               </span>
               {dirty && <Badge className="bg-accent text-white">changed</Badge>}

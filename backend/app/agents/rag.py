@@ -39,41 +39,49 @@ class Chunk:
 # ----------------------------------------------------------------------------- embeddings
 class Embedder:
     def __init__(self) -> None:
+        from app.config import ConfigurationError
+
         self.provider = os.environ.get("EMBEDDING_PROVIDER", "local").lower()
-        self.dims = 256
+        self.dims = int(os.environ.get("EMBEDDING_DIMENSIONS", "256"))
+        if self.dims <= 0:
+            raise ConfigurationError("EMBEDDING_DIMENSIONS must be a positive integer")
         self._impl = None
         try:
-            if self.provider == "gemini" and os.environ.get("GOOGLE_API_KEY"):
+            if self.provider == "gemini":
+                if not os.environ.get("GOOGLE_API_KEY"):
+                    raise ConfigurationError("EMBEDDING_PROVIDER=gemini requires GOOGLE_API_KEY")
                 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
                 self._impl = GoogleGenerativeAIEmbeddings(model=os.environ.get("GEMINI_EMBEDDING_MODEL", "models/text-embedding-004"))
                 self.dims = 768
-            elif self.provider == "openai" and os.environ.get("OPENAI_API_KEY"):
+            elif self.provider == "openai":
+                if not os.environ.get("OPENAI_API_KEY"):
+                    raise ConfigurationError("EMBEDDING_PROVIDER=openai requires OPENAI_API_KEY")
                 from langchain_openai import OpenAIEmbeddings
 
-                self._impl = OpenAIEmbeddings(model=os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"))
-                self.dims = 1536
-            else:
-                self.provider = "local"
-        except Exception:
-            self.provider = "local"
-            self._impl = None
+                self.dims = int(os.environ.get("EMBEDDING_DIMENSIONS", "768"))
+                self._impl = OpenAIEmbeddings(model=os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"), dimensions=self.dims)
+            elif self.provider != "local":
+                raise ConfigurationError("EMBEDDING_PROVIDER must be local, gemini, or openai")
+        except ConfigurationError:
+            raise
+        except Exception as exc:
+            raise ConfigurationError(f"Embedding provider initialization failed ({type(exc).__name__})") from exc
+
+    def _validate(self, vectors: list[list[float]]) -> list[list[float]]:
+        if any(len(vector) != self.dims for vector in vectors):
+            raise ValueError(f"embedding provider returned a vector dimension other than configured {self.dims}")
+        return vectors
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if self._impl is not None:
-            try:
-                return self._impl.embed_documents(texts)
-            except Exception:
-                pass  # fall back to local hashing so the demo never breaks
-        return [self._local(t) for t in texts]
+            return self._validate(self._impl.embed_documents(texts))
+        return self._validate([self._local(t) for t in texts])
 
     def embed_query(self, text: str) -> list[float]:
         if self._impl is not None:
-            try:
-                return self._impl.embed_query(text)
-            except Exception:
-                pass
-        return self._local(text)
+            return self._validate([self._impl.embed_query(text)])[0]
+        return self._validate([self._local(text)])[0]
 
     def _local(self, text: str) -> list[float]:
         """Deterministic bag-of-words hashing embedding (offline fallback, keyword-level recall only)."""
@@ -129,8 +137,10 @@ class SupabaseStore:
 
     def __init__(self) -> None:
         from supabase import create_client
+        from app.config import supabase_server_credentials
 
-        self.client = create_client(os.environ["SUPABASE_URL"], os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ["SUPABASE_ANON_KEY"])
+        url, key = supabase_server_credentials()
+        self.client = create_client(url, key)
         self.tenant = os.environ.get("TENANT_ID", "tenant_april")
 
     def upsert(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
@@ -150,17 +160,21 @@ class SupabaseStore:
 # ----------------------------------------------------------------------------- facade
 class RAG:
     def __init__(self) -> None:
+        from app.config import ConfigurationError
+
         self.embedder = Embedder()
         self.store_kind = os.environ.get("VECTOR_STORE", "local").lower()
-        if self.store_kind == "supabase" and os.environ.get("SUPABASE_URL"):
-            try:
-                self.store: LocalStore | SupabaseStore = SupabaseStore()
-            except Exception:
-                self.store_kind = "local"
-                self.store = LocalStore()
-        else:
-            self.store_kind = "local"
+        if self.store_kind == "supabase":
+            expected_dims = int(os.environ.get("SUPABASE_VECTOR_DIMENSIONS", "768"))
+            if self.embedder.dims != expected_dims:
+                raise ConfigurationError(
+                    f"Supabase vector dimension is {expected_dims}, but {self.embedder.provider} embeddings are configured for {self.embedder.dims}"
+                )
+            self.store: LocalStore | SupabaseStore = SupabaseStore()
+        elif self.store_kind == "local":
             self.store = LocalStore()
+        else:
+            raise ConfigurationError("VECTOR_STORE must be local or supabase")
 
     def index(self, chunks: list[Chunk]) -> int:
         if not chunks:

@@ -11,9 +11,10 @@
 | **Live reload in Docker**              | `.\scripts\dev.ps1 docker-dev` — host edits to `frontend/` and `backend/app/` apply without a rebuild                                                                   |
 | **Hackathon score on the SDOC bundle** | `FINAL SCORE = 1.0000` — stage-1 macro-F1 1.000 · defect-F1 1.000 · end-to-end 46/46 · escalation F1 1.000 (see [Impact Metrics](#10-user-feedback-and-impact-metrics)) |
 | **Sign in (test accounts)**            | Password `novaship123` for every seeded user, e.g. `faraz_ali@aprilasia.com` (Admin) · `hari_mardianto@aprilasia.com` (Supervisor) · `hanna_azhari@aprilasia.com` (Ops) · `sokyong_ooi@aprilasia.com` (Auditor) — full list in [§9.2](#92-sign-in-register-and-test-accounts) |
-| **Tests**                              | `141 passed` — comparator, normalization, extraction, security, RBAC, login/register/logout, trained intent classifier, Notify Party, E2E, LangGraph interrupt/resume, RAG scoping, and P2 assistant safety |
+| **Tests**                              | `186 passed` — comparator, normalization, extraction, security, RBAC, login/register/logout, trained intent classifier, Gmail, Notify Party, E2E, LangGraph interrupt/resume, RAG scoping, and P2 assistant safety |
 | **AI agent docs**                      | [AGENT.md](AGENT.md) — every AI file, LangGraph workflow, RAG, keys, Docker rebuild, test scenarios                                                                     |
 | **Team guides**                        | [P1.md](P1.md) AI & Verification · [P2.md](P2.md) Assistant & Safety · [P3.md](P3.md) Backend/Supabase/Cloud · [P4.md](P4.md) Frontend & E2E                            |
+| **Deploy / handoff**                   | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) · [docs/BACKEND_HANDOFF.md](docs/BACKEND_HANDOFF.md) · [docs/DEMO_AND_LIVE_MODES.md](docs/DEMO_AND_LIVE_MODES.md) |
 
 
 ---
@@ -117,7 +118,7 @@ Plus: versioned admin policies with a form-based editor (sliders, toggles, tag l
 
 ```mermaid
 flowchart TD
-    A[📧 Email arrives<br/>Outlook / Graph · webhook · bundle] --> B[1 · Security precheck<br/>spam · sender · attachment type · duplicates · flood · bypass]
+    A[📧 Email arrives<br/>Gmail API · Graph optional · webhook · bundle] --> B[1 · Security precheck<br/>spam · sender · attachment type · duplicates · flood · bypass]
     B -->|SECURITY_REVIEW| SR[🛑 Quarantine → Supervisor]
     B --> C[2 · Intent classifier<br/>rules → trained text model → optional LLM]
     C -->|INFORMATION_ONLY / SPAM| NA[💤 No Reply Needed<br/>saved · summarised · searchable]
@@ -162,10 +163,10 @@ The extracted **Notify Party is a comparison value only**. Sharing requires an e
 | Document parsing        | `pypdf`, `python-docx`, `openpyxl`, optional `pytesseract` OCR                                                     | text-layer extraction; image-only PDFs flagged, not guessed                                |
 | Database                | **Supabase (PostgreSQL)** — 24 tables, RLS, append-only audit trigger, private `documents` bucket with signed URLs | tenant-aware persistence, auth, storage in one place                                       |
 | Persistence abstraction | `MemoryRepository` (fixtures/tests/offline) ↔ `SupabaseRepository` (prod) selected by `REPO_BACKEND`               | Person 1/2/4 never wait on the database                                                    |
-| Email connector         | Microsoft Graph (Outlook 365) adapter, bundle adapter, Gmail stub                                                  | adapter-based per spec §2                                                                  |
+| Email connector         | Gmail API adapter and bundle adapter                                                                            | adapter-based; Gmail is the sole live mailbox provider                                      |
 | Auth / RBAC             | Built-in login / register / logout (PBKDF2 password hashes, HMAC-signed 12 h session tokens, audited) · Supabase JWT (HS256) · demo `X-User-Id` for tests/curl; 15 permissions × 4 roles | least privilege                                                                            |
 | Deployment              | Docker (multi-stage), `docker-compose.yml`, Vercel for the frontend, any container host for the API                | reproducible local ↔ cloud                                                                 |
-| Testing                 | `pytest` (141 tests) + official SDOC scorer + browser walkthrough                                                  | acceptance tests from the spec are executable                                              |
+| Testing                 | `pytest` (186 tests) + official SDOC scorer + browser walkthrough                                                  | acceptance tests from the spec are executable                                              |
 
 
 
@@ -175,7 +176,7 @@ The extracted **Notify Party is a comparison value only**. Sharing requires an e
 ```mermaid
 flowchart LR
     subgraph Sources
-        O[Outlook / M365<br/>Microsoft Graph] ; W[Webhook<br/>POST /webhooks/email] ; BND[SDOC bundle<br/>fixtures]
+        G[Gmail API<br/>OAuth refresh token] ; W[Webhook<br/>POST /webhooks/email] ; BND[SDOC bundle<br/>fixtures]
     end
     subgraph Vercel
         FE[Next.js dashboard<br/>Inbox · Case · Policies]
@@ -192,7 +193,7 @@ flowchart LR
         ST[(Storage bucket<br/>documents · signed URLs)]
         AU[Auth · JWT]
     end
-    O & W & BND --> API --> PIPE --> AI & CMP --> REPO --> PG & ST
+    G & O & W & BND --> API --> PIPE --> AI & CMP --> REPO --> PG & ST
     FE -->|Bearer session token / Supabase JWT| API
     AU --> FE
 ```
@@ -428,7 +429,7 @@ Never commit `.env` or place service-role/API keys in `NEXT_PUBLIC_*` variables.
 - Supabase persistence: `REPO_BACKEND=supabase`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`.
 - Durable paused agents: `LANGGRAPH_CHECKPOINT=postgres`, `LANGGRAPH_PG_URL`.
 - Production authentication: `AUTH_MODE=jwt`.
-- Outlook ingestion/sending: `EMAIL_PROVIDER=graph`, `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_MAILBOX`; keep `EMAIL_SEND_MODE=simulate` until the approval flow is verified.
+- Gmail ingestion/sending (recommended): set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_ADDRESS`, run `python backend/scripts/gmail_authorize.py` once to save a refresh token locally, then use `EMAIL_PROVIDER=gmail`; keep `EMAIL_SEND_MODE=simulate` until the human-approval flow is verified, and switch it to `gmail` only for the real run.
 - Public URLs: `CORS_ORIGINS` for the API and `NEXT_PUBLIC_API_BASE` when building the frontend.
 
 
@@ -536,7 +537,7 @@ docker compose run --rm --no-deps \
   -e LLM_PROVIDER=none api python scripts/run_bundle.py --out /workspace/submission.json
 ```
 
-Expected test baseline: `141 passed`. The repository records an organiser score of `FINAL SCORE = 1.0000`; reproducing that score requires the private ground-truth file. Keep `LLM_PROVIDER=none` for deterministic, fast, network-free bundle execution.
+Expected test baseline: `186 passed`. The repository records an organiser score of `FINAL SCORE = 1.0000`; reproducing that score requires the private ground-truth file. Keep `LLM_PROVIDER=none` for deterministic, fast, network-free bundle execution.
 
 Troubleshooting:
 
@@ -567,9 +568,9 @@ Sign in as different test accounts ([§9.2](#92-sign-in-register-and-test-accoun
 | Throughput                                                                                                                 | 520 emails in 4.5 s ≈ **9 ms/email** on a laptop, single worker                                                                                                                            |
 | Required acceptance test (SI 3 × 40'HC / 22,000 kg vs BL 4 × 40'HC / 22,000 kg)                                            | `mismatch_count = 1`, `container_count = MISMATCH`, `gross_weight_kg = MATCH`, no other field flagged ✔                                                                                    |
 | All-seven-match message                                                                                                    | exactly `No mismatch detected.` ✔                                                                                                                                                          |
-| Notify Party acceptance test                                                                                               | mismatch → HUMAN_REVIEW → NOTIFY_PARTY → recipient picker → external requires confirmation → preview contains only intended fields → `NOTIFY_PARTY_SENT` audit event → AWAITING_RESPONSE ✔ |
+| Notify Party acceptance test                                                                                               | mismatch → HUMAN_REVIEW → NOTIFY_PARTY → recipient picker → external requires confirmation → preview contains only intended fields → `NOTIFY_PARTY_SIMULATED` in demo or `NOTIFY_PARTY_SENT` after Gmail acceptance → AWAITING_RESPONSE ✔ |
 | Security tests                                                                                                             | ops role cannot notify external party (403 + `SHARE_DENIED` audit) · unapproved party blocked · `.exe` attachment ⇒ SECURITY_REVIEW, never executed · duplicate message ⇒ no second case ✔ |
-| Automated tests                                                                                                            | 141 passed (incl. login/register/logout + session RBAC, trained-classifier holdout/runtime tests, LangGraph pause/resume, security agent routing, RAG case scoping, and P2 assistant safety) |
+| Automated tests                                                                                                            | 186 passed (incl. login/register/logout + session RBAC, fail-closed Gmail delivery state handling, trained-classifier holdout/runtime tests, LangGraph pause/resume, security agent routing, RAG case scoping, and P2 assistant safety) |
 
 
 

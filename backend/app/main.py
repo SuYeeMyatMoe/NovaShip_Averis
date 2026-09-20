@@ -24,19 +24,30 @@ from fastapi.responses import JSONResponse
 from app.api.agent_routes import router as agent_router
 from app.api.auth_routes import router as auth_router, seed_demo_credentials
 from app.api.routes import router
-from app.config import get_repo
+from app.auth.accounts import validate_session_configuration
+from app.config import auth_mode, cors_allowed_origins, get_repo
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format='{"t":"%(asctime)s","lvl":"%(levelname)s","msg":"%(message)s"}')
 log = logging.getLogger("novaship")
+
+# Vercel Services exposes FastAPI under /api. Local Docker / uvicorn keeps the
+# historical root-level API. API_PREFIX can override either behavior.
+_default_prefix = "/api" if os.environ.get("VERCEL") else ""
+API_PREFIX = os.environ.get("API_PREFIX", _default_prefix).strip()
+if API_PREFIX and not API_PREFIX.startswith("/"):
+    API_PREFIX = "/" + API_PREFIX
+API_PREFIX = API_PREFIX.rstrip("/")
 
 app = FastAPI(
     title="NovaShip Averis - AI Shipping Inbox & SI<->BL Verification",
     version="1.0.0",
     description="Ingest -> secure -> classify -> extract -> deterministic seven-field compare -> evidence -> draft -> human approval -> notify -> audit.",
+    docs_url=f"{API_PREFIX}/docs" if API_PREFIX else "/docs",
+    redoc_url=f"{API_PREFIX}/redoc" if API_PREFIX else "/redoc",
+    openapi_url=f"{API_PREFIX}/openapi.json" if API_PREFIX else "/openapi.json",
 )
 
-origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if o.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=origins or ["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=cors_allowed_origins(), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.middleware("http")
@@ -55,11 +66,13 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.on_event("startup")
 def startup() -> None:
+    auth_mode()
+    validate_session_configuration()
     repo = get_repo()
-    seeded = seed_demo_credentials()
+    seeded = seed_demo_credentials() if auth_mode() == "demo" else 0
     log.info("repository=%s cases=%d llm=%s demo_credentials_seeded=%d", type(repo).__name__, len(repo.list_cases()), os.environ.get("LLM_PROVIDER", "none"), seeded)
 
 
-app.include_router(auth_router)
-app.include_router(router)
-app.include_router(agent_router)
+app.include_router(auth_router, prefix=API_PREFIX)
+app.include_router(router, prefix=API_PREFIX)
+app.include_router(agent_router, prefix=API_PREFIX)

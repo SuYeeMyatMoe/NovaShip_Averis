@@ -163,7 +163,7 @@ def test_e2e_mismatch_flow_with_notify_party_and_audit():
     assert [f["field"] for f in preview["payload"]["fields"]] == ["container_count"]  # only the mismatch is shared
     assert "Attached are the SI" not in preview["preview"]  # original email body not leaked
     sent = client.post(f"/cases/{cid}/share/{preview['share']['id']}/confirm", headers=SUP).json()
-    assert sent["requires_confirmation"] is False and sent["share"]["status"] == "SENT"
+    assert sent["requires_confirmation"] is False and sent["share"]["status"] == "SIMULATED"
     assert sent["share"]["id"] == preview["share"]["id"]
     assert sent["preview"] == preview["preview"]
     assert sent["payload"] == preview["payload"]
@@ -178,7 +178,7 @@ def test_e2e_mismatch_flow_with_notify_party_and_audit():
     assert repeated["share"]["id"] == preview["share"]["id"]
     audit_after_repeat = client.get(f"/cases/{cid}/audit", headers=SUP).json()
     assert sum(
-        event["action"] == "NOTIFY_PARTY_SENT"
+        event["action"] == "NOTIFY_PARTY_SIMULATED"
         for event in audit_after_repeat["events"]
     ) == 1
     assert client.get(f"/cases/{cid}", headers=OPS).json()["status"] == "AWAITING_RESPONSE"
@@ -186,7 +186,7 @@ def test_e2e_mismatch_flow_with_notify_party_and_audit():
     # approve draft (supervisor) -> sent (simulated) ; complete
     d = client.get(f"/cases/{cid}", headers=OPS).json()["drafts"][0]
     ok = client.post(f"/cases/{cid}/approve", json={"draft_id": d["id"]}, headers=SUP)
-    assert ok.status_code == 200 and ok.json()["drafts"][0]["status"] == "SENT"
+    assert ok.status_code == 200 and ok.json()["drafts"][0]["status"] == "SIMULATED"
     done = client.post(f"/cases/{cid}/complete", json={"note": "done"}, headers=OPS).json()
     assert done["status"] == "COMPLETED"
 
@@ -194,10 +194,10 @@ def test_e2e_mismatch_flow_with_notify_party_and_audit():
     audit = client.get(f"/cases/{cid}/audit", headers=SUP).json()
     actions = [e["action"] for e in audit["events"]]
     for expected in ["CASE_CREATED", "SECURITY_CLASSIFIED", "INTENT_CLASSIFIED", "ATTACHMENT_CLASSIFIED", "EXTRACTION_COMPLETED", "COMPARISON_STARTED",
-                     "FIELD_RESULT", "MISMATCH_DETECTED", "POLICY_APPLIED", "DRAFT_GENERATED", "NOTIFY_PARTY_STARTED", "SHARE_CREATED", "NOTIFY_PARTY_SENT",
-                     "DRAFT_APPROVED", "NOTIFICATION_SENT", "COMPLETED", "STATUS_CHANGED", "ASK_AI"]:
+                     "FIELD_RESULT", "MISMATCH_DETECTED", "POLICY_APPLIED", "DRAFT_GENERATED", "NOTIFY_PARTY_STARTED", "SHARE_CREATED", "NOTIFY_PARTY_SIMULATED",
+                     "DRAFT_APPROVED", "NOTIFICATION_SIMULATED", "COMPLETED", "STATUS_CHANGED", "ASK_AI"]:
         assert expected in actions, f"missing audit action {expected}"
-    assert len(audit["shares"]) >= 1 and audit["shares"][-1]["status"] == "SENT"
+    assert len(audit["shares"]) >= 1 and audit["shares"][-1]["status"] == "SIMULATED"
 
 
 def test_all_match_gives_no_mismatch_message_and_confirmation_draft():
@@ -276,7 +276,7 @@ def test_concurrent_share_confirmation_emits_one_send_event():
     )
     share_id = preview["share"]["id"]
     before = sum(
-        event.action == "NOTIFY_PARTY_SENT"
+        event.action == "NOTIFY_PARTY_SIMULATED"
         for event in repo.list_audit("case_email_004")
     )
 
@@ -294,12 +294,12 @@ def test_concurrent_share_confirmation_emits_one_send_event():
         )
 
     after = sum(
-        event.action == "NOTIFY_PARTY_SENT"
+        event.action == "NOTIFY_PARTY_SIMULATED"
         for event in repo.list_audit("case_email_004")
     )
     assert after - before == 1
     assert {result["share"]["id"] for result in results} == {share_id}
-    assert {result["share"]["status"] for result in results} == {"SENT"}
+    assert {result["share"]["status"] for result in results} == {"SIMULATED"}
 
 
 def test_share_confirmation_retry_repairs_an_audit_failure():
@@ -313,7 +313,7 @@ def test_share_confirmation_retry_repairs_an_audit_failure():
             return case.model_copy(deep=True) if case else None
 
         def _raise_once_for_send(self, event):
-            if self.fail_send_audit_once and event.action == "NOTIFY_PARTY_SENT":
+            if self.fail_send_audit_once and event.action == "NOTIFY_PARTY_SIMULATED":
                 self.fail_send_audit_once = False
                 raise RuntimeError("transient audit failure")
 
@@ -342,7 +342,7 @@ def test_share_confirmation_retry_repairs_an_audit_failure():
     )
     share_id = preview["share"]["id"]
     before = sum(
-        event.action == "NOTIFY_PARTY_SENT"
+        event.action == "NOTIFY_PARTY_SIMULATED"
         for event in repo.list_audit("case_email_004")
     )
 
@@ -356,10 +356,10 @@ def test_share_confirmation_retry_repairs_an_audit_failure():
     result = service.confirm_share("case_email_004", share_id, supervisor)
 
     after = sum(
-        event.action == "NOTIFY_PARTY_SENT"
+        event.action == "NOTIFY_PARTY_SIMULATED"
         for event in repo.list_audit("case_email_004")
     )
-    assert result["share"]["status"] == "SENT"
+    assert result["share"]["status"] == "SIMULATED"
     assert after - before == 1
     recovered_case = repo.get_case("case_email_004")
     assert recovered_case.status == CaseStatus.AWAITING_RESPONSE
@@ -402,7 +402,7 @@ def test_share_confirmation_retry_repairs_a_case_save_failure_without_duplicate_
     )
     share_id = preview["share"]["id"]
     before_send = sum(
-        event.action == "NOTIFY_PARTY_SENT"
+        event.action == "NOTIFY_PARTY_SIMULATED"
         for event in repo.list_audit("case_email_004")
     )
     before_status = sum(
@@ -422,8 +422,8 @@ def test_share_confirmation_retry_repairs_a_case_save_failure_without_duplicate_
     result = service.confirm_share("case_email_004", share_id, supervisor)
     events = repo.list_audit("case_email_004")
 
-    assert result["share"]["status"] == "SENT"
-    assert sum(event.action == "NOTIFY_PARTY_SENT" for event in events) - before_send == 1
+    assert result["share"]["status"] == "SIMULATED"
+    assert sum(event.action == "NOTIFY_PARTY_SIMULATED" for event in events) - before_send == 1
     assert (
         sum(
             event.action == "STATUS_CHANGED"
@@ -453,7 +453,7 @@ def test_share_confirmation_retry_repairs_a_case_save_failure_without_duplicate_
                 recipient_party_id="p_safqa",
                 confirm_external=True,
             ),
-            "NOTIFY_PARTY_SENT",
+            "NOTIFY_PARTY_SIMULATED",
             "p_safqa",
         ),
     ],
@@ -563,7 +563,39 @@ def test_concurrent_different_share_confirmations_preserve_both_recipients():
     ) >= 2
 
 
-def test_supabase_share_confirmation_uses_conditional_claim_transition():
+def test_memory_finalizer_requires_provider_acceptance_before_sent():
+    repo = MemoryRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share = repo.get_share(preview["share"]["id"])
+    assert share is not None
+    share.status = "CONFIRMING"
+    share.delivery_provider = "gmail"
+    repo.save_share(share)
+
+    finalized = repo.complete_share_confirmation(
+        share.id, supervisor.id, "SENT", "gmail"
+    )
+
+    assert finalized is None
+    assert repo.get_share(share.id).status == "CONFIRMING"
+    assert not any(
+        event.event_id == f"evt_{share.id}_sent" for event in repo.list_audit()
+    )
+
+
+def test_supabase_share_confirmation_uses_conditional_delivery_claim():
     class FakeQuery:
         def __init__(self):
             self.payload = None
@@ -590,7 +622,7 @@ def test_supabase_share_confirmation_uses_conditional_claim_transition():
                         "is_external": True,
                         "message": "Frozen preview",
                         "payload_preview": {"fields": []},
-                        "status": "CONFIRMING",
+                        "status": "DELIVERING",
                         "confirmation_started_at": self.payload[
                             "confirmation_started_at"
                         ],
@@ -612,14 +644,19 @@ def test_supabase_share_confirmation_uses_conditional_claim_transition():
     repo.tenant = "tenant_april"
     transitioned_at = datetime(2026, 9, 20, 12, 0, 0)
 
-    share = repo.mark_share_confirming_if_pending(
-        "share_atomic_1", transitioned_at
+    share = repo.claim_share_confirmation(
+        "share_atomic_1",
+        "PENDING_CONFIRMATION",
+        "DELIVERING",
+        transitioned_at,
+        "gmail",
     )
 
-    assert share is not None and share.status == "CONFIRMING"
+    assert share is not None and share.status == "DELIVERING"
     assert repo.client.query.payload == {
-        "status": "CONFIRMING",
+        "status": "DELIVERING",
         "confirmation_started_at": transitioned_at.isoformat(),
+        "delivery_provider": "gmail",
     }
     assert repo.client.query.filters == [
         ("id", "share_atomic_1"),
@@ -707,7 +744,9 @@ def test_supabase_share_completion_uses_atomic_rpc():
     repo.client = FakeClient()
     repo.tenant = "tenant_april"
 
-    share = repo.complete_share_confirmation("share_atomic_1", "u_sup_1")
+    share = repo.complete_share_confirmation(
+        "share_atomic_1", "u_sup_1", "SENT", "gmail"
+    )
 
     assert share is not None and share.status == "SENT"
     assert repo.client.name == "complete_share_confirmation"
@@ -715,6 +754,8 @@ def test_supabase_share_completion_uses_atomic_rpc():
         "p_share_id": "share_atomic_1",
         "p_tenant_id": "tenant_april",
         "p_actor_id": "u_sup_1",
+        "p_final_status": "SENT",
+        "p_delivery_mode": "gmail",
     }
 
 
@@ -781,6 +822,44 @@ def test_batch_requires_confirmation_for_drafts_and_metrics_work():
 
 
 @pytest.mark.skipif(not (BUNDLE / "inbox").exists(), reason="bundle not present")
+
+def test_connector_poll_reports_replayed_gmail_message_as_duplicate(monkeypatch):
+    from app.connectors import email_connectors
+    from app.connectors.email_connectors import InboundMessage
+
+    message = InboundMessage(
+        raw={
+            "email_id": "poll_replay_gmail_001",
+            "provider_message_id": "gmail-api-message-001",
+            "from": "sender@example.com",
+            "to": ["documentation@example.com"],
+            "cc": [],
+            "subject": "P3 Gmail replay reporting test",
+            "body": "Plain-text connector test message.",
+            "attachments": [],
+        },
+        provider="gmail",
+    )
+
+    class FakeGmailConnector:
+        name = "gmail"
+
+        def fetch(self, since=None, limit=50):
+            return [message]
+
+    monkeypatch.setattr(email_connectors, "get_connector", lambda: FakeGmailConnector())
+
+    first = client.post("/connectors/poll?limit=5", headers=SUP)
+    assert first.status_code == 200, first.text
+    assert first.json()["created"] == ["case_poll_replay_gmail_001"]
+    assert first.json()["duplicates_skipped"] == 0
+
+    second = client.post("/connectors/poll?limit=5", headers=SUP)
+    assert second.status_code == 200, second.text
+    assert second.json()["created"] == []
+    assert second.json()["duplicates_skipped"] == 1
+
+
 def test_bundle_sample_email_004_two_mismatches():
     raw = json.loads((BUNDLE / "inbox" / "email_004.json").read_text(encoding="utf-8"))
     r = client.post("/webhooks/email", json={**raw, "email_id": "bundle_004"}, headers=SUP).json()

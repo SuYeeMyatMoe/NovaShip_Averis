@@ -23,6 +23,18 @@ from app.contracts.schemas import (
 )
 
 
+class StorageError(RuntimeError):
+    """Base class for visible backend storage failures."""
+
+
+class StorageAuthorizationError(StorageError):
+    pass
+
+
+class StorageProviderError(StorageError):
+    pass
+
+
 class BaseRepository(ABC):
     # ---- emails -----------------------------------------------------------
     @abstractmethod
@@ -62,16 +74,21 @@ class BaseRepository(ABC):
     @abstractmethod
     def save_share(self, share: ShareRecord) -> None: ...
     @abstractmethod
-    def mark_share_confirming_if_pending(
+    def claim_share_confirmation(
         self,
         share_id: str,
+        expected_status: str,
+        target_status: str,
         started_at: datetime,
+        delivery_provider: Optional[str] = None,
     ) -> Optional[ShareRecord]: ...
     @abstractmethod
     def complete_share_confirmation(
         self,
         share_id: str,
         actor_id: str,
+        final_status: str,
+        delivery_mode: str,
     ) -> Optional[ShareRecord]: ...
     @abstractmethod
     def list_shares(self, case_id: Optional[str] = None) -> list[ShareRecord]: ...
@@ -101,6 +118,10 @@ class BaseRepository(ABC):
     def get_user_by_email(self, email: str) -> Optional[UserRecord]:
         target = (email or "").strip().lower()
         return next((u for u in self.list_users() if u.email.lower() == target), None)
+
+    def get_user_by_auth_subject(self, subject: str) -> Optional[UserRecord]:
+        """Resolve a Supabase Auth subject to an application identity."""
+        return next((u for u in self.list_users() if u.auth_user_id == subject), None)
 
     def save_user(self, user: UserRecord) -> None:
         raise NotImplementedError("this repository does not support self-registration")

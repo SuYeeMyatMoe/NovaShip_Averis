@@ -28,8 +28,8 @@ export default function SecurityPage() {
       <header className="space-y-4">
         <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
         <div className="max-w-4xl">
-          <h1 className="dashboard-number text-5xl font-bold tracking-[-.04em] text-[#583521] sm:text-6xl">Security agent</h1>
-          <p className="mt-3 max-w-3xl text-lg font-semibold leading-relaxed text-[#7d6251]">Review security signals, suspicious activity, and spam before cases move through the workflow. Automated checks can flag a case, while your team remains in control of the final action.</p>
+          <h1 className="dashboard-number text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl lg:text-6xl">Security agent</h1>
+          <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">Review security signals, suspicious activity, and spam before cases move through the workflow. Automated checks can flag a case, while your team remains in control of the final action.</p>
         </div>
         <div className="inline-flex max-w-full flex-wrap gap-1 rounded-2xl border border-orange-200 bg-[#fffaf5] p-1.5 shadow-sm">
           {["", "SECURITY_REVIEW", "SUSPICIOUS", "SPAM"].map((k) => (
@@ -69,7 +69,7 @@ export default function SecurityPage() {
                 </article>
               ))}
             </div>
-            {totalPages > 1 && <div className="mt-4 flex items-center justify-between gap-3 border-t border-orange-100 pt-4">
+            {totalPages > 1 && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-orange-100 pt-4">
               <span className="text-sm text-ink-500">Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, shown.length)} of {shown.length}</span>
               <div className="flex gap-2">
                 <Button onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1}>Previous</Button>

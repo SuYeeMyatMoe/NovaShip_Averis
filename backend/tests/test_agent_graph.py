@@ -103,3 +103,13 @@ def test_field_stats_and_security_queue_endpoints():
     assert "items" in q
     assert client.get("/audit", headers=OPS).status_code == 403  # ops cannot view global audit
     assert client.get("/audit?limit=5", headers=SUP).status_code == 200
+
+
+def test_local_embedder_can_match_supabase_vector_dimension(monkeypatch):
+    from app.agents.rag import Embedder
+
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "768")
+    embedder = Embedder()
+    assert embedder.dims == 768
+    assert len(embedder.embed_query("shipping instruction")) == 768

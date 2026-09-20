@@ -55,12 +55,12 @@ export default function PoliciesPage() {
       {toast && <Toast {...toast} />}
       <header>
         <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
-        <h1 className="dashboard-number mt-6 text-5xl font-bold tracking-[-.04em] text-[#583521] sm:text-6xl">Policies</h1>
-        <p className="mt-3 max-w-3xl text-lg font-semibold leading-relaxed text-[#7d6251]">Review and tune the versioned operating rules that guide verification, human review, communication and security decisions. Every save creates a new version and an audit event.</p>
+        <h1 className="dashboard-number mt-6 text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl lg:text-6xl">Policies</h1>
+        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">Review and tune the versioned operating rules that guide verification, human review, communication and security decisions. Every save creates a new version and an audit event.</p>
       </header>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <Card className="border-orange-100" title={<span>Edit policy {canEdit ? <Badge className="bg-accent-bg text-accent-fg">ADMIN</Badge> : <Badge className="bg-ink-100 text-ink-600">read-only</Badge>}</span>}
+        <Card className="border-orange-200 transition duration-200 hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-md" title={<span>Edit policy {canEdit ? <Badge className="bg-accent-bg text-accent-fg">ADMIN</Badge> : <Badge className="bg-ink-100 text-ink-600">read-only</Badge>}</span>}
           right={
             <div className="flex items-center gap-1 rounded-lg border border-ink-200 bg-ink-50 p-0.5 text-[11px] font-semibold">
               {(["form", "json"] as const).map((m) => <button key={m} type="button" onClick={() => switchMode(m)} className={`rounded-md px-2.5 py-1 transition ${mode === m ? "bg-white text-ink-900 shadow-sm" : "text-ink-500 hover:text-ink-800"}`}>{m === "form" ? "Form" : "Advanced JSON"}</button>)}
@@ -91,10 +91,10 @@ export default function PoliciesPage() {
         </Card>
 
         <div className="space-y-4">
-          <Card className="border-orange-100" title={<span>Active policy <Badge className="bg-accent-bg text-accent-fg">{data.active.version}</Badge></span>} right={<span className="text-xs text-ink-500">by {data.active.updated_by} · {fmtDate(data.active.updated_at)}</span>}>
+          <Card className="border-orange-200 transition duration-200 hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-md" title={<span>Active policy <Badge className="bg-accent-bg text-accent-fg">{data.active.version}</Badge></span>} right={<span className="text-xs text-ink-500">by {data.active.updated_by} · {fmtDate(data.active.updated_at)}</span>}>
             <ul className="list-disc space-y-1 pl-5 text-sm">{data.explanation.map((l: string, i: number) => <li key={i}>{l}</li>)}</ul>
           </Card>
-          <Card className="border-orange-100" title="Version history (every change is audited)">
+          <Card className="border-orange-200 transition duration-200 hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-md" title="Version history (every change is audited)">
             {data.versions.length ? <table className="w-full text-xs"><thead className="text-[11px] uppercase text-ink-500"><tr><th className="py-1 text-left">Version</th><th className="text-left">By</th><th className="text-left">When</th><th className="text-left">Note</th></tr></thead>
               <tbody>{[...data.versions].reverse().map((v: any) => <tr key={v.id} className="border-t border-ink-100"><td className="py-1 font-mono">{v.version}{v.version === data.active.version && <span className="ml-1 text-[10px] text-match-fg">active</span>}</td><td>{v.updated_by}</td><td className="whitespace-nowrap">{fmtDate(v.updated_at)}</td><td>{v.change_note}</td></tr>)}</tbody></table> : <Empty text="No versions" />}
           </Card>

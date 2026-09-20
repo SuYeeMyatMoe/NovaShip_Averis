@@ -7,6 +7,19 @@ import { AuthError, AuthLayout, Field, PasswordInput, ROLE_LABELS, SubmitButton,
 
 type AuthConfig = { register_roles: string[]; min_password_length: number };
 
+const ROLE_HINTS: Record<string, string> = {
+  OPERATIONS_STAFF: "View, compare, edit drafts, share internally and assign. Supervisor, Admin and Auditor roles are granted by an Admin.",
+  SUPERVISOR: "Approve external sends and notify parties. Policy edits stay with Admins.",
+  ADMIN: "Full desk access, including policy edits.",
+  AUDITOR: "Read-only access to cases and the audit trail.",
+};
+
+function roleHint(role: string, roles: string[]) {
+  if (role && ROLE_HINTS[role]) return ROLE_HINTS[role];
+  if (roles.length > 1) return "Pick the desk role this account should start with. Approving external sends and editing policy stay with Supervisors and Admins.";
+  return ROLE_HINTS.OPERATIONS_STAFF;
+}
+
 export default function RegisterPage() {
   const router = useRouter();
   const [name, setName] = useState("");
@@ -52,16 +65,16 @@ export default function RegisterPage() {
             <PasswordInput value={confirm} onChange={setConfirm} autoComplete="new-password" minLength={cfg.min_password_length} />
           </Field>
         </div>
-        <Field label="Role" hint={cfg.register_roles.length > 1 ? "Approving external sends and editing policy stay with Supervisors and Admins." : "Operations staff can view, compare, edit drafts, share internally and assign. Supervisor, Admin and Auditor roles are granted by an Admin."}>
-          {cfg.register_roles.length > 1 ? (
-            <select value={role} onChange={(e) => setRole(e.target.value)} className={inputClass}>
-              {cfg.register_roles.map((r) => <option key={r} value={r}>{ROLE_LABELS[r] || r}</option>)}
+        <Field label="Role" hint={roleHint(role, cfg.register_roles)}>
+          <div className="relative">
+            <select name="role" value={role} required disabled={!cfg.register_roles.length} onChange={(e) => setRole(e.target.value)} className={`${inputClass} cursor-pointer appearance-none pr-10`}>
+              {cfg.register_roles.length !== 1 && <option value="" disabled>Select a role</option>}
+              {cfg.register_roles.map((r) => <option key={r} value={r}>{ROLE_LABELS[r] || r.replace(/_/g, " ")}</option>)}
             </select>
-          ) : (
-            <div className="inline-flex items-center gap-2 rounded-xl border border-ink-200 bg-ink-50 px-3 py-2 text-sm text-ink-800">
-              <span className="h-2 w-2 rounded-full bg-accent" aria-hidden />{ROLE_LABELS[cfg.register_roles[0]] || cfg.register_roles[0] || "Operations staff"}
-            </div>
-          )}
+            <svg className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+              <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+            </svg>
+          </div>
         </Field>
         <SubmitButton busy={busy}>Create account</SubmitButton>
       </form>

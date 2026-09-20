@@ -63,7 +63,7 @@ Mapping: `Intent → HackathonCategory` via `INTENT_TO_CATEGORY`; `status` = NEE
 | Method | Path | Purpose | Permission |
 |---|---|---|---|
 | POST | `/webhooks/email` | ingest one message (+base64 attachments), idempotent | ingest |
-| POST | `/connectors/poll` | pull from Outlook/Graph or bundle | ingest |
+| POST | `/connectors/poll` | pull from Gmail API or bundle | ingest |
 | POST | `/ingest/bundle?limit=` | import local fixtures | ingest |
 | GET | `/dashboard/metrics` | top metrics | view_case |
 | GET | `/cases?status=&priority=&intent=&mismatch=yes|no&assigned=&shared=&sender=&q=&min_confidence=&security=&date_from=&date_to=&sort=` | list/filter | view_case |

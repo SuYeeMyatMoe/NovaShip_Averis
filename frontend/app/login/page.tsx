@@ -37,7 +37,7 @@ function LoginForm() {
   const fill = (a: DemoAccount) => { setEmail(a.email); setPassword(cfg?.demo_password || ""); setErr(null); };
 
   return (
-    <AuthLayout title="Sign in" subtitle="Use your documentation-desk account. Your role decides what you can approve, share and edit."
+    <AuthLayout title="Sign in" subtitle="" heroMessage={<p className="mt-5 text-3xl font-bold tracking-[-.02em] text-accent sm:text-4xl">Welcome</p>}
       footer={<span>New to the desk? <Link href="/register" className="font-semibold text-accent-fg hover:underline">Create an account</Link></span>}>
       <form onSubmit={submit} className="space-y-4">
         <AuthError msg={err} />

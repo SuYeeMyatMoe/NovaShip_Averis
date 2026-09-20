@@ -6,16 +6,17 @@ import { useState } from "react";
  * Shared chrome for /login and /register: brand panel on the left, form card on the right.
  * Same palette as the dashboard (one orange accent, warm stone neutrals, white surfaces).
  */
-export function AuthLayout({ title, subtitle, children, footer }: { title: string; subtitle: string; children: React.ReactNode; footer?: React.ReactNode }) {
+export function AuthLayout({ title, subtitle, subtitleClassName = "", heroMessage, children, footer }: { title: string; subtitle: string; subtitleClassName?: string; heroMessage?: React.ReactNode; children: React.ReactNode; footer?: React.ReactNode }) {
   return (
-    <div className="dashboard-surface flex min-h-screen flex-col">
-      <div className="mx-auto grid w-full max-w-6xl flex-1 items-center gap-10 px-4 py-10 md:grid-cols-[1.05fr_1fr] md:px-8">
+    <div className="dashboard-surface relative flex min-h-screen flex-col overflow-hidden">
+      <img src="/domain-logo.jpe" alt="" aria-hidden className="pointer-events-none absolute right-4 top-4 h-28 w-28 rounded-3xl object-cover opacity-[0.14] mix-blend-multiply md:right-12 md:top-8 md:h-40 md:w-40" />
+      <div className="relative z-10 mx-auto grid w-full max-w-6xl flex-1 items-center gap-10 px-4 py-10 md:grid-cols-[1.05fr_1fr] md:px-8">
         <section className="hidden md:block">
           <Link href="/login" className="inline-flex items-center" aria-label="NovaShip Averis">
             <img src="/novaship-logo-clean.png" alt="NovaShip" className="h-auto w-[150px]" />
           </Link>
           <h1 className="dashboard-number mt-8 text-5xl font-bold leading-[1.02] tracking-[-.04em] text-[#583521] xl:text-6xl">Every email becomes a case. Every verdict shows its evidence.</h1>
-          <p className="mt-5 max-w-xl text-lg font-semibold leading-relaxed text-[#7d6251]">Seven-field SI ↔ Draft BL verification, decided deterministically. AI drafts, people approve, every action is audited.</p>
+          {heroMessage ?? <p className="mt-5 max-w-xl text-lg font-semibold leading-relaxed text-[#7d6251]">Seven-field SI ↔ Draft BL verification, decided deterministically. AI drafts, people approve, every action is audited.</p>}
           <div className="mt-8 rounded-2xl border border-orange-100 bg-[#fffdf9] p-5 shadow-card">
             <div className="text-sm font-semibold text-ink-800">What a finished check looks like</div>
             <div className="mt-3 space-y-1.5 text-sm">
@@ -32,10 +33,10 @@ export function AuthLayout({ title, subtitle, children, footer }: { title: strin
           <div className="mb-6 flex items-center md:hidden">
             <img src="/novaship-logo-clean.png" alt="NovaShip" className="h-auto w-[122px]" />
           </div>
-          <div className="rounded-2xl border border-orange-100 bg-white/95 p-6 shadow-card sm:p-8">
+          <div className="rounded-2xl border border-orange-100 bg-[radial-gradient(circle,rgba(236,122,42,.18)_1px,transparent_1.2px)] bg-[size:14px_14px] p-6 shadow-card transition duration-200 hover:-translate-y-1 hover:border-orange-300 hover:shadow-lg sm:p-8">
             <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-accent">NovaShip Averis</div>
             <h2 className="dashboard-number mt-1 text-3xl font-bold tracking-[-.03em] text-ink-900">{title}</h2>
-            <p className="mt-1.5 text-sm text-ink-500">{subtitle}</p>
+            {subtitle && <p className={`mt-1.5 text-sm ${subtitleClassName || "text-ink-500"}`}>{subtitle}</p>}
             <div className="mt-6">{children}</div>
           </div>
           {footer && <div className="mt-4 text-center text-sm text-ink-600">{footer}</div>}
