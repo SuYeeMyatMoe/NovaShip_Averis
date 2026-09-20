@@ -66,6 +66,7 @@ class SupabaseRepository(BaseRepository):
         self._emails: Optional[list[EmailMessage]] = None
         self._emails_by_id: dict[str, EmailMessage] = {}
         self._users: Optional[list[UserRecord]] = None
+        self._audit_recent: Optional[list[AuditEvent]] = None
         self._revoked_sids: set[str] = set()
         self._live_sids: set[str] = set()
 
@@ -290,6 +291,8 @@ class SupabaseRepository(BaseRepository):
     # ---- audit / errors / shares -----------------------------------------
     def append_audit(self, event: AuditEvent) -> None:
         self._t("audit_events").insert({**_j(event), "tenant_id": self.tenant}).execute()
+        with self._lock:
+            self._audit_recent = None
 
     def append_audit_once(self, event: AuditEvent) -> bool:
         res = (
@@ -301,6 +304,8 @@ class SupabaseRepository(BaseRepository):
             )
             .execute()
         )
+        with self._lock:
+            self._audit_recent = None
         return bool(res.data)
 
     def list_audit(self, case_id: Optional[str] = None) -> list[AuditEvent]:
@@ -308,10 +313,15 @@ class SupabaseRepository(BaseRepository):
         if case_id:
             rows = q.eq("case_id", case_id).order("timestamp").limit(500).execute().data
             return [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in rows]
+        with self._lock:
+            if self._audit_recent is not None:
+                return list(self._audit_recent)
         rows = q.order("timestamp", desc=True).limit(500).execute().data
         events = [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in rows]
         events.reverse()
-        return events
+        with self._lock:
+            self._audit_recent = events
+            return list(self._audit_recent)
 
     def save_error(self, err: ProcessingError) -> None:
         self._t("processing_errors").upsert({**_j(err), "tenant_id": self.tenant}).execute()

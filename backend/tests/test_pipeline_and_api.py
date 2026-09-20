@@ -935,3 +935,28 @@ def test_supervisor_notifications_include_human_needed_cases():
     assert desk.status_code == 200 and any(r["id"] == cid for r in desk.json()["items"])
     ops_notes = client.get("/me/notifications", headers=OPS).json()["items"]
     assert cid not in {n["case_id"] for n in ops_notes}
+
+
+def test_inbox_bootstrap_and_case_payload_skips_attachment_text():
+    case = _ingest(
+        "perf_boot_001",
+        "TO CONFIRM DOCS _ PERF BOOT _ CALLAO_PERU _ MOORIM SP CO., LTD _ MEDUUD104332",
+        "Hi,\n\nAttached are the SI and draft BL. Please check the details and confirm.",
+        "aziztz@safqa.co.ke",
+        {"perf_boot_SI.txt": SI_TXT, "perf_boot_BL.txt": BL_TXT},
+    )
+    boot = client.get("/dashboard/bootstrap", headers=SUP)
+    assert boot.status_code == 200, boot.text
+    body = boot.json()
+    assert body["metrics"]["incoming_emails"] >= 1
+    assert body["fields"] and body["users"]
+    assert isinstance(body["attention"], list)
+    health = client.get("/health").json()
+    assert health["status"] == "ok" and "cases" in health
+    view = client.get(f"/cases/{case['id']}", headers=SUP).json()
+    assert view["email"]["attachments"]
+    for attachment in view["email"]["attachments"]:
+        assert attachment.get("raw_text") is None
+    doc_id = view.get("si_document_id") or view["email"]["attachments"][0]["id"]
+    doc = client.get(f"/cases/{case['id']}/documents/{doc_id}", headers=SUP).json()
+    assert doc.get("raw_text")

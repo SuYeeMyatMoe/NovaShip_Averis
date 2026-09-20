@@ -284,7 +284,6 @@ def dashboard_metrics(user: UserRecord = Depends(require("view_case"))):
 @router.get("/dashboard/bootstrap")
 def dashboard_bootstrap(user: UserRecord = Depends(require("view_case"))):
     """One payload for the inbox widgets so the page does not wait on 6 separate list scans."""
-    from app.auth.rbac import has_permission
     from app.api.agent_routes import _field_stats, _security_rows
 
     repo = get_repo()
@@ -303,7 +302,7 @@ def dashboard_bootstrap(user: UserRecord = Depends(require("view_case"))):
         "metrics": _dashboard_metrics(cases, len(emails)),
         "fields": _field_stats(cases),
         "attention": attention[:7],
-        "security": _security_rows(cases, emails),
+        "security": [{"outcome": row["outcome"]} for row in _security_rows(cases, emails)],
         "activity": activity,
         "users": [u.model_dump(mode="json") for u in repo.list_users()],
     }

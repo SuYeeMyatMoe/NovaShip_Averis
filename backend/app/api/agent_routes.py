@@ -9,7 +9,7 @@ from app.agents.graph import get_agent
 from app.agents.rag import case_chunks, get_rag, knowledge_chunks
 from app.auth.rbac import require
 from app.config import get_repo
-from app.contracts.schemas import FIELD_LABELS, SEVEN_FIELDS, CaseStatus, UserRecord
+from app.contracts.schemas import FIELD_LABELS, SEVEN_FIELDS, UserRecord
 
 router = APIRouter()
 
