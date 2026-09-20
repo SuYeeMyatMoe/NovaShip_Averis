@@ -69,8 +69,11 @@ def startup() -> None:
     auth_mode()
     validate_session_configuration()
     repo = get_repo()
+    n_cases = len(repo.list_cases())
+    n_emails = len(repo.list_emails())
+    repo.list_users()
     seeded = seed_demo_credentials() if auth_mode() == "demo" else 0
-    log.info("repository=%s cases=%d llm=%s demo_credentials_seeded=%d", type(repo).__name__, len(repo.list_cases()), os.environ.get("LLM_PROVIDER", "none"), seeded)
+    log.info("repository=%s cases=%d emails=%d llm=%s demo_credentials_seeded=%d", type(repo).__name__, n_cases, n_emails, os.environ.get("LLM_PROVIDER", "none"), seeded)
 
 
 app.include_router(auth_router, prefix=API_PREFIX)

@@ -110,6 +110,14 @@ LLM_PROVIDER=openai
 OPENAI_API_KEY=<server secret>
 ```
 
+or
+
+```text
+LLM_PROVIDER=gemini
+GOOGLE_API_KEY=<server secret>
+GEMINI_CHAT_MODEL=gemini-2.0-flash
+```
+
 The seven-field verdict remains deterministic regardless of LLM choice.
 
 ### Embeddings

@@ -91,7 +91,12 @@ def login(req: LoginRequest):
         seed_demo_credentials()  # first login before startup seeding ran (tests / fresh Supabase)
     if not user or not verify_password(req.password, repo.get_password_hash(user.id)):
         _audit(user.id if user else email, "LOGIN_FAILED", {"email": email})
-        raise HTTPException(401, detail={"error": "invalid email or password", "category": "AUTH_ERROR"})
+        from app.ai.operator_behaviour import login_failed_warning
+
+        warn = login_failed_warning(repo, email)
+        if warn:
+            _audit(user.id if user else email, "UNUSUAL_OPERATOR_BEHAVIOUR", {"signal": warn.signal, "evidence": warn.evidence})
+        raise HTTPException(401, detail={"error": "invalid email or password", "category": "AUTH_ERROR", "operator_warning": bool(warn)})
     _audit(user.id, "LOGIN", {"email": email, "roles": [r.value for r in user.roles]})
     return _session_payload(user)
 

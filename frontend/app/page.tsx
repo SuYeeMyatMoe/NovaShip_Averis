@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, post, getSession, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
+import { api, post, getSession, ApiError, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
 import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
 
 const STATUSES = ["RECEIVED","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","WAITING_DOCUMENTS","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
@@ -37,23 +37,26 @@ export default function Dashboard() {
   const load = useCallback(() => {
     const qs = new URLSearchParams({ limit: String(limit), offset: String(page * limit) });
     Object.entries(f).forEach(([k, v]) => v && qs.set(k, v));
-    api<{ total: number; items: CaseRow[] }>(`/cases?${qs}`).then((d) => { setRows(d.items); setTotal(d.total); setApiDown(false); }).catch((e) => { setRows([]); setApiDown(true); say(e.message, "err"); });
-    api<Metrics>("/dashboard/metrics").then(setMetrics).catch(() => {});
+    api<{ total: number; items: CaseRow[] }>(`/cases?${qs}`).then((d) => { setRows(d.items); setTotal(d.total); setApiDown(false); }).catch((e) => { setRows([]); setApiDown(!(e instanceof ApiError)); say(e.message, "err"); });
   }, [f, page]);
 
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => {
-    const canViewAudit = getSession()?.user.permissions.includes("view_audit") ?? false;
-    api("/users").then((d) => setUsers(d.users)).catch(() => {});
-    api("/dashboard/fields").then((d) => setFields(d.fields)).catch(() => {});
-    api<{ items: CaseRow[] }>("/cases?sort=priority&limit=60").then((d) => setAttention(d.items.filter((r) => r.action_required && !["COMPLETED", "NO_ACTION_INFO", "AWAITING_RESPONSE"].includes(r.status)).slice(0, 7))).catch(() => setAttention([]));
-    api("/security/queue").then((d) => setSecurity(d.items)).catch(() => setSecurity([]));
-    if (canViewAudit) {
-      api("/audit?limit=8").then((d) => setActivity(d.events)).catch(() => setActivity(null));
-    } else {
-      setActivity(null);
-    }
+  const loadWidgets = useCallback(() => {
+    api<{ metrics: Metrics; fields: any[]; attention: CaseRow[]; security: any[]; activity: any[] | null; users: any[] }>("/dashboard/bootstrap")
+      .then((d) => {
+        setMetrics(d.metrics);
+        setFields(d.fields || []);
+        setAttention(d.attention || []);
+        setSecurity(d.security || []);
+        setActivity(d.activity);
+        setUsers(d.users || []);
+      })
+      .catch(() => {
+        api<Metrics>("/dashboard/metrics").then(setMetrics).catch(() => {});
+      });
   }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadWidgets(); }, [loadWidgets]);
 
   const applyPreset = (patch: Record<string, string>) => { setF({ ...EMPTY_FILTERS, ...patch }); setPage(0); document.getElementById("case-table")?.scrollIntoView({ behavior: "smooth", block: "start" }); };
   const setFilter = (k: string, v: string) => { setF((p) => ({ ...p, [k]: v })); setPage(0); };
@@ -65,11 +68,20 @@ export default function Dashboard() {
       const r = await post("/cases/batch", { action, case_ids: [...sel], params, confirm });
       if (r.requires_confirmation) { if (window.confirm(`${r.note}\n\nProceed with '${action}' on ${r.count} cases?`)) return batch(action, params, true); return; }
       if (action === "export" && r.csv) { const blob = new Blob([r.csv], { type: "text/csv" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "cases.csv"; a.click(); }
+      if (r.xlsx_base64) {
+        const bin = atob(r.xlsx_base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+        a.download = r.filename || "cases.xlsx";
+        a.click();
+      }
       const ok = Object.values(r.results as Record<string, any>).filter((x: any) => x.ok).length;
-      say(`${action}: ${ok}/${sel.size} succeeded`); setSel(new Set()); load();
+      say(`${action}: ${ok}/${sel.size} succeeded`); setSel(new Set()); load(); loadWidgets();
     } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); }
   };
-  const quick = async (id: string, path: string, body?: any) => { try { await post(`/cases/${id}${path}`, body); say("Done"); load(); } catch (e: any) { say(e.message, "err"); } };
+  const quick = async (id: string, path: string, body?: any) => { try { await post(`/cases/${id}${path}`, body); say("Done"); load(); loadWidgets(); } catch (e: any) { say(e.message, "err"); } };
 
   const fetchInbox = async () => {
     setFetching(true);
@@ -78,6 +90,7 @@ export default function Dashboard() {
       const n = r.created?.length || 0;
       say(n ? `Fetched ${n} new case(s) from ${r.connector || "Gmail"} · skipped ${r.duplicates_skipped || 0} duplicate(s)` : `No new mail (${r.duplicates_skipped || 0} already ingested)`);
       load();
+      loadWidgets();
     } catch (e: any) { say(e.message, "err"); }
     finally { setFetching(false); }
   };
@@ -222,6 +235,7 @@ export default function Dashboard() {
             <Button disabled={busy} onClick={() => batch("draft")}>Prepare drafts</Button>
             <Button disabled={busy} onClick={() => batch("request_review")}>Request review</Button>
             <Button disabled={busy} onClick={() => batch("export")}>Export CSV</Button>
+            <Button disabled={busy} onClick={() => batch("export_xlsx")}>Export Excel</Button>
             <Button disabled={busy} kind="danger" onClick={() => batch("archive")}>Archive</Button>
             <span className="text-ink-500">External sending is never batched.</span>
           </div>

@@ -68,17 +68,67 @@ def _notification_reason(case, user_id: str) -> str:
     return " · ".join(parts)
 
 
+def _email_view(email) -> dict[str, Any] | None:
+    if not email:
+        return None
+    d = email.model_dump(mode="json")
+    for attachment in d.get("attachments") or []:
+        attachment["raw_text"] = None
+    return d
+
+
 def _case_view(case, email) -> dict[str, Any]:
     d = case.model_dump(mode="json")
-    d["email"] = email.model_dump(mode="json") if email else None
+    d["email"] = _email_view(email)
     return d
+
+
+def _case_row(c, e) -> dict[str, Any]:
+    return {
+        "id": c.id, "email_id": c.source_email_id, "subject": e.subject if e else "", "sender": e.sender if e else "", "received_at": e.received_at.isoformat() if e else None,
+        "intent": c.intent.value, "category": c.hackathon_category.value, "security": c.security.outcome.value, "action_required": c.action_required,
+        "priority": c.priority.value, "si_available": c.si_available, "bl_available": c.bl_available, "attachments": len(e.attachments) if e else 0,
+        "mismatch_count": c.mismatch_count, "comparison_status": c.comparison_status.value if c.comparison_status else None, "review_reason": c.review_reason.value if c.review_reason else None,
+        "confidence": c.confidence, "assigned_user_id": c.assigned_user_id, "shared_with": c.shared_with, "status": c.status.value, "updated_at": c.updated_at.isoformat(),
+        "summary": c.summary.text if c.summary else "", "errors": len([x for x in c.errors if not x.resolved]), "drafts": len(c.drafts),
+    }
+
+
+def _dashboard_metrics(cases, n_emails: int) -> dict[str, Any]:
+    m = {
+        "incoming_emails": n_emails,
+        "action_required": sum(1 for c in cases if c.action_required and c.status != CaseStatus.COMPLETED),
+        "no_action_required": sum(1 for c in cases if not c.action_required),
+        "document_verification_cases": sum(1 for c in cases if c.hackathon_category.value == "BL_COMPARISON"),
+        "mismatches_detected": sum(1 for c in cases if c.mismatch_count > 0),
+        "no_mismatch_cases": sum(1 for c in cases if c.comparison and c.comparison.comparison_status.value == "PASSED"),
+        "waiting_for_documents": sum(1 for c in cases if c.status == CaseStatus.WAITING_DOCUMENTS),
+        "human_review": sum(1 for c in cases if c.status == CaseStatus.HUMAN_REVIEW),
+        "notify_party": sum(1 for c in cases if c.status in (CaseStatus.NOTIFY_PARTY, CaseStatus.AWAITING_RESPONSE)),
+        "processing_errors": sum(len([e for e in c.errors if not e.resolved]) for c in cases),
+        "security_flagged": sum(1 for c in cases if c.security.outcome.value != "SAFE"),
+        "completed": sum(1 for c in cases if c.status == CaseStatus.COMPLETED),
+        "avg_processing_ms": round(sum(c.processing_ms for c in cases) / len(cases), 1) if cases else 0,
+        "by_status": {},
+        "by_intent": {},
+        "by_priority": {},
+    }
+    for c in cases:
+        m["by_status"][c.status.value] = m["by_status"].get(c.status.value, 0) + 1
+        m["by_intent"][c.intent.value] = m["by_intent"].get(c.intent.value, 0) + 1
+        m["by_priority"][c.priority.value] = m["by_priority"].get(c.priority.value, 0) + 1
+    return m
 
 
 # ---------------------------------------------------------------- health
 @router.get("/health")
 def health():
     repo = get_repo()
-    return {"status": "ok", "backend": type(repo).__name__, "cases": len(repo.list_cases()), "emails": len(repo.list_emails()), "time": datetime.utcnow().isoformat()}
+    counts = repo.cached_counts() if hasattr(repo, "cached_counts") else {
+        "cases": len(repo.list_cases()),
+        "emails": len(repo.list_emails()),
+    }
+    return {"status": "ok", "backend": type(repo).__name__, **counts, "time": datetime.utcnow().isoformat()}
 
 
 @router.get("/me")
@@ -228,30 +278,35 @@ def ingest_bundle(limit: int = 0, user: UserRecord = Depends(require("ingest")))
 @router.get("/dashboard/metrics")
 def dashboard_metrics(user: UserRecord = Depends(require("view_case"))):
     repo = get_repo()
+    return _dashboard_metrics(repo.list_cases(), len(repo.list_emails()))
+
+
+@router.get("/dashboard/bootstrap")
+def dashboard_bootstrap(user: UserRecord = Depends(require("view_case"))):
+    """One payload for the inbox widgets so the page does not wait on 6 separate list scans."""
+    from app.auth.rbac import has_permission
+    from app.api.agent_routes import _field_stats, _security_rows
+
+    repo = get_repo()
     cases = repo.list_cases()
-    m = {
-        "incoming_emails": len(repo.list_emails()),
-        "action_required": sum(1 for c in cases if c.action_required and c.status != CaseStatus.COMPLETED),
-        "no_action_required": sum(1 for c in cases if not c.action_required),
-        "document_verification_cases": sum(1 for c in cases if c.hackathon_category.value == "BL_COMPARISON"),
-        "mismatches_detected": sum(1 for c in cases if c.mismatch_count > 0),
-        "no_mismatch_cases": sum(1 for c in cases if c.comparison and c.comparison.comparison_status.value == "PASSED"),
-        "waiting_for_documents": sum(1 for c in cases if c.status == CaseStatus.WAITING_DOCUMENTS),
-        "human_review": sum(1 for c in cases if c.status == CaseStatus.HUMAN_REVIEW),
-        "notify_party": sum(1 for c in cases if c.status in (CaseStatus.NOTIFY_PARTY, CaseStatus.AWAITING_RESPONSE)),
-        "processing_errors": sum(len([e for e in c.errors if not e.resolved]) for c in cases),
-        "security_flagged": sum(1 for c in cases if c.security.outcome.value != "SAFE"),
-        "completed": sum(1 for c in cases if c.status == CaseStatus.COMPLETED),
-        "avg_processing_ms": round(sum(c.processing_ms for c in cases) / len(cases), 1) if cases else 0,
-        "by_status": {},
-        "by_intent": {},
-        "by_priority": {},
+    emails = {e.id: e for e in repo.list_emails()}
+    idle = {"COMPLETED", "NO_ACTION_INFO", "AWAITING_RESPONSE"}
+    rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    attention = [_case_row(c, emails.get(c.source_email_id)) for c in cases if c.action_required and c.status.value not in idle]
+    attention.sort(key=lambda r: (rank.get(r["priority"], 9), r["updated_at"]), reverse=False)
+    activity = None
+    if has_permission(user, "view_audit"):
+        events = repo.list_audit()
+        events = list(reversed(events[-8:]))
+        activity = [a.model_dump(mode="json") for a in events]
+    return {
+        "metrics": _dashboard_metrics(cases, len(emails)),
+        "fields": _field_stats(cases),
+        "attention": attention[:7],
+        "security": _security_rows(cases, emails),
+        "activity": activity,
+        "users": [u.model_dump(mode="json") for u in repo.list_users()],
     }
-    for c in cases:
-        m["by_status"][c.status.value] = m["by_status"].get(c.status.value, 0) + 1
-        m["by_intent"][c.intent.value] = m["by_intent"].get(c.intent.value, 0) + 1
-        m["by_priority"][c.priority.value] = m["by_priority"].get(c.priority.value, 0) + 1
-    return m
 
 
 # ---------------------------------------------------------------- cases
@@ -265,9 +320,10 @@ def list_cases(
     user: UserRecord = Depends(require("view_case")),
 ):
     repo = get_repo()
+    emails = {e.id: e for e in repo.list_emails()}
     rows = []
     for c in repo.list_cases():
-        e = repo.get_email(c.source_email_id)
+        e = emails.get(c.source_email_id)
         if status and c.status.value != status:
             continue
         if priority and c.priority.value != priority:
@@ -300,14 +356,7 @@ def list_cases(
             hay = f"{c.id} {e.subject if e else ''} {e.sender if e else ''} {c.summary.text if c.summary else ''}".lower()
             if q.lower() not in hay:
                 continue
-        rows.append({
-            "id": c.id, "email_id": c.source_email_id, "subject": e.subject if e else "", "sender": e.sender if e else "", "received_at": e.received_at.isoformat() if e else None,
-            "intent": c.intent.value, "category": c.hackathon_category.value, "security": c.security.outcome.value, "action_required": c.action_required,
-            "priority": c.priority.value, "si_available": c.si_available, "bl_available": c.bl_available, "attachments": len(e.attachments) if e else 0,
-            "mismatch_count": c.mismatch_count, "comparison_status": c.comparison_status.value if c.comparison_status else None, "review_reason": c.review_reason.value if c.review_reason else None,
-            "confidence": c.confidence, "assigned_user_id": c.assigned_user_id, "shared_with": c.shared_with, "status": c.status.value, "updated_at": c.updated_at.isoformat(),
-            "summary": c.summary.text if c.summary else "", "errors": len([x for x in c.errors if not x.resolved]), "drafts": len(c.drafts),
-        })
+        rows.append(_case_row(c, e))
     key = {"updated_desc": (lambda r: r["updated_at"], True), "received_desc": (lambda r: r["received_at"] or "", True), "priority": (lambda r: {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}[r["priority"]], False), "confidence": (lambda r: r["confidence"], False)}.get(sort, (lambda r: r["updated_at"], True))
     rows.sort(key=key[0], reverse=key[1])
     return {"total": len(rows), "items": rows[offset: offset + limit]}
@@ -578,6 +627,15 @@ def batch(req: BatchRequest, user: UserRecord = Depends(require("batch"))):
 @router.get("/export/cases.csv", response_class=PlainTextResponse)
 def export_csv(user: UserRecord = Depends(require("export_data"))):
     return svc().export_csv()
+
+
+@router.get("/export/cases.xlsx")
+def export_xlsx(user: UserRecord = Depends(require("export_data"))):
+    return Response(
+        content=svc().export_xlsx(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=cases.xlsx"},
+    )
 
 
 @router.get("/export/submission.json")

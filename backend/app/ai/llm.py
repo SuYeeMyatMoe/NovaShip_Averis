@@ -1,8 +1,8 @@
 """
 LLM provider abstraction.
 
-    LLM_PROVIDER = openai | none      (default: none)
-    OPENAI_API_KEY
+    LLM_PROVIDER = openai | gemini | none      (default: none)
+    OPENAI_API_KEY / GOOGLE_API_KEY
     LLM_MODEL (optional override)
 
 With `none` every AI node falls back to deterministic rules so the whole
@@ -11,6 +11,7 @@ platform runs offline (demo-safe). With a key configured, the LLM is used for:
   * extraction fallback when label-based parsing misses a field
   * case summaries / drafts / Ask-AI answers / translation
 The seven-field MATCH/MISMATCH decision is NEVER delegated to the LLM.
+Prompts are not persisted; only token usage metadata may be returned.
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ class LLMClient:
         self.provider = os.environ.get("LLM_PROVIDER", "none").lower().strip()
         self.model = os.environ.get("LLM_MODEL", "")
         self._client = None
+        self._gemini = None
         if self.provider == "openai" and os.environ.get("OPENAI_API_KEY"):
             try:
                 from openai import OpenAI
@@ -44,26 +46,48 @@ class LLMClient:
                 self.model = self.model or "gpt-4o-mini"
             except Exception:
                 self.provider = "none"
+        elif self.provider == "gemini" and os.environ.get("GOOGLE_API_KEY"):
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+
+                self.model = self.model or os.environ.get("GEMINI_CHAT_MODEL", "gemini-2.0-flash")
+                self._gemini = ChatGoogleGenerativeAI(
+                    model=self.model,
+                    google_api_key=os.environ["GOOGLE_API_KEY"],
+                    temperature=0,
+                )
+            except Exception:
+                self.provider = "none"
         else:
             self.provider = "none"
 
     @property
     def enabled(self) -> bool:
-        return self.provider != "none" and self._client is not None
+        return self.provider != "none" and (self._client is not None or self._gemini is not None)
 
     def complete(self, system: str, user: str, *, max_tokens: int = 800, temperature: float = 0.0) -> Optional[LLMResult]:
         if not self.enabled:
             return None
         t0 = time.time()
         try:
-            resp = self._client.chat.completions.create(
-                model=self.model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            )
-            text = resp.choices[0].message.content or ""
-            usage = {"input_tokens": resp.usage.prompt_tokens, "output_tokens": resp.usage.completion_tokens}
+            if self.provider == "gemini":
+                from langchain_core.messages import HumanMessage, SystemMessage
+
+                resp = self._gemini.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+                text = getattr(resp, "content", None) or str(resp)
+                usage: dict[str, Any] = {}
+                meta = getattr(resp, "usage_metadata", None) or {}
+                if meta:
+                    usage = {"input_tokens": meta.get("input_tokens"), "output_tokens": meta.get("output_tokens")}
+            else:
+                resp = self._client.chat.completions.create(
+                    model=self.model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                )
+                text = resp.choices[0].message.content or ""
+                usage = {"input_tokens": resp.usage.prompt_tokens, "output_tokens": resp.usage.completion_tokens}
         except Exception as exc:  # network / auth failure -> graceful fallback
             return LLMResult(text=f"__LLM_ERROR__ {type(exc).__name__}", provider=self.provider, model=self.model,
                              latency_ms=int((time.time() - t0) * 1000), usage={})
@@ -96,3 +120,8 @@ def get_llm() -> LLMClient:
     if _client is None:
         _client = LLMClient()
     return _client
+
+
+def reset_llm() -> None:
+    global _client
+    _client = None

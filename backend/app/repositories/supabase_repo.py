@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime
 from typing import Any, Optional
 
@@ -59,6 +60,22 @@ class SupabaseRepository(BaseRepository):
         self.client = create_client(url, key)
         self.bucket = os.environ.get("SUPABASE_STORAGE_BUCKET", "documents")
         self.tenant = os.environ.get("TENANT_ID", "tenant_april")
+        self._lock = threading.RLock()
+        self._cases: Optional[list[CaseRecord]] = None
+        self._cases_by_id: dict[str, CaseRecord] = {}
+        self._emails: Optional[list[EmailMessage]] = None
+        self._emails_by_id: dict[str, EmailMessage] = {}
+        self._users: Optional[list[UserRecord]] = None
+        self._revoked_sids: set[str] = set()
+        self._live_sids: set[str] = set()
+
+    def cached_counts(self) -> dict[str, int]:
+        """Health/status without a Supabase round trip once the desk is warmed."""
+        with self._lock:
+            return {
+                "cases": len(self._cases) if self._cases is not None else len(self._cases_by_id),
+                "emails": len(self._emails) if self._emails is not None else len(self._emails_by_id),
+            }
 
     # ---- helpers ----------------------------------------------------------
     def _t(self, name: str):
@@ -82,8 +99,16 @@ class SupabaseRepository(BaseRepository):
                 "extraction_status": a.extraction_status.value, "extraction_confidence": a.extraction_confidence,
                 "raw_text": a.raw_text, "page_count": a.page_count, "is_duplicate_of": a.is_duplicate_of,
             }).execute()
+        with self._lock:
+            self._emails_by_id[email.id] = email
+            if self._emails is not None:
+                self._emails = [e for e in self._emails if e.id != email.id]
+                self._emails.append(email)
 
     def get_email(self, email_id: str) -> Optional[EmailMessage]:
+        with self._lock:
+            if email_id in self._emails_by_id:
+                return self._emails_by_id[email_id]
         res = (
             self._t("email_messages")
             .select("payload")
@@ -92,13 +117,25 @@ class SupabaseRepository(BaseRepository):
             .limit(1)
             .execute()
         )
-        return EmailMessage(**res.data[0]["payload"]) if res.data else None
+        email = EmailMessage(**res.data[0]["payload"]) if res.data else None
+        if email:
+            with self._lock:
+                self._emails_by_id[email.id] = email
+        return email
 
     def list_emails(self) -> list[EmailMessage]:
-        res = self._t("email_messages").select("payload").eq("tenant_id", self.tenant).execute()
-        return [EmailMessage(**r["payload"]) for r in res.data]
+        with self._lock:
+            if self._emails is not None:
+                return list(self._emails)
+            res = self._t("email_messages").select("payload").eq("tenant_id", self.tenant).execute()
+            self._emails = [EmailMessage(**r["payload"]) for r in res.data]
+            self._emails_by_id = {e.id: e for e in self._emails}
+            return list(self._emails)
 
     def find_email_by_checksum(self, checksum: str) -> Optional[EmailMessage]:
+        with self._lock:
+            if self._emails is not None:
+                return next((e for e in self._emails if e.checksum == checksum), None)
         res = (
             self._t("email_messages")
             .select("payload")
@@ -107,7 +144,11 @@ class SupabaseRepository(BaseRepository):
             .limit(1)
             .execute()
         )
-        return EmailMessage(**res.data[0]["payload"]) if res.data else None
+        email = EmailMessage(**res.data[0]["payload"]) if res.data else None
+        if email:
+            with self._lock:
+                self._emails_by_id[email.id] = email
+        return email
 
     def find_attachment_by_checksum(self, checksum: str) -> Optional[str]:
         res = (
@@ -195,8 +236,16 @@ class SupabaseRepository(BaseRepository):
         if case.assigned_user_id or case.assigned_team_id:
             self._t("assignments").upsert({"id": f"asg_{case.id}", "case_id": case.id, "tenant_id": self.tenant, "assigned_user_id": case.assigned_user_id,
                                             "assigned_team_id": case.assigned_team_id, "assigned_at": case.updated_at.isoformat()}).execute()
+        with self._lock:
+            self._cases_by_id[case.id] = case
+            if self._cases is not None:
+                self._cases = [c for c in self._cases if c.id != case.id]
+                self._cases.insert(0, case)
 
     def get_case(self, case_id: str) -> Optional[CaseRecord]:
+        with self._lock:
+            if case_id in self._cases_by_id:
+                return self._cases_by_id[case_id]
         res = (
             self._t("cases")
             .select("payload")
@@ -205,9 +254,16 @@ class SupabaseRepository(BaseRepository):
             .limit(1)
             .execute()
         )
-        return CaseRecord(**res.data[0]["payload"]) if res.data else None
+        case = CaseRecord(**res.data[0]["payload"]) if res.data else None
+        if case:
+            with self._lock:
+                self._cases_by_id[case.id] = case
+        return case
 
     def get_case_by_email(self, email_id: str) -> Optional[CaseRecord]:
+        with self._lock:
+            if self._cases is not None:
+                return next((c for c in self._cases if c.source_email_id == email_id), None)
         res = (
             self._t("cases")
             .select("payload")
@@ -216,11 +272,20 @@ class SupabaseRepository(BaseRepository):
             .limit(1)
             .execute()
         )
-        return CaseRecord(**res.data[0]["payload"]) if res.data else None
+        case = CaseRecord(**res.data[0]["payload"]) if res.data else None
+        if case:
+            with self._lock:
+                self._cases_by_id[case.id] = case
+        return case
 
     def list_cases(self) -> list[CaseRecord]:
-        res = self._t("cases").select("payload").eq("tenant_id", self.tenant).order("updated_at", desc=True).limit(2000).execute()
-        return [CaseRecord(**r["payload"]) for r in res.data]
+        with self._lock:
+            if self._cases is not None:
+                return list(self._cases)
+            res = self._t("cases").select("payload").eq("tenant_id", self.tenant).order("updated_at", desc=True).limit(2000).execute()
+            self._cases = [CaseRecord(**r["payload"]) for r in res.data]
+            self._cases_by_id = {c.id: c for c in self._cases}
+            return list(self._cases)
 
     # ---- audit / errors / shares -----------------------------------------
     def append_audit(self, event: AuditEvent) -> None:
@@ -239,10 +304,14 @@ class SupabaseRepository(BaseRepository):
         return bool(res.data)
 
     def list_audit(self, case_id: Optional[str] = None) -> list[AuditEvent]:
-        q = self._t("audit_events").select("*").eq("tenant_id", self.tenant).order("timestamp")
+        q = self._t("audit_events").select("*").eq("tenant_id", self.tenant)
         if case_id:
-            q = q.eq("case_id", case_id)
-        return [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in q.limit(5000).execute().data]
+            rows = q.eq("case_id", case_id).order("timestamp").limit(500).execute().data
+            return [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in rows]
+        rows = q.order("timestamp", desc=True).limit(500).execute().data
+        events = [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in rows]
+        events.reverse()
+        return events
 
     def save_error(self, err: ProcessingError) -> None:
         self._t("processing_errors").upsert({**_j(err), "tenant_id": self.tenant}).execute()
@@ -328,12 +397,16 @@ class SupabaseRepository(BaseRepository):
 
     # ---- users / parties / policy ----------------------------------------
     def list_users(self) -> list[UserRecord]:
-        res = self._t("users").select("*, user_roles(role_id)").eq("tenant_id", self.tenant).execute()
-        out = []
-        for r in res.data:
-            roles = [x["role_id"] for x in (r.get("user_roles") or [])]
-            out.append(UserRecord(id=r["id"], email=r["email"], display_name=r["display_name"], roles=roles, team_id=r.get("team_id"), tenant_id=r["tenant_id"], is_external=r.get("is_external", False), auth_user_id=r.get("auth_user_id")))
-        return out
+        with self._lock:
+            if self._users is not None:
+                return list(self._users)
+            res = self._t("users").select("*, user_roles(role_id)").eq("tenant_id", self.tenant).execute()
+            out = []
+            for r in res.data:
+                roles = [x["role_id"] for x in (r.get("user_roles") or [])]
+                out.append(UserRecord(id=r["id"], email=r["email"], display_name=r["display_name"], roles=roles, team_id=r.get("team_id"), tenant_id=r["tenant_id"], is_external=r.get("is_external", False), auth_user_id=r.get("auth_user_id")))
+            self._users = out
+            return list(self._users)
 
     def get_user(self, user_id: str) -> Optional[UserRecord]:
         return next((u for u in self.list_users() if u.id == user_id), None)
@@ -353,6 +426,12 @@ class SupabaseRepository(BaseRepository):
         self._t("user_roles").delete().eq("user_id", user.id).execute()
         if user.roles:
             self._t("user_roles").insert([{"user_id": user.id, "role_id": r.value} for r in user.roles]).execute()
+        with self._lock:
+            if self._users is None:
+                self._users = [user]
+            else:
+                self._users = [u for u in self._users if u.id != user.id]
+                self._users.append(user)
 
     # local password login (migration 0004). Supabase Auth JWTs are accepted independently.
     def get_password_hash(self, user_id: str) -> Optional[str]:
@@ -364,10 +443,23 @@ class SupabaseRepository(BaseRepository):
 
     def revoke_session(self, session_id: str) -> None:
         self._t("revoked_sessions").upsert({"session_id": session_id, "revoked_at": datetime.utcnow().isoformat()}).execute()
+        with self._lock:
+            self._revoked_sids.add(session_id)
+            self._live_sids.discard(session_id)
 
     def is_session_revoked(self, session_id: str) -> bool:
+        if not session_id:
+            return True
+        with self._lock:
+            if session_id in self._revoked_sids:
+                return True
+            if session_id in self._live_sids:
+                return False
         res = self._t("revoked_sessions").select("session_id").eq("session_id", session_id).limit(1).execute()
-        return bool(res.data)
+        revoked = bool(res.data)
+        with self._lock:
+            (self._revoked_sids if revoked else self._live_sids).add(session_id)
+        return revoked
 
     def list_parties(self) -> list[PartyContact]:
         res = self._t("party_contacts").select("*").eq("tenant_id", self.tenant).execute()

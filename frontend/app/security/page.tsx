@@ -16,8 +16,14 @@ export default function SecurityPage() {
   const load = () => api("/security/queue").then((d) => setRows(d.items)).catch((e) => say(e.message, "err"));
   useEffect(() => { load(); }, []);
   const act = async (id: string, path: string) => { try { await post(`/cases/${id}${path}`); say("Done"); load(); } catch (e: any) { say(e.message, "err"); } };
-  const shown = (rows || []).filter((r) => !filter || r.outcome === filter);
+  const isOperator = (r: any) => (r.anomalies || []).some((a: any) => String(a.signal || "").startsWith("OPERATOR_") || String(a.signal || "").startsWith("AUTO_DRAFT"));
+  const shown = (rows || []).filter((r) => {
+    if (!filter) return true;
+    if (filter === "OPERATOR") return isOperator(r);
+    return r.outcome === filter;
+  });
   const counts: Record<string, number> = (rows || []).reduce((m: Record<string, number>, r) => ({ ...m, [r.outcome]: (m[r.outcome] || 0) + 1 }), {} as Record<string, number>);
+  counts.OPERATOR = (rows || []).filter(isOperator).length;
   const pageSize = 10;
   const totalPages = Math.max(1, Math.ceil(shown.length / pageSize));
   const visibleRows = shown.slice((page - 1) * pageSize, page * pageSize);
@@ -32,9 +38,9 @@ export default function SecurityPage() {
           <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">Review security signals, suspicious activity, and spam before cases move through the workflow. Automated checks can flag a case, while your team remains in control of the final action.</p>
         </div>
         <div className="inline-flex max-w-full flex-wrap gap-1 rounded-2xl border border-orange-200 bg-[#fffaf5] p-1.5 shadow-sm">
-          {["", "SECURITY_REVIEW", "SUSPICIOUS", "SPAM"].map((k) => (
+          {["", "SECURITY_REVIEW", "SUSPICIOUS", "SPAM", "OPERATOR"].map((k) => (
             <button key={k || "all"} type="button" onClick={() => { setFilter(k); setPage(1); }} className={`rounded-xl px-3 py-2 text-xs font-bold tracking-wide transition duration-200 hover:-translate-y-0.5 sm:text-sm ${filter === k ? "bg-accent text-white shadow-sm" : "text-[#76503a] hover:bg-orange-100 hover:text-[#a44d13]"}`}>
-              {k ? `${k.replace(/_/g, " ")} (${counts[k] || 0})` : `All (${rows?.length || 0})`}
+              {k === "OPERATOR" ? `Unusual operator signals (${counts.OPERATOR || 0})` : k ? `${k.replace(/_/g, " ")} (${counts[k] || 0})` : `All (${rows?.length || 0})`}
             </button>
           ))}
         </div>

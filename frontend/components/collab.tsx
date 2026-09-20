@@ -44,7 +44,7 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
     recipient_type: chosen!.recipient_type, recipient_user_id: chosen!.external ? undefined : chosen!.id, recipient_party_id: chosen!.external ? chosen!.id : undefined,
     message: message || undefined, due_date: due || undefined, include_fields: fields, preview_only, confirm_external,
   });
-  const doPreview = async () => { if (!chosen) return say("Select a recipient", "err"); setBusy(true); try { setPreview(await post(`/cases/${c.id}/share`, body(true))); } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); } };
+  const doPreview = async () => { if (!chosen) return say("Select a recipient", "err"); setBusy(true); try { setPreview(await post(`/cases/${c.id}/share`, body(true))); } catch (e: any) { say(e.detail?.operator_warning ? `Unusual operator signal: ${e.message}` : e.message, "err"); } finally { setBusy(false); } };
   const doSend = async () => {
     if (!chosen) return; setBusy(true);
     try {

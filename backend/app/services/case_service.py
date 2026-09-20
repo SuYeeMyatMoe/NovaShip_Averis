@@ -5,6 +5,7 @@ Human-in-the-loop: AI proposes -> human approves/edits/rejects -> action execute
 """
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
@@ -17,6 +18,15 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from app.ai.assistant import build_share_message
+from app.ai.operator_behaviour import (
+    AUTO_DRAFT_THRESHOLD,
+    auto_draft_signal,
+    burst_warning,
+    count_user_mutations,
+    has_live_draft,
+    rapid_archive_warning,
+    share_denied_warning,
+)
 from app.ai.summary_draft import build_draft, polish_with_llm
 from app.auth.rbac import has_permission
 from app.contracts.schemas import (
@@ -32,6 +42,7 @@ from app.contracts.schemas import (
     PolicyRecord,
     ProcessingError,
     RecipientType,
+    SecuritySignal,
     ShareRecord,
     ShareRequest,
     UserRecord,
@@ -72,6 +83,38 @@ class CaseService:
 
     def policy(self) -> dict[str, Any]:
         return merged_policy(self.repo.get_active_policy().values)
+
+    def _append_operator_signal(self, case: CaseRecord, user: UserRecord, signal: SecuritySignal) -> None:
+        recent = {a.signal for a in case.anomalies[-8:]}
+        if signal.signal in recent and signal.signal != "OPERATOR_BURST_MUTATIONS":
+            return
+        case.anomalies.append(signal)
+        self.pipe.audit(
+            case.id,
+            ActorType.SYSTEM,
+            "operator_guard",
+            "UNUSUAL_OPERATOR_BEHAVIOUR",
+            after={"signal": signal.signal, "severity": signal.severity, "evidence": signal.evidence, "actor": user.id},
+        )
+
+    def _after_user_mutation(self, case: CaseRecord, user: UserRecord, *, auto_draft: bool = True) -> CaseRecord:
+        burst = burst_warning(user.id)
+        if burst:
+            self._append_operator_signal(case, user, burst)
+        if auto_draft:
+            n = count_user_mutations(self.repo, case.id)
+            if n >= AUTO_DRAFT_THRESHOLD and not has_live_draft(case):
+                self.repo.save_case(case)
+                case = self.generate_draft(case.id, user, use_llm=False)
+                case.anomalies.append(auto_draft_signal(n))
+                self.pipe.audit(
+                    case.id,
+                    ActorType.SYSTEM,
+                    "operator_guard",
+                    "AUTO_DRAFT_AFTER_REPEATED_ACTIONS",
+                    after={"mutation_count": n, "draft_id": case.drafts[-1].id if case.drafts else None},
+                )
+        return case
 
     @staticmethod
     def _confirmed_share_response(share: ShareRecord) -> dict[str, Any]:
@@ -144,7 +187,10 @@ class CaseService:
         case = self.get(case_id)
         email = self.repo.get_email(case.source_email_id)
         self.pipe.audit(case.id, ActorType.USER, user.id, "RETRY_REQUESTED", after={"step": step})
-        return self.pipe.run(email, actor_id=user.id, force=True)
+        case = self.pipe.run(email, actor_id=user.id, force=True)
+        case = self._after_user_mutation(case, user)
+        self.repo.save_case(case)
+        return case
 
     def assign(self, case_id: str, req: AssignRequest, user: UserRecord) -> CaseRecord:
         case = self.get(case_id)
@@ -155,6 +201,7 @@ class CaseService:
         self.pipe.audit(case.id, ActorType.USER, user.id, "ASSIGNED", before, {"assigned_user_id": case.assigned_user_id, "assigned_team_id": case.assigned_team_id, "note": req.note})
         if case.status in (CaseStatus.CLASSIFIED, CaseStatus.HUMAN_REVIEW, CaseStatus.DRAFT_READY, CaseStatus.MISMATCH_DETECTED, CaseStatus.NO_MISMATCH_DETECTED):
             self._status(case, CaseStatus.ASSIGNED, user)
+        case = self._after_user_mutation(case, user)
         self.repo.save_case(case)
         return case
 
@@ -191,6 +238,7 @@ class CaseService:
             d.body = dec.edited_body
         d.status, d.version = DraftStatus.EDITED, d.version + 1
         self.pipe.audit(case.id, ActorType.USER, user.id, "DRAFT_EDITED", before, {"subject": d.subject, "body": d.body, "version": d.version, "note": dec.note})
+        case = self._after_user_mutation(case, user)
         self.repo.save_case(case)
         return case
 
@@ -256,6 +304,7 @@ class CaseService:
         d.status = DraftStatus.REJECTED
         self.pipe.audit(case.id, ActorType.USER, user.id, "DRAFT_REJECTED", before, {"status": d.status.value, "note": dec.note})
         self._status(case, CaseStatus.HUMAN_REVIEW, user)
+        case = self._after_user_mutation(case, user)
         self.repo.save_case(case)
         return case
 
@@ -264,6 +313,7 @@ class CaseService:
         case.action_required = False
         self.pipe.audit(case.id, ActorType.USER, user.id, "MARKED_NO_ACTION", after={"action_required": False})
         self._status(case, CaseStatus.NO_ACTION_INFO, user)
+        case = self._after_user_mutation(case, user)
         self.repo.save_case(case)
         return case
 
@@ -271,6 +321,7 @@ class CaseService:
         case = self.get(case_id)
         self.pipe.audit(case.id, ActorType.USER, user.id, "COMPLETED", after={"note": note})
         self._status(case, CaseStatus.COMPLETED, user)
+        case = self._after_user_mutation(case, user)
         self.repo.save_case(case)
         return case
 
@@ -278,6 +329,7 @@ class CaseService:
         case = self.get(case_id)
         self.pipe.audit(case.id, ActorType.USER, user.id, "REVIEW_REQUESTED", after={"note": note})
         self._status(case, CaseStatus.HUMAN_REVIEW, user)
+        case = self._after_user_mutation(case, user)
         self.repo.save_case(case)
         return case
 
@@ -317,7 +369,9 @@ class CaseService:
         perm = "notify_external" if is_external else "share_internal"
         if not has_permission(user, perm):
             self.pipe.audit(case.id, ActorType.USER, user.id, "SHARE_DENIED", after={"reason": f"missing permission {perm}", "recipient_type": req.recipient_type.value})
-            raise HTTPException(403, detail={"error": f"permission '{perm}' required to share with {req.recipient_type.value}", "category": "AUTH_ERROR"})
+            self._append_operator_signal(case, user, share_denied_warning(user.id, perm))
+            self.repo.save_case(case)
+            raise HTTPException(403, detail={"error": f"permission '{perm}' required to share with {req.recipient_type.value}", "category": "AUTH_ERROR", "operator_warning": True})
         if is_external:
             party = self.repo.get_party(req.recipient_party_id or "")
             if not party:
@@ -595,17 +649,27 @@ class CaseService:
                     c = self.complete(cid, user, note="batch archive")
                 elif req.action == "request_review":
                     c = self.request_review(cid, user, note=req.params.get("note"))
-                elif req.action == "export":
+                elif req.action == "export" or req.action == "export_xlsx":
                     c = self.get(cid)
                 else:
-                    raise HTTPException(400, detail={"error": f"unknown batch action {req.action}"})
+                    raise HTTPException(400, detail={"error": f"unknown batch action {req.action}", "category": "DATABASE_ERROR"})
                 results[cid] = {"ok": True, "status": c.status.value}
             except HTTPException as exc:
                 results[cid] = {"ok": False, "error": exc.detail}
         self.pipe.audit(None, ActorType.USER, user.id, "BATCH_ACTION", after={"action": req.action, "count": len(req.case_ids), "ok": sum(1 for r in results.values() if r["ok"])})
+        if req.action == "archive":
+            warn = rapid_archive_warning(user.id, len(req.case_ids))
+            if warn and req.case_ids:
+                first = self.get(req.case_ids[0])
+                self._append_operator_signal(first, user, warn)
+                self.repo.save_case(first)
         out: dict[str, Any] = {"requires_confirmation": False, "results": results}
-        if req.action == "export":
+        want_xlsx = req.action == "export_xlsx" or (req.action == "export" and str(req.params.get("format", "")).lower() == "xlsx")
+        if req.action == "export" and not want_xlsx:
             out["csv"] = self.export_csv(req.case_ids)
+        if want_xlsx:
+            out["xlsx_base64"] = base64.b64encode(self.export_xlsx(req.case_ids)).decode("ascii")
+            out["filename"] = "cases.xlsx"
         return out
 
     def export_csv(self, case_ids: Optional[list[str]] = None) -> str:
@@ -619,6 +683,56 @@ class CaseService:
             w.writerow([c.id, c.source_email_id, e.sender if e else "", e.subject if e else "", c.intent.value, c.hackathon_category.value, c.security.outcome.value, c.priority.value,
                         c.status.value, c.comparison_status.value if c.comparison_status else "", c.mismatch_count, "|".join(c.comparison.mismatch_fields) if c.comparison else "",
                         c.review_reason.value if c.review_reason else "", c.confidence, c.assigned_user_id or "", c.updated_at.isoformat()])
+        return buf.getvalue()
+
+    def export_xlsx(self, case_ids: Optional[list[str]] = None) -> bytes:
+        import openpyxl
+        from openpyxl.styles import Font
+
+        wb = openpyxl.Workbook()
+        cases_ws = wb.active
+        cases_ws.title = "Cases"
+        headers = ["case_id", "email_id", "sender", "subject", "intent", "category", "security", "priority", "status", "comparison_status", "mismatch_count", "mismatch_fields", "review_reason", "confidence", "assigned_user_id", "updated_at"]
+        cases_ws.append(headers)
+        for cell in cases_ws[1]:
+            cell.font = Font(bold=True)
+
+        fields_ws = wb.create_sheet("Field results")
+        fields_ws.append(["case_id", "field", "result", "si_original", "bl_original", "confidence", "reason"])
+        for cell in fields_ws[1]:
+            cell.font = Font(bold=True)
+
+        status_counts: dict[str, int] = {}
+        mismatch_cases = 0
+        selected = 0
+        for c in self.repo.list_cases():
+            if case_ids and c.id not in case_ids:
+                continue
+            selected += 1
+            e = self.repo.get_email(c.source_email_id)
+            cases_ws.append([
+                c.id, c.source_email_id, e.sender if e else "", e.subject if e else "", c.intent.value, c.hackathon_category.value,
+                c.security.outcome.value, c.priority.value, c.status.value, c.comparison_status.value if c.comparison_status else "",
+                c.mismatch_count, "|".join(c.comparison.mismatch_fields) if c.comparison else "",
+                c.review_reason.value if c.review_reason else "", c.confidence, c.assigned_user_id or "", c.updated_at.isoformat(),
+            ])
+            status_counts[c.status.value] = status_counts.get(c.status.value, 0) + 1
+            if c.mismatch_count:
+                mismatch_cases += 1
+            if c.comparison:
+                for fld in c.comparison.fields:
+                    fields_ws.append([c.id, fld.field, fld.result.value, fld.si_original or "", fld.bl_original or "", fld.confidence, fld.reason])
+
+        summary = wb.create_sheet("Summary")
+        summary.append(["metric", "value"])
+        summary["A1"].font = Font(bold=True)
+        summary["B1"].font = Font(bold=True)
+        summary.append(["cases", selected])
+        summary.append(["mismatch_cases", mismatch_cases])
+        for status, n in sorted(status_counts.items()):
+            summary.append([f"status_{status}", n])
+        buf = io.BytesIO()
+        wb.save(buf)
         return buf.getvalue()
 
     # ------------------------------------------------------------ policy

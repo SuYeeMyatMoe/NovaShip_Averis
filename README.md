@@ -10,7 +10,8 @@ AI-assisted shipping inbox and deterministic Shipping Instruction (SI) to Draft 
 | API and Swagger UI | `http://localhost:8000/docs` |
 | Default mode | Offline demo, in-memory repository, no API keys required |
 | Demo data | 520 emails and 250 attachments |
-| Verified test baseline | **187 backend tests passed**, frontend production build passed, Compose configuration valid (20 September 2026) |
+| Demo performance | Inbox and other pages can feel slow: each navigation refetches from the in-memory 520-case dataset. See [§17](#pages-load-slowly-after-sign-in) |
+| Verified test baseline | **197 backend tests passed**, frontend production build passed, Compose configuration valid (20 September 2026) |
 | Recorded SDOC score | `1.0000`; reproducing the score requires the private organiser `ground_truth.json` |
 | Demo password | `novaship123` for every seeded account |
 
@@ -36,6 +37,7 @@ AI-assisted shipping inbox and deterministic Shipping Instruction (SI) to Draft 
 - [18. Repository map](#18-repository-map)
 - [19. Known limitations](#19-known-limitations)
 - [20. Additional documentation](#20-additional-documentation)
+- [21. End-to-end shipping workflow](#21-end-to-end-shipping-workflow)
 
 ## 1. Overview
 
@@ -96,18 +98,19 @@ The inbox has 124 messages with two attachments, two with one attachment, and 39
 - Preserves original values alongside normalised values.
 - Routes missing, blank, unsupported, corrupt, scanned, or low-confidence data to review instead of guessing.
 - Produces a field-by-field discrepancy report and an exact summary message.
+- Treats SI vs Draft BL verification as the first major checkpoint. Incomplete data is meant to keep the case moving (request, upload, re-check) rather than stop the workflow. The intended continuation, including a separate customer view, is in [§21](#21-end-to-end-shipping-workflow).
 
 ### Human review and collaboration
 
 - Generates confirmation, correction, missing-document, and information-response drafts.
-- Allows a user to edit, approve, reject, reassign, retry, request review, mark no action, or complete a case.
+- Allows a user to edit, approve, reject, reassign, retry, request review, mark no action, or complete a case. After three of those mutations with no live draft, a draft is auto-saved and never sent. Unusual operator bursts, denied external shares, and rapid archives raise a warning without locking the account.
 - Separates the extracted Notify Party value from permission to contact a recipient.
 - Requires an authorised recipient, a data preview, sufficient role permissions, and an extra confirmation for an external party.
 - Records sent, viewed, acknowledged, response, and status metadata for a share.
 
 ### Oversight
 
-- Provides a seven-field analytics page, security queue, AI-agent console, global audit page, policy editor, and in-app guide.
+- Provides a seven-field analytics page, Workbench run console, security queue, AI-agent diagram, global audit page, policy editor, and in-app guide.
 - Stores actor type (`USER`, `AI`, or `SYSTEM`), before/after state, evidence references, and policy version in audit events.
 - Uses role-based access control (RBAC) for every protected API operation.
 - Keeps policy changes versioned and audited.
@@ -182,6 +185,8 @@ flowchart LR
 
 ### Main pipeline
 
+Shipped today:
+
 ```text
 Email
   -> security precheck
@@ -198,7 +203,7 @@ Email
   -> audit
 ```
 
-The security and intent stages can end the flow early. A security-review message is quarantined. Informational and spam messages are stored and summarised without document comparison. A verification request with missing documents becomes `WAITING_DOCUMENTS`; unreadable or uncertain content becomes `HUMAN_REVIEW`.
+The security and intent stages can end the flow early. A security-review message is quarantined. Informational and spam messages are stored and summarised without document comparison. A verification request with missing documents becomes `WAITING_DOCUMENTS`; unreadable or uncertain content becomes `HUMAN_REVIEW`. Those incomplete states are not a stop: staff can upload a replacement and retry. The intended customer portal and post-verification shipment stages are in [§21](#21-end-to-end-shipping-workflow).
 
 ### Responsibility boundary
 
@@ -221,7 +226,7 @@ The security and intent stages can end the flow early. A security-review message
 | Backend | Python 3.11, FastAPI, Pydantic 2, Uvicorn |
 | Local intent model | scikit-learn TF-IDF + logistic regression, persisted with joblib |
 | Agent orchestration | LangGraph with memory or optional PostgreSQL checkpoints |
-| LLM integration | OpenAI chat models through `LLM_PROVIDER=openai` |
+| LLM integration | OpenAI or Gemini chat through `LLM_PROVIDER=openai` or `LLM_PROVIDER=gemini`; default `none` |
 | Embeddings | Local deterministic hashing, Gemini, or OpenAI |
 | Vector storage | Local JSON index or Supabase pgvector |
 | Document parsing | pypdf, python-docx, openpyxl; optional OCR hook |
@@ -437,9 +442,11 @@ Copy `.env.example` to `.env`. Never commit `.env`. Variables with public fronte
 | --- | --- | --- |
 | `INTENT_MODEL_ENABLED` | `1` | Enable the local trained intent classifier |
 | `INTENT_MODEL_PATH` | auto-detected `backend/models/intent_classifier.joblib` | Classifier artifact path |
-| `LLM_PROVIDER` | `none` | `none` or `openai` |
+| `LLM_PROVIDER` | `none` | `none`, `openai`, or `gemini` |
 | `OPENAI_API_KEY` | empty | Used only when OpenAI chat or embeddings are enabled |
-| `LLM_MODEL` | `gpt-4o-mini` in code when unset | Optional chat-model override; `.env.example` suggests `gpt-4.1-mini` |
+| `LLM_MODEL` | `gpt-4o-mini` in code when unset | Optional chat-model override; `.env.example` suggests `gpt-4.1-mini` for OpenAI |
+| `GEMINI_CHAT_MODEL` | `gemini-2.0-flash` | Chat model when `LLM_PROVIDER=gemini` |
+| `GEMINI_OCR_MODEL` | same as chat model | Vision model for optional image-only PDF OCR |
 
 If the model artifact or API call fails, the application falls back to deterministic rules. The comparator never falls back to an LLM.
 
@@ -448,7 +455,7 @@ If the model artifact or API call fails, the application falls back to determini
 | Variable | Default | Description |
 | --- | --- | --- |
 | `EMBEDDING_PROVIDER` | `local` | `local`, `gemini`, or `openai` |
-| `GOOGLE_API_KEY` | empty | Gemini embedding key |
+| `GOOGLE_API_KEY` | empty | Gemini embedding, chat, and optional vision OCR key |
 | `GEMINI_EMBEDDING_MODEL` | `models/text-embedding-004` | Gemini embedding model |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
 | `EMBEDDING_DIMENSIONS` | `768` in `.env.example` | Output dimension; must match the selected provider and vector schema |
@@ -473,7 +480,7 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 | `GMAIL_CLIENT_SECRET` | empty | Google OAuth client secret |
 | `GMAIL_REFRESH_TOKEN` | empty | Refresh token created by the local authorisation helper |
 | `GMAIL_ADDRESS` | empty | Monitored and sending mailbox |
-| `OCR_ENABLED` | `0` | Set to `1` to try the optional OCR hook for image-only PDFs |
+| `OCR_ENABLED` | `0` | Set to `1` to try Gemini vision then pytesseract on image-only PDFs |
 | `MAX_UPLOAD_BYTES` | `10485760` | Maximum bytes accepted for one attachment |
 | `MAX_ATTACHMENT_COUNT` | `10` | Maximum attachments accepted in one inbound message |
 | `CORS_ORIGINS` | local UI origins | Comma-separated API origins |
@@ -485,7 +492,7 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 | `WEB_PORT` | `3000` | Host port used by Compose for the frontend |
 | `API_PORT` | `8000` | Host port used by Compose for the API |
 
-OCR additionally requires `pytesseract`, `pdf2image`, Tesseract, and Poppler. They are not installed by the default Docker image or Python requirements.
+OCR additionally requires `GOOGLE_API_KEY` for Gemini vision, or `pytesseract`, `pdf2image`, Tesseract, and Poppler for the local fallback. They are not installed by the default Docker image or Python requirements. OCR never decides MATCH/MISMATCH; unreadable scans still escalate to review.
 
 After setting the Gmail client ID and secret in a local `.env`, create or rotate the refresh token without printing it:
 
@@ -503,12 +510,15 @@ python backend/scripts/gmail_authorize.py
 | `/cases/{id}` | Email, documents, comparison, evidence, drafts, actions, collaboration, errors, and timeline |
 | `/verification` | Per-field match, mismatch, and review statistics |
 | `/security` | Security-review, suspicious, spam, and anomaly queue |
+| `/workbench` | Operator run console: agent run/resume, supervisor batch (never sends email), CSV/Excel export, and RAG provider info |
 | `/agent` | LangGraph diagram and run/state/resume controls |
 | `/audit` | Global audit log for Supervisor, Admin, and Auditor |
 | `/policies` | Effective policy for permitted roles; editing for Admin only |
 | `/welcome` | Product guide |
 | `/login` | Sign in and demo account picker |
 | `/register` | Self-registration onto the shared desk; roles come from `REGISTER_ALLOWED_ROLES` |
+
+There is no customer portal route yet. The pages above are the internal operations UI. The first open of Seven fields, Security, Audit, Agent, or a case can be slow on the 520-case demo; see [§17](#pages-load-slowly-after-sign-in).
 
 ### Recommended operator workflow
 
@@ -522,6 +532,7 @@ python backend/scripts/gmail_authorize.py
 8. For Notify Party, select an authorised recipient and inspect the disclosure preview.
 9. Confirm an external share if your role permits it.
 10. Use the case timeline or Audit page to verify the recorded action.
+11. For multi-case runs, open Workbench (`/workbench`): run the agent, batch classify/compare/draft/review, and export CSV or Excel. Batch never sends external email.
 
 ### Case states
 
@@ -548,11 +559,11 @@ COMPLETED
 ERROR
 ```
 
-Not every case visits every state. The pipeline may finish early for spam, information-only mail, security review, missing documents, or extraction uncertainty.
+Not every case visits every state. The pipeline may finish early for spam, information-only mail, security review, missing documents, or extraction uncertainty. `WAITING_DOCUMENTS`, `HUMAN_REVIEW`, and `AWAITING_RESPONSE` are the current incomplete-data holding states. The intended customer portal would sit on those states instead of ending the shipment there. See [§21](#21-end-to-end-shipping-workflow).
 
 ## 11. API reference
 
-Swagger UI at `/docs` is the source of truth for request and response schemas. The service currently exposes 56 routes.
+Swagger UI at `/docs` is the source of truth for request and response schemas. The service currently exposes 58 routes.
 
 ### Authentication
 
@@ -656,7 +667,7 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | POST | `/cases/{case_id}/share` | Preview or create an internal/external share |
 | POST | `/cases/{case_id}/share/{share_id}/confirm` | Confirm a pending external share |
 | POST | `/shares/{share_id}/acknowledge` | Record view, acknowledgement, and response |
-| POST | `/cases/batch` | Confirmed batch draft/review operations |
+| POST | `/cases/batch` | Confirmed batch draft/review operations; `export` returns CSV and `export_xlsx` returns a base64 `.xlsx` blob. Never sends email. |
 
 #### Ask AI, translation, export, and policy
 
@@ -665,6 +676,7 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | POST | `/cases/{case_id}/ask` | Grounded question about one case |
 | POST | `/cases/{case_id}/translate` | Translate supplied text or the source email |
 | GET | `/export/cases.csv` | Export cases as CSV |
+| GET | `/export/cases.xlsx` | Export cases as Excel (Cases, Field results, Summary sheets) |
 | GET | `/export/submission.json` | Export SDOC submission JSON |
 | GET | `/policies` | Active, effective, explained, and versioned policy |
 | PUT | `/policies` | Update policy with an audit note; Admin only |
@@ -752,6 +764,18 @@ Retrieval-augmented generation (RAG) indexes:
 
 Case chunks carry `case_id`. Search for one case accepts global knowledge plus that case's chunks and rejects chunks from other cases.
 
+### Sharing, RAG, and training
+
+These are three different data paths. They are not interchangeable.
+
+| Path | What it is | What it is not |
+| --- | --- | --- |
+| **Sharing layer** | Notify Party, selected-user share, notifications, and HITL resume. Operational disclosure with RBAC, preview, extra confirm for external recipients, and an append-only audit. | A dataset export for model training |
+| **RAG** | Retrieve case and knowledge chunks for Ask AI. Case id is filtered **before** rank (`supabase/migrations/0005_rag_scoped_search.sql`). | Fine-tuning or writing cases into a trainer |
+| **Training** | The local intent classifier, trained only on the SDOC fixture bundle (`backend/scripts/train_intent_classifier.py`) | There is no "train on inbox" or "train on live customer cases" path |
+
+Live OpenAI or Gemini still **sends text for inference** when those providers are on. The default demo keeps `LLM_PROVIDER=none` and local embeddings. Prompts are not persisted; `ai_runs` stores metadata only.
+
 Rebuild the index through the API:
 
 ```bash
@@ -779,6 +803,8 @@ security_precheck
 ```
 
 The graph pauses only when a human decision is required. Resume actions include `approve`, `edit`, `reject`, `reassign`, `notify_party`, `retry`, `mark_no_action`, and `complete`. The resume path invokes the same permission-checked case services used by the standard UI.
+
+After three operator mutations on a case (`draft/edit`, `reject`, `retry`, `request_review`, `assign`, `complete`, or `no-action`) with no live draft, the API auto-saves a draft and audits `AUTO_DRAFT_AFTER_REPEATED_ACTIONS`. It never sends. Burst mutations, repeated login failures, denied external shares, and rapid batch archives raise `UNUSUAL_OPERATOR_BEHAVIOUR` warnings. They do not lock the account.
 
 ## 14. Security and safety model
 
@@ -958,7 +984,7 @@ The vector dimensions no longer match. Rebuild the index. For Supabase, also upd
 
 ### Image-only PDF remains unreadable
 
-Default images do not include OCR system packages. Either request a text-readable document or install Tesseract, Poppler, `pytesseract`, and `pdf2image`, then set `OCR_ENABLED=1`.
+Default images do not include OCR system packages. With `OCR_ENABLED=1` and `GOOGLE_API_KEY`, Gemini vision is tried first; otherwise install Tesseract, Poppler, `pytesseract`, and `pdf2image`. If both fail, the case stays `HUMAN_REVIEW` / unreadable rather than inventing field values.
 
 ### An approved draft did not send real email
 
@@ -967,6 +993,31 @@ Check `EMAIL_SEND_MODE`. In the safe default `simulate` mode, the item is record
 ### `GET /` on port 8000 returns 404
 
 This is expected. Use `/health` for health checks or `/docs` for Swagger UI.
+
+### Pages load slowly after sign-in
+
+This is expected on the 520-email demo. The UI is a client-side App Router app that uses `cache: "no-store"`, so **each navigation refetches**. Other pages feel slower than Inbox because they often scan more of the in-memory dataset before painting.
+
+What happens on a typical click:
+
+| Surface | What it loads |
+| --- | --- |
+| Every authenticated page | Shell calls `/me`, `/health`, and `/me/notifications`. Notifications also poll every 30 seconds. `/me/notifications` walks cases that still need a person. |
+| Inbox `/` | `/cases` (paginated, 5 rows), `/dashboard/metrics`, `/dashboard/fields`, `/cases?limit=60` for the attention list, `/security/queue`, `/users`, and recent audit when the role allows it. Metrics and field stats scan all 520 cases. |
+| Seven fields `/verification` | `/dashboard/fields` plus every case that has a result for the selected field. |
+| Security `/security` | The security queue across flagged cases. |
+| Audit `/audit` | Last 200 audit events by default; the filter can request 1,000. |
+| Workbench `/workbench` | `/rag/info` plus on-demand agent and batch calls for the selected case ids. |
+| Case `/cases/{id}` | The full case view: email, attachments, comparison, drafts, errors, and pipeline trace. |
+
+Workarounds while using the demo:
+
+- Stay on Inbox filters instead of opening Seven fields or Audit until you need them.
+- Keep Audit at "last 200", not 1,000.
+- After the first paint, wait for the skeleton to finish; a slow response is usually a large in-memory scan, not a hung API.
+- Check `/health` if the sidebar still says "API offline".
+
+This is a known demo limitation, not a failed load. Planned mitigations (not shipped): shared client cache across routes, narrower list payloads, and server-side pagination for dashboard aggregations.
 
 ## 18. Repository map
 
@@ -1023,6 +1074,8 @@ NovaShip_Averis/
 - The Bash run-mode helper is Windows-oriented; use direct commands on macOS/Linux.
 - The private scorer ground truth is not included in Git.
 - There is no repository `LICENSE` file. Do not assume redistribution or commercial-use rights until the maintainers add one.
+- Demo UI navigation can be slow. Secondary pages refetch large in-memory scans of the 520-case dataset; there is no shared client cache across routes. See [§17](#pages-load-slowly-after-sign-in).
+- Incomplete-data handling today is staff-side (`WAITING_DOCUMENTS` / `HUMAN_REVIEW`, upload and retry). Automatic customer-facing action cards, a customer portal, shipment milestones, and a no-overwrite re-check loop are the intended continuation in [§21](#21-end-to-end-shipping-workflow), not shipped UI.
 - The project is a production-style prototype. It still needs deployment-specific Gmail acceptance testing, load testing, observability, rate limiting, operational backups, and a formal security review before production use.
 
 ## 20. Additional documentation
@@ -1043,6 +1096,95 @@ NovaShip_Averis/
 | [P2.md](P2.md) | Assistant and safety workstream |
 | [P3.md](P3.md) | Backend, Supabase, and cloud workstream |
 | [P4.md](P4.md) | Frontend and end-to-end workstream |
+
+## 21. End-to-end shipping workflow
+
+SI vs Draft BL verification is the first major checkpoint, not the end of the shipment. Incomplete, mismatched, or missing data should keep the case moving: request the missing item, wait, ingest the new document through the same guarded pipeline, and never overwrite earlier evidence.
+
+### Intended lifecycle
+
+```text
+Email received
+  -> classify
+  -> check attachments
+  -> SI vs BL verification
+  -> resolve mismatch or incomplete data
+  -> human approval
+  -> customer action if needed
+  -> corrected document or confirmation
+  -> re-check (security -> extract -> compare -> review -> approve)
+  -> finalize documents
+  -> shipment processing
+  -> milestone tracking
+  -> completion
+  -> audit / archive
+```
+
+```mermaid
+flowchart TD
+    Email[Email received] --> Classify[Classify]
+    Classify --> Attach[Check attachments]
+    Attach --> Verify[SI vs BL verification]
+    Verify --> Gap{Mismatch or incomplete?}
+    Gap -->|Yes| Resolve[Create a required action]
+    Resolve --> Staff[Internal review]
+    Staff --> NeedCust{Customer action needed?}
+    NeedCust -->|Yes| Customer[Customer view]
+    Customer --> NewDoc[New document or confirmation]
+    NewDoc --> Recheck[Security scan, extract, compare, review]
+    Recheck --> Staff
+    NeedCust -->|No| Approve[Human approval]
+    Gap -->|No| Approve
+    Approve --> Finalize[Finalize documents]
+    Finalize --> Ship[Shipment processing]
+    Ship --> Miles[Milestone tracking]
+    Miles --> Done[Completion]
+    Done --> Archive[Audit and archive]
+```
+
+### Incomplete data auto-management
+
+A missing, blank, unreadable, or low-confidence field is **not** treated as a mismatch and is **not** guessed. The case stays open and the workflow asks for the next concrete input.
+
+| Situation | Current behaviour (shipped) | Intended auto-management |
+| --- | --- | --- |
+| Missing SI or Draft BL | `WAITING_DOCUMENTS` with the exact reason; staff upload and retry | Same case stays open; customer sees "please provide the missing document" |
+| Unreadable scan or corrupt file | `HUMAN_REVIEW` / `unreadable`; no fabricated values | Customer is asked for a readable copy; staff still see the failed extraction evidence |
+| Blank or low-confidence field | `LOW_CONFIDENCE_REVIEW` / `missing_value` | Customer is asked to confirm or supply the value in plain language |
+| Field mismatch | `MISMATCH_DETECTED` with SI vs BL evidence | Internal evidence stays internal; customer sees an action, not the raw SI/BL numbers unless disclosure is approved |
+| Customer uploads a correction | Staff upload on the case, then retry | Automatic re-entry: new document → security scan → extraction → comparison → review → approval |
+
+The re-check rule: **append, do not overwrite**. The new file is a new attachment with its own checksum, extraction, comparison, and audit events. Previous documents, field results, drafts, and decisions remain in the timeline.
+
+### Internal view vs customer view
+
+Customers are part of the workflow, but they do not use the operations dashboard. Internal staff keep the evidence-heavy tools. Customers get a separate, narrower view.
+
+| Internal staff see | Customers should see |
+| --- | --- |
+| Seven-field evidence, page/line/snippet, confidence | Shipment status and required actions |
+| AI rationale, policies, security alerts | Documents they must provide or confirm |
+| Review, draft, approve, share, retry tools | Confirmation requests and approved documents |
+| Full audit log and Ask AI over case evidence | Milestones, notifications, and a simple customer Ask AI |
+
+Example:
+
+- Internal: `Gross Weight: SI 22,000 kg / BL 22,001 kg — MISMATCH. Evidence: BL page 2.`
+- Customer: `Action Required: Please confirm the correct shipment weight so processing can continue.`
+
+Customer Ask AI is grounded only in that customer's shipment: status, requested actions, documents they already supplied, and approved outcomes. It must not expose other cases, internal confidence scores, security signals, policy text, or unapproved field evidence.
+
+### What is shipped vs not shipped
+
+| Stage | Status |
+| --- | --- |
+| Ingest, classify, attachment check, seven-field verification | Shipped |
+| Human approval, internal drafts, Notify Party / selected-user share | Shipped |
+| Staff upload + retry for missing or unreadable documents | Shipped |
+| Incomplete data routed to `WAITING_DOCUMENTS` or `HUMAN_REVIEW` instead of a guessed verdict | Shipped |
+| Customer-facing portal, customer Ask AI, and customer-safe action copy | Intended, not shipped |
+| Automatic re-check loop after a customer upload, with no overwrite | Intended; retry exists for staff today |
+| Finalize documents, shipment processing, milestone tracking, archive | Intended, not shipped |
 
 ---
 

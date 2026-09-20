@@ -10,6 +10,7 @@ type Me = { id: string; email: string; display_name: string; roles: string[]; pe
 // `perm` hides the entry for roles the API would reject anyway (Audit: Supervisor/Admin/Auditor; Policies: Ops/Supervisor/Admin).
 const NAV: { href: string; label: string; icon: string; perm?: string }[] = [
   { href: "/", label: "Inbox", icon: "inbox" },
+  { href: "/workbench", label: "Workbench", icon: "bench" },
   { href: "/verification", label: "Seven fields", icon: "check" },
   { href: "/security", label: "Security", icon: "shield" },
   { href: "/agent", label: "AI agent", icon: "spark" },
@@ -174,6 +175,7 @@ function initials(name?: string | null) {
 function NavIcon({ name }: { name: string }) {
   const paths: Record<string, React.ReactNode> = {
     inbox: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 9h5l2 3h4l2-3h5" /></>,
+    bench: <><rect x="3" y="14" width="18" height="6" rx="1" /><path d="M6 14V8h4v6M14 14V6h4v8" /></>,
     check: <><rect x="4" y="3" width="16" height="18" rx="2" /><path d="m8 12 2.5 2.5L16 9" /></>,
     shield: <path d="M12 3 19 6v5c0 4.7-3 7.9-7 10-4-2.1-7-5.3-7-10V6l7-3Z" />,
     spark: <path d="m12 2 1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9L12 2Zm7 14 .8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16Z" />,

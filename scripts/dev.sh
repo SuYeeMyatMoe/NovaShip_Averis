@@ -27,15 +27,30 @@ proc_name() {
   '
 }
 
+stop_local_uvicorn() {
+  # Reload parent can die while a multiprocessing child keeps 127.0.0.1:8000.
+  powershell.exe -NoProfile -Command "
+    Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" -ErrorAction SilentlyContinue |
+      Where-Object { \$_.CommandLine -match 'uvicorn|multiprocessing\\.spawn' } |
+      ForEach-Object {
+        Write-Host \"Stopping leftover uvicorn python (PID \$(\$_.ProcessId))\"
+        & taskkill /PID \$_.ProcessId /T /F | Out-Null
+      }
+  " 2>/dev/null || true
+}
+
 stop_local_listeners() {
   local port="$1"
   local pid name
+  stop_local_uvicorn
   for pid in $(listening_pids "$port"); do
     name="$(proc_name "$pid")"
     case "$name" in
-      node.exe|python.exe|python3.exe|node|python|python3)
-        echo "Stopping local $name (PID $pid) on port $port"
-        taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
+      node.exe|python.exe|python3.exe|node|python|python3|"")
+        if [ -n "$name" ] || [ "$port" = "$API_PORT" ]; then
+          echo "Stopping local ${name:-orphaned} (PID $pid) on port $port"
+          taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
+        fi
         ;;
     esac
   done

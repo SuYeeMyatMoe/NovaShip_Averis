@@ -585,7 +585,7 @@ class DraftDecision(BaseModel):
 class BatchRequest(BaseModel):
     action: Literal[
         "classify", "mark_no_action", "assign", "compare", "draft",
-        "export", "archive", "request_review"
+        "export", "export_xlsx", "archive", "request_review"
     ]
     case_ids: list[str]
     params: dict[str, Any] = Field(default_factory=dict)

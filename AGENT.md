@@ -30,8 +30,9 @@ Both call the same deterministic functions. The LangGraph version is the "automa
 | `backend/app/core/recommendation.py` + `core/policy.py` | node 7 | action recommendation from the deterministic result and the versioned policy. | no |
 | `backend/app/ai/summary_draft.py` | nodes 8, 9 | case summary + reply draft from the verified result. | optional polish, guarded (any dropped SI/BL value rejects the polish) |
 | `backend/app/ai/assistant.py` | Ask AI | grounded Q&A, translation, share message, guardrails. | free-form questions; post-checked |
-| `backend/app/ai/anomaly.py` | signals | unusual-behaviour signals with evidence. | no |
-| `backend/app/ai/llm.py` | provider | `LLM_PROVIDER=openai / none`. Falls back to `none` silently when a key is missing. | |
+| `backend/app/ai/anomaly.py` | signals | unusual-behaviour signals with evidence (documents). | no |
+| `backend/app/ai/operator_behaviour.py` | operator guard | 3 USER mutations → auto-draft (never send); burst / login-fail / share-denied / rapid-archive warnings. | no |
+| `backend/app/ai/llm.py` | provider | `LLM_PROVIDER=openai / gemini / none`. Falls back to `none` silently when a key is missing. Prompts are not persisted. | |
 
 ### LangGraph layer (`backend/app/agents/`)
 | File | Reference equivalent | What it does |
@@ -49,7 +50,7 @@ Both call the same deterministic functions. The LangGraph version is the "automa
 `GET /agent/graph` (mermaid) · `POST /agent/run/{case_id}` · `GET /agent/state/{case_id}` · `POST /agent/resume/{case_id}` · `GET /rag/info` · `POST /rag/search` · `POST /rag/reindex` (Admin) · `GET /dashboard/fields` · `GET /dashboard/field/{field}` · `GET /security/queue` · `GET /audit`
 
 ### Frontend
-`frontend/app/agent/page.tsx` (console), `frontend/components/agent-panel.tsx` (AI Agent tab on a case), `frontend/app/security/page.tsx` (security agent queue), `frontend/app/verification/page.tsx` (seven-field statistics), `frontend/app/audit/page.tsx`, `frontend/app/welcome/page.tsx` (user guide).
+`frontend/app/agent/page.tsx` (graph diagram), `frontend/app/workbench/page.tsx` (operator run console: agent run/resume, batch, CSV/XLSX, RAG info), `frontend/components/agent-panel.tsx` (AI Agent tab on a case), `frontend/app/security/page.tsx` (security agent queue + unusual operator signals), `frontend/app/verification/page.tsx` (seven-field statistics), `frontend/app/audit/page.tsx`, `frontend/app/welcome/page.tsx` (user guide).
 
 ## 3. How LangGraph and LangChain are used
 
@@ -75,7 +76,7 @@ START -> security_precheck -> security_agent
 * Checkpointer: `MemorySaver` by default (state lives while the API process runs). For production set `LANGGRAPH_CHECKPOINT=postgres` and `LANGGRAPH_PG_URL=postgresql://...` (Supabase connection string) and install `pip install langgraph-checkpoint-postgres "psycopg[binary]"`; paused graphs then survive restarts.
 * Mermaid of the compiled graph: `GET /agent/graph` or the AI agent page.
 
-**LangChain** is used for (1) the `@tool` wrappers in `tools.py`, (2) the embedding classes in `rag.py` (`langchain_google_genai.GoogleGenerativeAIEmbeddings`, `langchain_openai.OpenAIEmbeddings`). The chat calls themselves go through `app/ai/llm.py` (OpenAI SDK) so the same code works with or without LangChain.
+**LangChain** is used for (1) the `@tool` wrappers in `tools.py`, (2) the embedding classes in `rag.py` (`langchain_google_genai.GoogleGenerativeAIEmbeddings`, `langchain_openai.OpenAIEmbeddings`), (3) Gemini chat/vision when `LLM_PROVIDER=gemini` or OCR is on. OpenAI chat still goes through `app/ai/llm.py` (OpenAI SDK).
 
 ### The security agent
 `nodes.security_agent` reads the deterministic signals plus the email excerpt and asks the LLM (prompt `SECURITY_AGENT_PROMPT`) for `outcome, confidence, reasoning, recommended_action`. Guard: the agent may only **escalate** (SAFE -> SUSPICIOUS -> SPAM -> SECURITY_REVIEW), never downgrade a rule-based verdict. Without an LLM key it returns the rule verdict with `decided_by: rule`. Everything the agent flags is listed on the Security page (`GET /security/queue`).
@@ -95,6 +96,8 @@ START -> security_precheck -> security_agent
    * `local`: hashing fallback (offline, keyword recall only). Default so the demo never breaks.
 3. **Store** (`VECTOR_STORE`): `local` writes `backend/data/index.json`; `supabase` writes the `case_embeddings` table (migration `supabase/migrations/0003_vector.sql`, pgvector + `match_case_chunks` RPC). Set `vector(768)` or `vector(1536)` in the migration to match the provider.
 4. **Ask AI flow**: rule branches answer the common questions directly from the case (no retrieval needed). For any other question `assistant.answer_question` retrieves the top 5 chunks, adds them to the grounded context and (if an LLM key is set) asks the model with `ASK_PROMPT`; the answer is post-checked (no un-flagged field may be called a mismatch) and cites chunk ids. Without a key it returns the best matching knowledge chunk.
+
+Sharing, RAG, and training stay separate: Notify Party / share is operational disclosure (RBAC + preview + audit), RAG retrieves scoped chunks for Ask AI, and the only trainer is `backend/scripts/train_intent_classifier.py` on the SDOC fixture bundle. There is no "train on live inbox" path. Prompts are not persisted.
 
 ```bash
 cd backend
@@ -118,6 +121,8 @@ Order of operations for P3: run `0001_schema.sql`, `0002_rls.sql`, `0003_vector.
 | Variable | Get it at | Unlocks |
 |---|---|---|
 | `LLM_PROVIDER=openai` + `OPENAI_API_KEY=sk-proj-...` | platform.openai.com -> API keys | security agent reasoning, intent tie-break, extraction fallback, draft polish, free-form Ask AI, translation (`LLM_MODEL=gpt-4.1-mini` in the example configuration) |
+| `LLM_PROVIDER=gemini` + `GOOGLE_API_KEY=AIzaSy...` | aistudio.google.com/app/apikey | Same chat uses as OpenAI, via `GEMINI_CHAT_MODEL` (default `gemini-2.0-flash`). Comparator stays code-only. |
+| `OCR_ENABLED=1` + `GOOGLE_API_KEY` | aistudio.google.com/app/apikey | Gemini vision OCR on image-only PDFs, then pytesseract if installed. Unreadable still escalates. |
 | `EMBEDDING_PROVIDER=gemini` + `GOOGLE_API_KEY=AIzaSy...` | aistudio.google.com/app/apikey | Gemini `text-embedding-004` for RAG |
 | `EMBEDDING_PROVIDER=openai` | (uses `OPENAI_API_KEY`) | OpenAI embeddings for RAG |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET` | Supabase -> Project Settings -> API | persistence, RLS, storage, JWT auth |
@@ -160,7 +165,7 @@ Temporarily leave a service out while iterating:
 ### A. Before Supabase, email and keys (offline, memory repo)
 ```bash
 cd backend
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 141 tests
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 197 tests
 python scripts/run_bundle.py                                      # score requires the private ground-truth file
 python -m app.agents.create_index                                 # local RAG index
 uvicorn app.main:app --port 8000                                  # then in another terminal:
@@ -176,8 +181,12 @@ curl -s -X POST localhost:8000/agent/resume/case_email_004 -H "Content-Type: app
 | Scanned PDF | `case_email_512` | pause with `review_reason = unreadable`, no mismatch asserted |
 | Draft BL missing | `case_email_507` | WAITING_DOCUMENTS; upload a BL on the Attachments tab -> comparison runs |
 | Wrong document (invoice) | `case_email_501` | `review_reason = wrong_doc_type` |
-| Ops staff tries to notify external | any mismatch case as `u_ops_1` | 403 + `SHARE_DENIED` audit |
+| Ops staff tries to notify external | any mismatch case as `u_ops_1` | 403 + `SHARE_DENIED` + `OPERATOR_SHARE_DENIED` warning; account is not locked |
 | Ask AI adversarial | any | "send now without approval" refused; "invent a mismatch" refused |
+| Three operator actions | reject then two assigns on a mismatch case | auto-saved draft, `AUTO_DRAFT_AFTER_REPEATED_ACTIONS`, never sent |
+| Excel export | Inbox or `/workbench` Export Excel | `.xlsx` with Cases, Field results, Summary; selected `case_ids` only |
+
+Workbench: `/workbench` runs the same `/agent/*` and `/cases/batch` APIs. `/agent` stays the graph diagram.
 
 ### B. After Supabase
 Same commands with `REPO_BACKEND=supabase`. Then check rows: `select count(*) from cases;` (520), `select * from audit_events order by timestamp desc limit 5;`, `select count(*) from case_embeddings;` after `create_index`. Restart the API and confirm data persists (memory mode would have lost it).

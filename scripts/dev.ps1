@@ -42,12 +42,23 @@ function Get-ProcessNameSafe([int]$Id) {
   try { return (Get-Process -Id $Id -ErrorAction Stop).ProcessName } catch { return "" }
 }
 
+function Stop-LocalUvicorn {
+  # Reload parent can die while a multiprocessing child keeps 127.0.0.1:8000.
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match "uvicorn|multiprocessing\.spawn" } |
+    ForEach-Object {
+      Write-Host "Stopping leftover uvicorn python (PID $($_.ProcessId))"
+      & taskkill /PID $_.ProcessId /T /F | Out-Null
+    }
+}
+
 function Stop-LocalListeners([int]$Port) {
+  Stop-LocalUvicorn
   foreach ($id in (Get-ListeningPids $Port)) {
     $name = Get-ProcessNameSafe $id
-    if ($name -match "^(node|python|python3)$") {
+    if ($name -match "^(node|python|python3)$" -or ($name -eq "" -and $Port -eq $ApiPort)) {
       Write-Host "Stopping local $name (PID $id) on port $Port"
-      & taskkill /PID $id /T /F | Out-Null
+      & taskkill /PID $id /T /F 2>$null | Out-Null
     }
   }
 }

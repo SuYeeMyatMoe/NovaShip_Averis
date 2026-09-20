@@ -81,16 +81,11 @@ def rag_reindex(body: dict[str, Any] | None = None, user: UserRecord = Depends(r
 
 
 # ---------------------------------------------------------------- seven-field analytics
-@router.get("/dashboard/fields")
-def field_stats(user: UserRecord = Depends(require("view_case"))):
-    """Per-field statistics across all compared cases: match / mismatch / review counts + example cases."""
-    repo = get_repo()
+def _field_stats(cases) -> list[dict[str, Any]]:
     stats = {f: {"field": f, "label": FIELD_LABELS[f], "match": 0, "mismatch": 0, "review": 0, "examples": []} for f in SEVEN_FIELDS}
-    compared = 0
-    for c in repo.list_cases():
+    for c in cases:
         if not c.comparison:
             continue
-        compared += 1
         for fld in c.comparison.fields:
             s = stats[fld.field]
             if fld.result.value == "MATCH":
@@ -101,7 +96,28 @@ def field_stats(user: UserRecord = Depends(require("view_case"))):
                     s["examples"].append({"case_id": c.id, "si": fld.si_original, "bl": fld.bl_original})
             else:
                 s["review"] += 1
-    return {"compared_cases": compared, "fields": list(stats.values())}
+    return list(stats.values())
+
+
+def _security_rows(cases, emails: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for c in cases:
+        if c.security.outcome.value == "SAFE" and not c.anomalies:
+            continue
+        e = emails.get(c.source_email_id)
+        rows.append({"case_id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "outcome": c.security.outcome.value, "score": c.security.score,
+                     "signals": [s.model_dump(mode="json") for s in c.security.signals], "anomalies": [a.model_dump(mode="json") for a in c.anomalies], "status": c.status.value})
+    order = {"SECURITY_REVIEW": 0, "SUSPICIOUS": 1, "SPAM": 2, "SAFE": 3}
+    rows.sort(key=lambda r: (order.get(r["outcome"], 9), -r["score"]))
+    return rows
+
+
+@router.get("/dashboard/fields")
+def field_stats(user: UserRecord = Depends(require("view_case"))):
+    """Per-field statistics across all compared cases: match / mismatch / review counts + example cases."""
+    cases = get_repo().list_cases()
+    compared = sum(1 for c in cases if c.comparison)
+    return {"compared_cases": compared, "fields": _field_stats(cases)}
 
 
 @router.get("/dashboard/field/{field}")
@@ -109,6 +125,7 @@ def field_cases(field: str, result: Optional[str] = None, user: UserRecord = Dep
     if field not in SEVEN_FIELDS:
         raise HTTPException(404, detail={"error": f"unknown field {field}", "category": "COMPARISON_ERROR"})
     repo = get_repo()
+    emails = {e.id: e for e in repo.list_emails()}
     rows = []
     for c in repo.list_cases():
         if not c.comparison:
@@ -116,7 +133,7 @@ def field_cases(field: str, result: Optional[str] = None, user: UserRecord = Dep
         fld = next(x for x in c.comparison.fields if x.field == field)
         if result and fld.result.value != result:
             continue
-        e = repo.get_email(c.source_email_id)
+        e = emails.get(c.source_email_id)
         rows.append({"case_id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "result": fld.result.value, "si": fld.si_original, "bl": fld.bl_original,
                      "confidence": fld.confidence, "status": c.status.value, "si_label": fld.si_evidence.label_found, "bl_label": fld.bl_evidence.label_found})
     rows.sort(key=lambda r: (r["result"] == "MATCH", r["case_id"]))
@@ -127,15 +144,8 @@ def field_cases(field: str, result: Optional[str] = None, user: UserRecord = Dep
 @router.get("/security/queue")
 def security_queue(user: UserRecord = Depends(require("view_case"))):
     repo = get_repo()
-    rows = []
-    for c in repo.list_cases():
-        if c.security.outcome.value == "SAFE" and not c.anomalies:
-            continue
-        e = repo.get_email(c.source_email_id)
-        rows.append({"case_id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "outcome": c.security.outcome.value, "score": c.security.score,
-                     "signals": [s.model_dump(mode="json") for s in c.security.signals], "anomalies": [a.model_dump(mode="json") for a in c.anomalies], "status": c.status.value})
-    order = {"SECURITY_REVIEW": 0, "SUSPICIOUS": 1, "SPAM": 2, "SAFE": 3}
-    rows.sort(key=lambda r: (order.get(r["outcome"], 9), -r["score"]))
+    emails = {e.id: e for e in repo.list_emails()}
+    rows = _security_rows(repo.list_cases(), emails)
     return {"total": len(rows), "items": rows}
 
 

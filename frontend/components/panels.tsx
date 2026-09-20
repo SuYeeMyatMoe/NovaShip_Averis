@@ -240,12 +240,24 @@ export function EmailPanel({ c }: { c: CaseView }) {
 // ------------------------------------------------------------------ Attachments
 export function AttachmentsPanel({ c, onChange, say }: { c: CaseView; onChange: () => void; say: (m: string, k?: "ok" | "err") => void }) {
   const [open, setOpen] = useState<string | null>(null);
+  const [texts, setTexts] = useState<Record<string, string>>({});
   const [kind, setKind] = useState("BL");
   const fileRef = useRef<HTMLInputElement>(null);
   const upload = async () => {
     const f = fileRef.current?.files?.[0]; if (!f) return say("Choose a file", "err");
     const fd = new FormData(); fd.append("file", f); fd.append("kind", kind);
     try { await api(`/cases/${c.id}/upload`, { method: "POST", body: fd }); say("Uploaded — pipeline re-run"); onChange(); } catch (e: any) { say(e.message, "err"); }
+  };
+  const viewText = async (id: string) => {
+    if (open === id) { setOpen(null); return; }
+    setOpen(id);
+    const att = (c.email?.attachments || []).find((a) => a.id === id);
+    if (att?.raw_text) { setTexts((t) => ({ ...t, [id]: att.raw_text as string })); return; }
+    if (texts[id] !== undefined) return;
+    try {
+      const d = await api<{ raw_text: string | null }>(`/cases/${c.id}/documents/${id}`);
+      setTexts((t) => ({ ...t, [id]: d.raw_text || "" }));
+    } catch { setTexts((t) => ({ ...t, [id]: "" })); }
   };
   const atts = c.email?.attachments || [];
   return (
@@ -260,11 +272,11 @@ export function AttachmentsPanel({ c, onChange, say }: { c: CaseView; onChange: 
             <td>{a.detected_type.replace(/_/g, " ")} <span className="text-ink-400">({a.detection_confidence.toFixed(2)})</span></td>
             <td><Badge className={a.extraction_status === "EXTRACTED" ? "bg-match-bg text-match-fg" : "bg-mismatch-bg text-mismatch-fg"}>{a.extraction_status}</Badge> {a.extraction_confidence > 0 && <span className="text-ink-400">{a.extraction_confidence.toFixed(2)}</span>}{a.is_duplicate_of && <div className="text-[10px] text-review">duplicate of {a.is_duplicate_of}</div>}</td>
             <td className="font-mono text-[10px] text-ink-500">{a.size_bytes} B · {a.checksum.slice(0, 12)}…</td>
-            <td className="whitespace-nowrap"><Button kind="ghost" onClick={() => setOpen(open === a.id ? null : a.id)}>{open === a.id ? "Hide text" : "View text"}</Button> <a className="text-accent hover:underline" href={`${API_BASE}/cases/${c.id}/documents/${a.id}/raw`} target="_blank" rel="noreferrer">original ↗</a></td>
+            <td className="whitespace-nowrap"><Button kind="ghost" onClick={() => viewText(a.id)}>{open === a.id ? "Hide text" : "View text"}</Button> <a className="text-accent hover:underline" href={`${API_BASE}/cases/${c.id}/documents/${a.id}/raw`} target="_blank" rel="noreferrer">original ↗</a></td>
           </tr>
         ))}</tbody>
       </table></div>
-      {open && <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-ink-200 bg-ink-50 p-3 font-mono text-[11px] scrollbar-thin">{atts.find((a) => a.id === open)?.raw_text || "(no extractable text — unreadable / image-only / empty)"}</pre>}
+      {open && <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-ink-200 bg-ink-50 p-3 font-mono text-[11px] scrollbar-thin">{texts[open] || atts.find((a) => a.id === open)?.raw_text || "(no extractable text — unreadable / image-only / empty)"}</pre>}
       <Card title="Upload / re-link a missing document">
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <select value={kind} onChange={(e) => setKind(e.target.value)} className="rounded-md border border-ink-200 px-2 py-1"><option value="SI">Shipping Instruction</option><option value="BL">Draft BL</option><option value="auto">Auto-detect</option></select>

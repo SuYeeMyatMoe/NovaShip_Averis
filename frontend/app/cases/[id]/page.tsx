@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { api, post, type CaseView, type ComparisonField } from "@/lib/api";
+import { api, post, getSession, type CaseView, type ComparisonField } from "@/lib/api";
 import { Badge, Button, Card, Confidence, Empty, KV, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
 import { EvidencePanel, SevenFieldCard } from "@/components/comparison";
 import { CollaborationPanel } from "@/components/collab";
@@ -23,13 +23,29 @@ export default function CasePage() {
   const [evField, setEvField] = useState<ComparisonField | null>(null);
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 3500); };
   const load = useCallback(() => api<CaseView>(`/cases/${id}`).then((d) => { setC(d); setErr(null); }).catch((e) => setErr(e.message)), [id]);
-  useEffect(() => { load(); api("/me").then((m) => setPerms(m.permissions)).catch(() => {}); }, [load]);
+  useEffect(() => {
+    load();
+    const permsFromSession = getSession()?.user.permissions;
+    if (permsFromSession) setPerms(permsFromSession);
+    else api("/me").then((m) => setPerms(m.permissions)).catch(() => {});
+  }, [load]);
 
   if (err) return <div className="rounded-xl border border-mismatch bg-mismatch-bg p-4 text-sm text-mismatch-fg">Could not load case: {err}</div>;
   if (!c) return <div className="p-8 text-center text-sm text-ink-500">Loading case…</div>;
   const e = c.email!;
   const docs: Record<string, { name: string; text: string | null }> = Object.fromEntries(e.attachments.map((a) => [a.id, { name: a.file_name, text: a.raw_text }]));
-  const act = async (path: string, body?: any) => { try { await post(`/cases/${c.id}${path}`, body); say("Done"); load(); } catch (x: any) { say(x.message, "err"); } };
+  const act = async (path: string, body?: any) => {
+    try {
+      await post(`/cases/${c.id}${path}`, body);
+      const d = await api<CaseView>(`/cases/${c.id}`);
+      setC(d);
+      const notice = (d.anomalies || []).find((a) => a.signal === "AUTO_DRAFT_AFTER_REPEATED_ACTIONS" || a.signal.startsWith("OPERATOR_"));
+      if (notice) say(notice.evidence, notice.signal.startsWith("OPERATOR_") ? "err" : "ok");
+      else say("Done");
+    } catch (x: any) {
+      say(x.message, "err");
+    }
+  };
 
   return (
     <div className="min-w-0 space-y-4">
@@ -98,7 +114,7 @@ export default function CasePage() {
               <KV k="Security" v={`${c.security.outcome} · score ${c.security.score}`} /><KV k="Why" v={<span className="text-xs">{c.security.rationale}</span>} />
               {c.security.signals.length > 0 && <ul className="mt-2 space-y-1 text-xs">{c.security.signals.map((s, i) => <li key={i} className="rounded bg-ink-50 p-1.5"><b>{s.signal}</b> <span className="text-ink-500">({s.severity})</span> — {s.evidence} <span className="text-ink-500">→ {s.recommended_action}</span></li>)}</ul>}
             </Card>
-            {c.anomalies.length > 0 && <Card title="Unusual behaviour signals"><ul className="space-y-1 text-xs">{c.anomalies.map((a, i) => <li key={i} className="rounded bg-review-bg/60 p-1.5"><b>{a.signal}</b> <span className="text-ink-500">({a.severity})</span> — {a.evidence} <span className="text-ink-500">→ {a.recommended_action}</span></li>)}</ul></Card>}
+            {c.anomalies.length > 0 && <Card title={c.anomalies.some((a) => a.signal.startsWith("OPERATOR_") || a.signal.startsWith("AUTO_DRAFT")) ? "Unusual operator signals" : "Unusual behaviour signals"}><ul className="space-y-1 text-xs">{c.anomalies.map((a, i) => <li key={i} className={`rounded p-1.5 ${a.signal.startsWith("OPERATOR_") || a.signal.startsWith("AUTO_DRAFT") ? "bg-mismatch-bg/50" : "bg-review-bg/60"}`}><b>{a.signal}</b> <span className="text-ink-500">({a.severity})</span> — {a.evidence} <span className="text-ink-500">→ {a.recommended_action}</span></li>)}</ul></Card>}
             <Card title="Documents">
               <KV k="SI" v={c.si_available ? <span className="text-match-fg">available</span> : <span className="text-review-fg">missing / unreadable</span>} />
               <KV k="Draft BL" v={c.bl_available ? <span className="text-match-fg">available</span> : <span className="text-review-fg">missing / unreadable</span>} />

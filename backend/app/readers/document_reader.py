@@ -3,7 +3,7 @@ Attachment readers. Content is NEVER executed - only parsed to text.
 
 Returns a ReadResult with raw text, page count, status and a safe error note.
 Supported: .txt .pdf (text layer) .docx .xlsx  |  image-only PDFs -> UNREADABLE
-(OCR hook available via OCR_ENABLED=1 + pytesseract, optional).
+(OCR: OCR_ENABLED=1 tries Gemini vision then pytesseract; still UNREADABLE if both fail).
 """
 from __future__ import annotations
 
@@ -115,13 +115,45 @@ def _read_pdf(data: bytes) -> tuple[str, int, Optional[str]]:
     return text, len(reader.pages), note
 
 
-def _ocr_pdf(data: bytes) -> str:  # pragma: no cover - optional path
+def _ocr_pdf(data: bytes) -> str:
+    gemini = _ocr_pdf_gemini(data)
+    if gemini.strip():
+        return gemini
     try:
         from pdf2image import convert_from_bytes
         import pytesseract
 
         images = convert_from_bytes(data)
         return "\n".join(f"[[PAGE {i+1}]]\n" + pytesseract.image_to_string(im) for i, im in enumerate(images))
+    except Exception:
+        return ""
+
+
+def _ocr_pdf_gemini(data: bytes) -> str:
+    """Gemini vision OCR. Never used for MATCH/MISMATCH. Requires OCR_ENABLED=1 and GOOGLE_API_KEY."""
+    if not os.environ.get("GOOGLE_API_KEY"):
+        return ""
+    try:
+        import base64
+
+        from langchain_core.messages import HumanMessage
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        model = ChatGoogleGenerativeAI(
+            model=os.environ.get("GEMINI_OCR_MODEL", os.environ.get("GEMINI_CHAT_MODEL", "gemini-2.0-flash")),
+            google_api_key=os.environ["GOOGLE_API_KEY"],
+            temperature=0,
+        )
+        b64 = base64.b64encode(data).decode("ascii")
+        msg = HumanMessage(content=[
+            {"type": "text", "text": "Extract all visible text from this scanned shipping document. Return plain text only. Do not invent values that are not visible."},
+            {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{b64}"}},
+        ])
+        resp = model.invoke([msg])
+        text = getattr(resp, "content", "") or ""
+        if isinstance(text, list):
+            text = " ".join(str(part) for part in text)
+        return str(text).strip()
     except Exception:
         return ""
 
