@@ -483,11 +483,12 @@ class ShareRecord(BaseModel):
     message: str
     payload_preview: dict[str, Any] = Field(default_factory=dict)
     due_date: Optional[str] = None
+    confirmation_started_at: Optional[datetime] = None
     sent_at: Optional[datetime] = None
     viewed_at: Optional[datetime] = None
     acknowledged_at: Optional[datetime] = None
     response: Optional[str] = None
-    status: str = "PENDING_CONFIRMATION"  # PENDING_CONFIRMATION | SENT | VIEWED | ACKNOWLEDGED | REJECTED
+    status: str = "PENDING_CONFIRMATION"  # PENDING_CONFIRMATION | CONFIRMING | SENT | VIEWED | ACKNOWLEDGED | REJECTED
 
 
 class UserRecord(BaseModel):

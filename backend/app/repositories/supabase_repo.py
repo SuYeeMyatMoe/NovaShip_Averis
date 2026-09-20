@@ -174,6 +174,18 @@ class SupabaseRepository(BaseRepository):
     def append_audit(self, event: AuditEvent) -> None:
         self._t("audit_events").insert({**_j(event), "tenant_id": self.tenant}).execute()
 
+    def append_audit_once(self, event: AuditEvent) -> bool:
+        res = (
+            self._t("audit_events")
+            .upsert(
+                {**_j(event), "tenant_id": self.tenant},
+                on_conflict="event_id",
+                ignore_duplicates=True,
+            )
+            .execute()
+        )
+        return bool(res.data)
+
     def list_audit(self, case_id: Optional[str] = None) -> list[AuditEvent]:
         q = self._t("audit_events").select("*").eq("tenant_id", self.tenant).order("timestamp")
         if case_id:
@@ -186,20 +198,45 @@ class SupabaseRepository(BaseRepository):
     def save_share(self, share: ShareRecord) -> None:
         self._t("shares").upsert({**_j(share), "tenant_id": self.tenant}).execute()
 
-    def mark_share_sent_if_pending(
+    def mark_share_confirming_if_pending(
         self,
         share_id: str,
-        sent_at: datetime,
+        started_at: datetime,
     ) -> Optional[ShareRecord]:
-        """Use a conditional UPDATE so only one confirmer can claim the send."""
+        """Claim a pending confirmation without exposing it as sent."""
         res = (
             self._t("shares")
-            .update({"status": "SENT", "sent_at": sent_at.isoformat()})
+            .update(
+                {
+                    "status": "CONFIRMING",
+                    "confirmation_started_at": started_at.isoformat(),
+                }
+            )
             .eq("id", share_id)
             .eq("tenant_id", self.tenant)
             .eq("status", "PENDING_CONFIRMATION")
             .execute()
         )
+        if not res.data:
+            return None
+        return ShareRecord(
+            **{key: value for key, value in res.data[0].items() if key != "tenant_id"}
+        )
+
+    def complete_share_confirmation(
+        self,
+        share_id: str,
+        actor_id: str,
+    ) -> Optional[ShareRecord]:
+        """Finalize case, audit, and share state in one PostgreSQL transaction."""
+        res = self.client.rpc(
+            "complete_share_confirmation",
+            {
+                "p_share_id": share_id,
+                "p_tenant_id": self.tenant,
+                "p_actor_id": actor_id,
+            },
+        ).execute()
         if not res.data:
             return None
         return ShareRecord(

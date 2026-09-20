@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.contracts.schemas import (
+    ActorType,
     AuditEvent,
     CaseRecord,
+    CaseStatus,
     EmailMessage,
     PartyContact,
     PolicyRecord,
@@ -115,6 +117,13 @@ class MemoryRepository(BaseRepository):
         with self._lock:
             self.audit.append(event)  # append-only
 
+    def append_audit_once(self, event: AuditEvent) -> bool:
+        with self._lock:
+            if any(existing.event_id == event.event_id for existing in self.audit):
+                return False
+            self.audit.append(event)
+            return True
+
     def list_audit(self, case_id: Optional[str] = None) -> list[AuditEvent]:
         return [a for a in self.audit if case_id is None or a.case_id == case_id]
 
@@ -125,20 +134,102 @@ class MemoryRepository(BaseRepository):
         with self._lock:
             self.shares[share.id] = share
 
-    def mark_share_sent_if_pending(
+    def mark_share_confirming_if_pending(
         self,
         share_id: str,
-        sent_at: datetime,
+        started_at: datetime,
     ) -> Optional[ShareRecord]:
-        """Atomically claim a pending share confirmation in this repository."""
+        """Atomically claim a pending confirmation for recoverable processing."""
         with self._lock:
             share = self.shares.get(share_id)
             if not share or share.status != "PENDING_CONFIRMATION":
                 return None
-            share.status = "SENT"
-            share.sent_at = sent_at
+            share.status = "CONFIRMING"
+            share.confirmation_started_at = started_at
             self.shares[share.id] = share
             return share.model_copy(deep=True)
+
+    def complete_share_confirmation(
+        self,
+        share_id: str,
+        actor_id: str,
+    ) -> Optional[ShareRecord]:
+        """Atomically apply case/audit effects and publish a confirmed share."""
+        with self._lock:
+            share = self.shares.get(share_id)
+            if not share:
+                return None
+            if share.status == "SENT":
+                return share.model_copy(deep=True)
+            if share.status != "CONFIRMING":
+                return None
+
+            case = self.cases.get(share.case_id)
+            if not case:
+                return None
+            case_snapshot = case.model_copy(deep=True)
+            share_snapshot = share.model_copy(deep=True)
+            audit_snapshot = list(self.audit)
+            now = datetime.utcnow()
+            target_status = (
+                CaseStatus.AWAITING_RESPONSE
+                if share.is_external
+                else CaseStatus.ASSIGNED
+            )
+            send_action = (
+                "NOTIFY_PARTY_SENT" if share.is_external else "SHARE_SENT"
+            )
+            before_status = case.status
+
+            try:
+                self.append_audit_once(
+                    AuditEvent(
+                        event_id=f"evt_{share.id}_sent",
+                        case_id=case.id,
+                        timestamp=now,
+                        actor_type=ActorType.USER,
+                        actor_id=actor_id,
+                        action=send_action,
+                        after={
+                            "share_id": share.id,
+                            "recipient_label": share.recipient_label,
+                            "external": share.is_external,
+                            "fields": [
+                                field["field"]
+                                for field in share.payload_preview.get("fields", [])
+                            ],
+                            "due_date": share.due_date,
+                        },
+                    )
+                )
+                if before_status != target_status:
+                    self.append_audit_once(
+                        AuditEvent(
+                            event_id=f"evt_{share.id}_status",
+                            case_id=case.id,
+                            timestamp=now,
+                            actor_type=ActorType.USER,
+                            actor_id=actor_id,
+                            action="STATUS_CHANGED",
+                            before={"status": before_status.value},
+                            after={"status": target_status.value},
+                        )
+                    )
+
+                recipient_id = share.recipient_user_id or share.recipient_party_id
+                if recipient_id and recipient_id not in case.shared_with:
+                    case.shared_with.append(recipient_id)
+                case.status = target_status
+                self.save_case(case)
+                share.status = "SENT"
+                share.sent_at = now
+                self.shares[share.id] = share
+                return share.model_copy(deep=True)
+            except Exception:
+                self.cases[case.id] = case_snapshot
+                self.shares[share.id] = share_snapshot
+                self.audit[:] = audit_snapshot
+                raise
 
     def list_shares(self, case_id: Optional[str] = None) -> list[ShareRecord]:
         return [s for s in self.shares.values() if case_id is None or s.case_id == case_id]

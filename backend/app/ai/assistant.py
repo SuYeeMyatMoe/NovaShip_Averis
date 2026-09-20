@@ -32,7 +32,7 @@ from app.core.policy import explain_policy
 BLOCKED_PATTERNS = [
     (r"\b(send|email|forward|dispatch)\b.*\b(now|directly|immediately|without (approval|review))", "I can prepare a draft, but sending requires a human to approve it in the Draft Actions tab."),
     (r"\b(bypass|skip|ignore)\b.*\b(approval|review|policy|check)", "I can't bypass the approval or policy gates. A supervisor can review the policy in Settings > Policies."),
-    (r"\b(approve|authorize|confirm)\b.*\b(for me|on my behalf|instead of me|this|it)\b", "I can't approve or confirm on a person's behalf. An authorised user must perform that action in the case workflow."),
+    (r"\b(approve|authori[sz]e|confirm)\b.*\b(for me|on my behalf|instead of me|this|it)\b", "I can't approve or confirm on a person's behalf. An authorised user must perform that action in the case workflow."),
     (r"\b(other|another|different)\s+case\b", "I can only answer about the current case. Open the other case to ask about it."),
     (r"\b(make up|invent|pretend|assume)\b.*\b(value|mismatch|field)", "I only report values that appear in the documents and the deterministic comparison; I won't invent values."),
 ]
@@ -245,16 +245,35 @@ _LLM_SYSTEM = """You are the NovaShip case assistant. Answer ONLY from the JSON 
 Rules: never claim a mismatch unless comparison.fields shows result MISMATCH; never say you sent anything;
 the Notify Party value is NOT permission to contact anyone; if the answer is not in the context, say so. Be concise."""
 
+_LLM_ACTION_VERBS = (
+    r"sent|emailed|forwarded|dispatched|approved|authori[sz]ed|confirmed|granted"
+)
+_LLM_ACTION_MODIFIERS = r"(?:(?:already|just|now|successfully|recently)\s+)*"
 _LLM_COMPLETED_ACTION = re.compile(
-    r"(?:\b(?:i|we|the assistant|novaship)\s+"
-    r"(?:(?:have|has|already)\s+)?"
-    r"(?:sent|emailed|forwarded|dispatched|approved|authori[sz]ed|confirmed)\b|"
-    r"\b(?:sent|emailed|forwarded|dispatched|approved|authori[sz]ed|confirmed)\b"
-    r"[^.!?\n]{0,40}\bby\s+(?:me|us|the assistant|novaship)\b|"
-    r"\b(?:email|message|draft|notification|share|request|correction)\b"
-    r"[^.!?\n]{0,40}\b(?:was|were|has\s+been|have\s+been|is\s+already|are\s+already)\s+"
-    r"(?:sent|emailed|forwarded|dispatched|approved|authori[sz]ed|confirmed)\b)",
-    re.I,
+    rf"""
+    (?:
+        \b(?:i|we|the\s+assistant|novaship)
+        (?:['’]ve|\s+(?:have|has))?\s+
+        {_LLM_ACTION_MODIFIERS}(?:{_LLM_ACTION_VERBS})\b
+      |
+        \b(?:{_LLM_ACTION_VERBS})\b
+        [^.!?\n]{{0,40}}\bby\s+(?:me|us|the\s+assistant|novaship)\b
+      |
+        \b(?:email|message|draft|notification|share|request|correction|it|approval|permission|authori[sz]ation)\b
+        [^.!?\n]{{0,40}}\b
+        (?:
+            (?:
+                (?:is|are|was|were)\s+
+              |
+                (?:has|have)\s+{_LLM_ACTION_MODIFIERS}been\s+
+            )
+            {_LLM_ACTION_MODIFIERS}(?:{_LLM_ACTION_VERBS})\b
+          |
+            {_LLM_ACTION_MODIFIERS}(?:went|gone)\s+out\b
+        )
+    )
+    """,
+    re.I | re.X,
 )
 _LLM_MISMATCH_CLAIM = re.compile(
     r"\b(?:mismatch(?:ed)?|differ(?:s|ed|ent)?|discrepanc(?:y|ies)|conflict(?:s|ing)?|"

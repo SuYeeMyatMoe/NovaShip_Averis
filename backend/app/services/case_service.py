@@ -63,6 +63,15 @@ class CaseService:
     def policy(self) -> dict[str, Any]:
         return merged_policy(self.repo.get_active_policy().values)
 
+    @staticmethod
+    def _confirmed_share_response(share: ShareRecord) -> dict[str, Any]:
+        return {
+            "share": share.model_dump(mode="json"),
+            "requires_confirmation": False,
+            "preview": share.message,
+            "payload": share.payload_preview,
+        }
+
     # ------------------------------------------------------------ actions
     def reprocess(self, case_id: str, user: UserRecord, step: str = "all") -> CaseRecord:
         case = self.get(case_id)
@@ -245,17 +254,19 @@ class CaseService:
             self.repo.save_share(share)
             self.pipe.audit(case.id, ActorType.USER, user.id, "SHARE_CREATED", after={"share_id": share.id, "recipient_label": label, "external": is_external, "status": share.status})
             return {"share": share.model_dump(mode="json"), "requires_confirmation": True, "preview": message, "payload": payload}
-        share.status, share.sent_at = "SENT", datetime.utcnow()
+        share.status = "CONFIRMING"
+        share.confirmation_started_at = datetime.utcnow()
         self.repo.save_share(share)
-        if req.recipient_user_id and req.recipient_user_id not in case.shared_with:
-            case.shared_with.append(req.recipient_user_id)
-        if req.recipient_party_id and req.recipient_party_id not in case.shared_with:
-            case.shared_with.append(req.recipient_party_id)
-        self.pipe.audit(case.id, ActorType.USER, user.id, "NOTIFY_PARTY_SENT" if is_external else "SHARE_SENT",
-                        after={"share_id": share.id, "recipient_label": label, "external": is_external, "fields": [f["field"] for f in payload["fields"]], "due_date": req.due_date})
-        self._status(case, CaseStatus.AWAITING_RESPONSE if is_external else CaseStatus.ASSIGNED, user)
-        self.repo.save_case(case)
-        return {"share": share.model_dump(mode="json"), "requires_confirmation": False, "preview": message, "payload": payload}
+        confirmed_share = self.repo.complete_share_confirmation(share.id, user.id)
+        if confirmed_share is None:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "share confirmation was not applied",
+                    "category": "NOTIFICATION_ERROR",
+                },
+            )
+        return self._confirmed_share_response(confirmed_share)
 
     def confirm_share(self, case_id: str, share_id: str, user: UserRecord) -> dict[str, Any]:
         share = self.repo.get_share(share_id)
@@ -296,13 +307,24 @@ class CaseService:
                 )
 
         if share.status == "SENT":
-            return {
-                "share": share.model_dump(mode="json"),
-                "requires_confirmation": False,
-                "preview": share.message,
-                "payload": share.payload_preview,
-            }
-        if share.status != "PENDING_CONFIRMATION":
+            return self._confirmed_share_response(share)
+        if share.status == "PENDING_CONFIRMATION":
+            claimed_share = self.repo.mark_share_confirming_if_pending(
+                share.id,
+                datetime.utcnow(),
+            )
+            share = claimed_share or self.repo.get_share(share.id)
+            if share is None:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "error": "share confirmation was not applied",
+                        "category": "NOTIFICATION_ERROR",
+                    },
+                )
+        if share.status == "SENT":
+            return self._confirmed_share_response(share)
+        if share.status != "CONFIRMING":
             raise HTTPException(
                 409,
                 detail={
@@ -311,19 +333,11 @@ class CaseService:
                 },
             )
 
-        confirmed_share = self.repo.mark_share_sent_if_pending(
-            share.id,
-            datetime.utcnow(),
-        )
+        confirmed_share = self.repo.complete_share_confirmation(share.id, user.id)
         if confirmed_share is None:
             latest_share = self.repo.get_share(share.id)
             if latest_share and latest_share.status == "SENT":
-                return {
-                    "share": latest_share.model_dump(mode="json"),
-                    "requires_confirmation": False,
-                    "preview": latest_share.message,
-                    "payload": latest_share.payload_preview,
-                }
+                return self._confirmed_share_response(latest_share)
             raise HTTPException(
                 409,
                 detail={
@@ -331,39 +345,7 @@ class CaseService:
                     "category": "NOTIFICATION_ERROR",
                 },
             )
-        share = confirmed_share
-        if share.recipient_user_id and share.recipient_user_id not in case.shared_with:
-            case.shared_with.append(share.recipient_user_id)
-        if share.recipient_party_id and share.recipient_party_id not in case.shared_with:
-            case.shared_with.append(share.recipient_party_id)
-        self.pipe.audit(
-            case.id,
-            ActorType.USER,
-            user.id,
-            "NOTIFY_PARTY_SENT" if share.is_external else "SHARE_SENT",
-            after={
-                "share_id": share.id,
-                "recipient_label": share.recipient_label,
-                "external": share.is_external,
-                "fields": [
-                    field["field"]
-                    for field in share.payload_preview.get("fields", [])
-                ],
-                "due_date": share.due_date,
-            },
-        )
-        self._status(
-            case,
-            CaseStatus.AWAITING_RESPONSE if share.is_external else CaseStatus.ASSIGNED,
-            user,
-        )
-        self.repo.save_case(case)
-        return {
-            "share": share.model_dump(mode="json"),
-            "requires_confirmation": False,
-            "preview": share.message,
-            "payload": share.payload_preview,
-        }
+        return self._confirmed_share_response(confirmed_share)
 
     def acknowledge_share(self, share_id: str, user: UserRecord, response: Optional[str]) -> ShareRecord:
         share = self.repo.get_share(share_id)

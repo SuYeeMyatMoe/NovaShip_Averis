@@ -54,16 +54,24 @@ class BaseRepository(ABC):
     @abstractmethod
     def append_audit(self, event: AuditEvent) -> None: ...
     @abstractmethod
+    def append_audit_once(self, event: AuditEvent) -> bool: ...
+    @abstractmethod
     def list_audit(self, case_id: Optional[str] = None) -> list[AuditEvent]: ...
     @abstractmethod
     def save_error(self, err: ProcessingError) -> None: ...
     @abstractmethod
     def save_share(self, share: ShareRecord) -> None: ...
     @abstractmethod
-    def mark_share_sent_if_pending(
+    def mark_share_confirming_if_pending(
         self,
         share_id: str,
-        sent_at: datetime,
+        started_at: datetime,
+    ) -> Optional[ShareRecord]: ...
+    @abstractmethod
+    def complete_share_confirmation(
+        self,
+        share_id: str,
+        actor_id: str,
     ) -> Optional[ShareRecord]: ...
     @abstractmethod
     def list_shares(self, case_id: Optional[str] = None) -> list[ShareRecord]: ...
