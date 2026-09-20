@@ -1,6 +1,6 @@
 # AGENT.md, everything about the AI agent in NovaShip Averis
 
-This file explains every AI part of the system: which file does what, how LangGraph and LangChain are used, how the workflow runs, how data flows today (in-memory) and with Supabase, how to test before and after Supabase, Outlook and the LLM keys are connected, how to rebuild Docker when code changes, and how a demo user tests it.
+This file explains every AI part of the system: which file does what, how LangGraph and LangChain are used, how the workflow runs, how data flows today (in-memory) and with Supabase, how to test before and after Supabase, Gmail and the LLM keys are connected, how to rebuild Docker when code changes, and how a demo user tests it.
 
 ---
 
@@ -121,7 +121,8 @@ Order of operations for P3: run `0001_schema.sql`, `0002_rls.sql`, `0003_vector.
 | `EMBEDDING_PROVIDER=gemini` + `GOOGLE_API_KEY=AIzaSy...` | aistudio.google.com/app/apikey | Gemini `text-embedding-004` for RAG |
 | `EMBEDDING_PROVIDER=openai` | (uses `OPENAI_API_KEY`) | OpenAI embeddings for RAG |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET` | Supabase -> Project Settings -> API | persistence, RLS, storage, JWT auth |
-| `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_MAILBOX`, `EMAIL_PROVIDER=graph` | Azure Portal -> App registrations | Outlook / Microsoft 365 ingestion (`POST /connectors/poll`) |
+| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, `GMAIL_ADDRESS`, `EMAIL_PROVIDER=gmail` | Google Cloud Console + one-time `backend/scripts/gmail_authorize.py` | Primary Gmail ingestion (`POST /connectors/poll`) and approved sending |
+
 | `LANGGRAPH_CHECKPOINT=postgres`, `LANGGRAPH_PG_URL` | Supabase -> Database -> Connection string | durable paused graphs |
 
 Without any key the whole system runs (rules only). Keys add reasoning quality; they never change the seven-field verdict.
@@ -159,8 +160,8 @@ Temporarily leave a service out while iterating:
 ### A. Before Supabase, email and keys (offline, memory repo)
 ```bash
 cd backend
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 58 tests
-python scripts/run_bundle.py                                      # FINAL SCORE = 1.0000
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 141 tests
+python scripts/run_bundle.py                                      # score requires the private ground-truth file
 python -m app.agents.create_index                                 # local RAG index
 uvicorn app.main:app --port 8000                                  # then in another terminal:
 curl -s -X POST localhost:8000/agent/run/case_email_004 -H "X-User-Id: u_sup_1"      # paused: true, next: ["human_review"]
@@ -181,8 +182,8 @@ curl -s -X POST localhost:8000/agent/resume/case_email_004 -H "Content-Type: app
 ### B. After Supabase
 Same commands with `REPO_BACKEND=supabase`. Then check rows: `select count(*) from cases;` (520), `select * from audit_events order by timestamp desc limit 5;`, `select count(*) from case_embeddings;` after `create_index`. Restart the API and confirm data persists (memory mode would have lost it).
 
-### C. After Outlook / Graph
-`EMAIL_PROVIDER=graph` + `MS_*` set. Send a test email with an SI and a Draft BL attached to the shared mailbox, then `POST /connectors/poll?limit=5`. Expect a new case with the right verdict; posting again returns `duplicates_skipped: 1`. Approving a draft with `EMAIL_SEND_MODE=graph` sends through Graph `sendMail` (default `simulate` just records `NOTIFICATION_SENT`).
+### C. After Gmail OAuth
+Set the Gmail client ID, client secret and mailbox address locally, run `python backend/scripts/gmail_authorize.py` once, then use `EMAIL_PROVIDER=gmail`. Send a test email with an SI and a Draft BL attached to the authorized mailbox, then `POST /connectors/poll?limit=5`. Expect a new case with the right verdict; polling again returns `duplicates_skipped: 1`. Approving a draft with `EMAIL_SEND_MODE=gmail` sends through Gmail only after human approval; the default `simulate` mode performs no provider call and records `NOTIFICATION_SIMULATED`. Graph remains available with the corresponding `graph` modes and `MS_*` values.
 
 ### D. After LLM / embedding keys
 `GET /health` log shows `llm=openai`; `GET /rag/info` shows the provider; run `case_email_004` again: `security_agent.decided_by = llm`, Ask AI free-form questions get model answers with citations. The scoreboard must still be 1.0 (`python scripts/run_bundle.py`), because the verdict is deterministic.

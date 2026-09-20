@@ -15,7 +15,9 @@ thread_id == case_id, so one paused conversation per case.
 """
 from __future__ import annotations
 
+import atexit
 import os
+from contextlib import ExitStack
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -26,6 +28,13 @@ from langgraph.types import Command
 from app.agents.nodes import Nodes
 from app.agents.state import GraphState
 from app.repositories.base import BaseRepository
+
+
+# Keep context-managed Postgres checkpointer resources alive for the process lifetime.
+# Calling PostgresSaver.from_conn_string(...).__enter__() on a temporary context
+# manager closes its connection as soon as that temporary is released.
+_CHECKPOINTER_RESOURCES = ExitStack()
+atexit.register(_CHECKPOINTER_RESOURCES.close)
 
 
 def _route_after_security(state: GraphState) -> str:
@@ -75,17 +84,24 @@ def build_graph(repo: BaseRepository, checkpointer=None):
 
 
 def _make_checkpointer():
-    kind = os.environ.get("LANGGRAPH_CHECKPOINT", "memory").lower()
-    if kind == "postgres" and os.environ.get("LANGGRAPH_PG_URL"):
-        try:
-            from langgraph.checkpoint.postgres import PostgresSaver  # pip install langgraph-checkpoint-postgres psycopg[binary]
+    from app.config import ConfigurationError
 
-            saver = PostgresSaver.from_conn_string(os.environ["LANGGRAPH_PG_URL"]).__enter__()
-            saver.setup()
-            return saver
-        except Exception:
-            pass
-    return MemorySaver()
+    kind = os.environ.get("LANGGRAPH_CHECKPOINT", "memory").lower()
+    if kind == "memory":
+        return MemorySaver()
+    if kind != "postgres":
+        raise ConfigurationError("LANGGRAPH_CHECKPOINT must be memory or postgres")
+    pg_url = os.environ.get("LANGGRAPH_PG_URL", "").strip()
+    if not pg_url:
+        raise ConfigurationError("LANGGRAPH_CHECKPOINT=postgres requires LANGGRAPH_PG_URL")
+    try:
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        saver = _CHECKPOINTER_RESOURCES.enter_context(PostgresSaver.from_conn_string(pg_url))
+        saver.setup()
+        return saver
+    except Exception as exc:
+        raise ConfigurationError(f"Postgres LangGraph checkpointer initialization failed ({type(exc).__name__})") from exc
 
 
 class CaseAgent:

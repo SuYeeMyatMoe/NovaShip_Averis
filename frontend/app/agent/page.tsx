@@ -42,8 +42,8 @@ export default function AgentPage() {
       {toast && <Toast {...toast} />}
       <header>
         <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
-        <h1 className="dashboard-number mt-6 text-5xl font-bold tracking-[-.04em] text-[#583521] sm:text-6xl">AI agent</h1>
-        <p className="mt-3 max-w-3xl text-lg font-semibold leading-relaxed text-[#7d6251]">The AI agent classifies, extracts, summarises and prepares drafts for each case. When a human decision is needed, the case pauses until someone reviews it.</p>
+        <h1 className="dashboard-number mt-6 text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl lg:text-6xl">AI agent</h1>
+        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">The AI agent classifies, extracts, summarises and prepares drafts for each case. When a human decision is needed, the case pauses until someone reviews it.</p>
       </header>
 
       <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
@@ -53,8 +53,8 @@ export default function AgentPage() {
               const hit = traceNodes.has(n) || traceNodes.has(alias[n] || "");
               const paused = st?.paused && st?.next?.includes(n);
               return (
-                <li key={n} className={`flex gap-3 rounded-lg border p-2 text-xs transition duration-200 hover:-translate-y-0.5 hover:shadow-sm ${paused ? "border-review bg-review-bg/50" : hit ? "border-match/40 bg-match-bg/30" : "border-orange-100 bg-[#fffdf9]"}`}>
-                  <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full text-[11px] font-semibold ${paused ? "bg-review text-white" : hit ? "bg-match text-white" : "bg-ink-100 text-ink-600"}`}>{i + 1}</span>
+                <li key={n} className={`flex gap-3 rounded-lg border border-orange-200 p-2 text-xs transition duration-200 hover:-translate-y-0.5 hover:border-orange-400 hover:shadow-sm ${paused ? "bg-review-bg/50" : hit ? "bg-match-bg/30" : "bg-[#fffdf9]"}`}>
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent-bg text-[11px] font-bold text-accent-fg ring-1 ring-accent-ring/60">{i + 1}</span>
                   <div><div className="font-mono font-semibold text-ink-900">{n}{n === "compare" && <Badge className="ml-2 bg-ink-900 text-white">deterministic</Badge>}{n === "human_review" && <Badge className="ml-2 bg-review text-white">interrupt</Badge>}</div><div className="text-ink-600">{desc}</div></div>
                 </li>
               );
@@ -64,7 +64,7 @@ export default function AgentPage() {
 
         <div className="space-y-4">
           <Card className="border-orange-200 transition duration-200 hover:-translate-y-1 hover:border-orange-300 hover:shadow-md" title={<span className="text-lg font-bold text-accent">Run on a case</span>}>
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
               <input value={caseId} onChange={(e) => setCaseId(e.target.value)} className="flex-1 rounded-md border border-ink-200 px-2 py-1.5 font-mono text-xs" aria-label="Case id" />
               <Button kind="primary" disabled={busy} onClick={run}>Run graph</Button>
               <Button disabled={busy} onClick={() => load()}>Refresh state</Button>

@@ -8,6 +8,8 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -28,6 +30,7 @@ from app.contracts.schemas import (
     DraftStatus,
     ErrorCategory,
     PolicyRecord,
+    ProcessingError,
     RecipientType,
     ShareRecord,
     ShareRequest,
@@ -40,6 +43,13 @@ from app.repositories.base import BaseRepository
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class DeliveryOutcomeUnknown(RuntimeError):
+    """The provider call started, but its acceptance result is not trustworthy."""
 
 
 class CaseService:
@@ -62,6 +72,72 @@ class CaseService:
 
     def policy(self) -> dict[str, Any]:
         return merged_policy(self.repo.get_active_policy().values)
+
+    @staticmethod
+    def _confirmed_share_response(share: ShareRecord) -> dict[str, Any]:
+        return {
+            "share": share.model_dump(mode="json"),
+            "requires_confirmation": False,
+            "preview": share.message,
+            "payload": share.payload_preview,
+        }
+
+    def _deliver_email(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None) -> tuple[str, Optional[dict[str, Any]]]:
+        recipients = [address.strip() for address in to]
+        copies = [address.strip() for address in (cc or [])]
+        if not recipients or any(not _EMAIL_RE.fullmatch(address) for address in recipients + copies):
+            raise ValueError("outbound email contains an invalid recipient")
+        mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+        if mode == "simulate":
+            return "simulate", None
+        from app.connectors.email_connectors import get_outbound_connector
+
+        connector = get_outbound_connector(mode)
+        if connector is None:  # pragma: no cover - simulate returned above
+            raise RuntimeError("configured outbound connector is unavailable")
+        try:
+            result = connector.send(recipients, subject, body, copies)
+        except Exception as exc:
+            raise DeliveryOutcomeUnknown(
+                "outbound provider outcome is unknown"
+            ) from exc
+        return mode, result
+
+    def _delivery_failure(self, case: CaseRecord, user: UserRecord, item_id: str, exc: Exception) -> None:
+        err = ProcessingError(id=_id("err_notify"), case_id=case.id, category=ErrorCategory.NOTIFICATION_ERROR, step="outbound_email",
+                              message="Outbound email provider rejected or could not accept the message.", safe_details=type(exc).__name__,
+                              recovery="Check the configured email provider credentials/network and retry the approved item.", retryable=True)
+        case.errors.append(err)
+        self.repo.save_error(err)
+        self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", "NOTIFICATION_FAILED",
+                        after={"item_id": item_id, "provider": os.environ.get("EMAIL_SEND_MODE", "simulate"), "error_type": type(exc).__name__, "retryable": True})
+
+    def _delivery_unknown(self, case: CaseRecord, item_id: str, exc: Exception) -> None:
+        cause = exc.__cause__ or exc
+        err = ProcessingError(
+            id=_id("err_notify_unknown"),
+            case_id=case.id,
+            category=ErrorCategory.NOTIFICATION_ERROR,
+            step="outbound_email",
+            message="The provider response was interrupted, so delivery may have occurred.",
+            safe_details=type(cause).__name__,
+            recovery="Reconcile the provider Sent mailbox using the recipient, subject, and approval time before any manual resend.",
+            retryable=False,
+        )
+        case.errors.append(err)
+        self.repo.save_error(err)
+        self.pipe.audit(
+            case.id,
+            ActorType.SYSTEM,
+            "notifier",
+            "NOTIFICATION_OUTCOME_UNKNOWN",
+            after={
+                "item_id": item_id,
+                "provider": os.environ.get("EMAIL_SEND_MODE", "simulate"),
+                "error_type": type(cause).__name__,
+                "retryable": False,
+            },
+        )
 
     # ------------------------------------------------------------ actions
     def reprocess(self, case_id: str, user: UserRecord, step: str = "all") -> CaseRecord:
@@ -119,19 +195,56 @@ class CaseService:
         return case
 
     def approve_draft(self, case_id: str, dec: DraftDecision, user: UserRecord) -> CaseRecord:
-        """Human approval gate. Approving an EXTERNAL draft requires approve_send; marks SENT via the notifier stub."""
+        """Human approval gate; transport success is required before an item becomes SENT."""
         case = self.get(case_id)
         d = self._draft(case, dec.draft_id)
+        if d.status in {DraftStatus.SENT, DraftStatus.SIMULATED}:
+            return case
+        if d.status in {DraftStatus.DELIVERING, DraftStatus.DELIVERY_UNKNOWN}:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "delivery outcome requires provider reconciliation; automatic resend is blocked",
+                    "category": "NOTIFICATION_ERROR",
+                    "retryable": False,
+                },
+            )
         if d.requires_external_approval and not has_permission(user, "approve_send"):
             raise HTTPException(403, detail={"error": "approve_send permission required for external email", "category": "AUTH_ERROR"})
         if dec.edited_body is not None or dec.edited_subject is not None:
-            self.edit_draft(case_id, dec, user)
+            case = self.edit_draft(case_id, dec, user)
+            d = self._draft(case, dec.draft_id)
         before = {"status": d.status.value}
         d.status = DraftStatus.APPROVED
         self.pipe.audit(case.id, ActorType.USER, user.id, "DRAFT_APPROVED", before, {"status": d.status.value, "to": d.to, "subject": d.subject, "note": dec.note})
-        # notifier: outbound email connector (stub records intent; real send wired via EMAIL_SEND_MODE)
-        d.status = DraftStatus.SENT
-        self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", "NOTIFICATION_SENT", after={"channel": "email", "to": d.to, "subject": d.subject, "draft_id": d.id, "mode": "simulated"})
+        configured_mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+        if configured_mode != "simulate":
+            d.status = DraftStatus.DELIVERING
+            self.repo.save_case(case)
+        try:
+            mode, _provider_result = self._deliver_email(d.to, d.subject, d.body, d.cc)
+        except DeliveryOutcomeUnknown as exc:
+            d.status = DraftStatus.DELIVERY_UNKNOWN
+            self._delivery_unknown(case, d.id or dec.draft_id, exc)
+            self.repo.save_case(case)
+            raise HTTPException(
+                502,
+                detail={
+                    "error": "outbound delivery outcome is unknown; automatic retry is blocked pending provider reconciliation",
+                    "category": "NOTIFICATION_ERROR",
+                    "retryable": False,
+                },
+            )
+        except Exception as exc:
+            d.status = DraftStatus.SEND_FAILED
+            self._delivery_failure(case, user, d.id or dec.draft_id, exc)
+            self.repo.save_case(case)
+            raise HTTPException(502, detail={"error": "outbound email was not accepted; the approved draft can be retried", "category": "NOTIFICATION_ERROR", "retryable": True})
+        accepted = mode == "gmail"
+        d.status = DraftStatus.SENT if accepted else DraftStatus.SIMULATED
+        action = "NOTIFICATION_SENT" if accepted else "NOTIFICATION_SIMULATED"
+        self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", action,
+                        after={"channel": "email", "to": d.to, "subject": d.subject, "draft_id": d.id, "mode": mode, "provider_accepted": accepted})
         self._status(case, CaseStatus.AWAITING_RESPONSE, user)
         self.repo.save_case(case)
         return case
@@ -221,7 +334,19 @@ class CaseService:
                 raise HTTPException(400, detail={"error": "recipient_user_id required for internal recipients", "category": "NOTIFICATION_ERROR"})
             label = f"{u.display_name} <{u.email}>"
 
-        message, payload = build_share_message(case, email, label, is_external, req.include_fields, req.due_date)
+        include_fields = (
+            req.include_fields
+            if "include_fields" in req.model_fields_set
+            else None
+        )
+        message, payload = build_share_message(
+            case,
+            email,
+            label,
+            is_external,
+            include_fields,
+            req.due_date,
+        )
         if req.message:
             message = req.message.strip() + "\n\n" + message
         share = ShareRecord(id=_id("share"), case_id=case.id, shared_by=user.id, recipient_type=req.recipient_type, recipient_user_id=req.recipient_user_id,
@@ -233,30 +358,218 @@ class CaseService:
             self.repo.save_share(share)
             self.pipe.audit(case.id, ActorType.USER, user.id, "SHARE_CREATED", after={"share_id": share.id, "recipient_label": label, "external": is_external, "status": share.status})
             return {"share": share.model_dump(mode="json"), "requires_confirmation": True, "preview": message, "payload": payload}
-        share.status, share.sent_at = "SENT", datetime.utcnow()
+        configured_mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+        live_external = is_external and configured_mode != "simulate"
+        share.status = "DELIVERING" if live_external else "CONFIRMING"
+        share.confirmation_started_at = datetime.utcnow()
+        share.delivery_provider = configured_mode if live_external else None
         self.repo.save_share(share)
-        if req.recipient_user_id and req.recipient_user_id not in case.shared_with:
-            case.shared_with.append(req.recipient_user_id)
-        if req.recipient_party_id and req.recipient_party_id not in case.shared_with:
-            case.shared_with.append(req.recipient_party_id)
-        self.pipe.audit(case.id, ActorType.USER, user.id, "NOTIFY_PARTY_SENT" if is_external else "SHARE_SENT",
-                        after={"share_id": share.id, "recipient_label": label, "external": is_external, "fields": [f["field"] for f in payload["fields"]], "due_date": req.due_date})
-        self._status(case, CaseStatus.AWAITING_RESPONSE if is_external else CaseStatus.ASSIGNED, user)
-        self.repo.save_case(case)
-        return {"share": share.model_dump(mode="json"), "requires_confirmation": False, "preview": message, "payload": payload}
+        return self._finalize_share(share, user, owns_claim=True)
+
+    def _finalize_share(
+        self,
+        share: ShareRecord,
+        user: UserRecord,
+        *,
+        owns_claim: bool,
+    ) -> dict[str, Any]:
+        if share.status in {"SENT", "SIMULATED"}:
+            return self._confirmed_share_response(share)
+
+        case = self.get(share.case_id)
+        delivery_mode = "internal"
+        final_status = "SENT"
+        if share.is_external:
+            configured_mode = (
+                share.delivery_provider
+                if share.status in {"DELIVERING", "DELIVERY_ACCEPTED"}
+                and share.delivery_provider
+                else os.environ.get("EMAIL_SEND_MODE", "simulate")
+            ).strip().lower()
+            if share.status == "DELIVERING" and not owns_claim:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "error": "delivery outcome is still being reconciled; automatic resend is blocked",
+                        "category": "NOTIFICATION_ERROR",
+                        "retryable": False,
+                    },
+                )
+            if share.status == "DELIVERY_ACCEPTED":
+                delivery_mode = share.delivery_provider or configured_mode
+            else:
+                party = self.repo.get_party(share.recipient_party_id or "")
+                if not party or not party.approved:
+                    raise HTTPException(
+                        403,
+                        detail={
+                            "error": "approved external recipient is no longer available",
+                            "category": "AUTH_ERROR",
+                        },
+                    )
+                if configured_mode == "simulate":
+                    delivery_mode = "simulate"
+                    final_status = "SIMULATED"
+                else:
+                    if not owns_claim:
+                        raise HTTPException(
+                            409,
+                            detail={
+                                "error": "share confirmation is already in progress",
+                                "category": "NOTIFICATION_ERROR",
+                                "retryable": True,
+                            },
+                        )
+                    if share.status != "DELIVERING":
+                        share.status = "DELIVERING"
+                        share.delivery_provider = configured_mode
+                        self.repo.save_share(share)
+                    try:
+                        delivery_mode, provider_result = self._deliver_email(
+                            [party.email],
+                            f"NovaShip case {case.id}",
+                            share.message,
+                        )
+                    except DeliveryOutcomeUnknown as exc:
+                        share.status = "DELIVERY_UNKNOWN"
+                        self.repo.save_share(share)
+                        self._delivery_unknown(case, share.id, exc)
+                        self.repo.save_case(case)
+                        raise HTTPException(
+                            502,
+                            detail={
+                                "error": "outbound delivery outcome is unknown; automatic retry is blocked pending provider reconciliation",
+                                "category": "NOTIFICATION_ERROR",
+                                "retryable": False,
+                            },
+                        )
+                    except Exception as exc:
+                        share.status = "DELIVERY_FAILED"
+                        self.repo.save_share(share)
+                        self._delivery_failure(case, user, share.id, exc)
+                        self.repo.save_case(case)
+                        raise HTTPException(502, detail={"error": "outbound share was not accepted; confirmation can be retried", "category": "NOTIFICATION_ERROR", "retryable": True})
+                    share.status = "DELIVERY_ACCEPTED"
+                    share.delivery_provider = delivery_mode
+                    share.provider_message_id = (provider_result or {}).get("id")
+                    share.delivery_accepted_at = datetime.utcnow()
+                    self.repo.save_share(share)
+
+        confirmed_share = self.repo.complete_share_confirmation(
+            share.id,
+            user.id,
+            final_status,
+            delivery_mode,
+        )
+        if confirmed_share is None:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "share confirmation was not applied",
+                    "category": "NOTIFICATION_ERROR",
+                },
+            )
+        return self._confirmed_share_response(confirmed_share)
 
     def confirm_share(self, case_id: str, share_id: str, user: UserRecord) -> dict[str, Any]:
         share = self.repo.get_share(share_id)
         if not share or share.case_id != case_id:
             raise HTTPException(404, detail={"error": "share not found", "category": "DATABASE_ERROR"})
-        req = ShareRequest(recipient_type=share.recipient_type, recipient_user_id=share.recipient_user_id, recipient_party_id=share.recipient_party_id,
-                           due_date=share.due_date, include_fields=[f["field"] for f in share.payload_preview.get("fields", [])], confirm_external=True)
-        return self.share(case_id, req, user)
+        case = self.get(case_id)
+        permission = "notify_external" if share.is_external else "share_internal"
+        if not has_permission(user, permission):
+            self.pipe.audit(
+                case.id,
+                ActorType.USER,
+                user.id,
+                "SHARE_DENIED",
+                after={
+                    "reason": f"missing permission {permission}",
+                    "share_id": share.id,
+                    "recipient_type": share.recipient_type.value,
+                },
+            )
+            raise HTTPException(
+                403,
+                detail={
+                    "error": f"permission '{permission}' required to confirm this share",
+                    "category": "AUTH_ERROR",
+                },
+            )
+
+        if share.status in {"SENT", "SIMULATED"}:
+            return self._confirmed_share_response(share)
+        if share.status in {"DELIVERING", "DELIVERY_UNKNOWN"}:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "delivery outcome is still being reconciled; automatic resend is blocked",
+                    "category": "NOTIFICATION_ERROR",
+                    "retryable": False,
+                },
+            )
+
+        if share.is_external and share.status != "DELIVERY_ACCEPTED":
+            party = self.repo.get_party(share.recipient_party_id or "")
+            if not party or not party.approved:
+                raise HTTPException(
+                    403,
+                    detail={
+                        "error": "external recipient is no longer approved",
+                        "category": "AUTH_ERROR",
+                    },
+                )
+
+        owns_claim = False
+        if share.status in {"PENDING_CONFIRMATION", "DELIVERY_FAILED"}:
+            configured_mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+            live_external = share.is_external and configured_mode != "simulate"
+            target_status = "DELIVERING" if live_external else "CONFIRMING"
+            claimed_share = self.repo.claim_share_confirmation(
+                share.id,
+                share.status,
+                target_status,
+                datetime.utcnow(),
+                configured_mode if live_external else None,
+            )
+            owns_claim = claimed_share is not None
+            share = claimed_share or self.repo.get_share(share.id)
+            if share is None:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "error": "share confirmation was not applied",
+                        "category": "NOTIFICATION_ERROR",
+                    },
+                )
+        if share.status in {"SENT", "SIMULATED"}:
+            return self._confirmed_share_response(share)
+        if share.status in {"DELIVERING", "DELIVERY_UNKNOWN"} and not owns_claim:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "delivery outcome is still being reconciled; automatic resend is blocked",
+                    "category": "NOTIFICATION_ERROR",
+                    "retryable": False,
+                },
+            )
+        if share.status not in {"CONFIRMING", "DELIVERING", "DELIVERY_ACCEPTED"}:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": f"share in status {share.status} cannot be confirmed",
+                    "category": "NOTIFICATION_ERROR",
+                },
+            )
+
+        return self._finalize_share(share, user, owns_claim=owns_claim)
 
     def acknowledge_share(self, share_id: str, user: UserRecord, response: Optional[str]) -> ShareRecord:
         share = self.repo.get_share(share_id)
         if not share:
             raise HTTPException(404, detail={"error": "share not found", "category": "DATABASE_ERROR"})
+        if share.is_external or not share.recipient_user_id or share.recipient_user_id != user.id:
+            raise HTTPException(403, detail={"error": "only the intended internal recipient may acknowledge this share", "category": "AUTH_ERROR"})
         share.viewed_at = share.viewed_at or datetime.utcnow()
         share.acknowledged_at, share.response, share.status = datetime.utcnow(), response, "ACKNOWLEDGED"
         self.repo.save_share(share)

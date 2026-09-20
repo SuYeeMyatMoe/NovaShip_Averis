@@ -54,9 +54,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className="dashboard-surface flex min-h-screen flex-col">
       <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded-md focus:bg-white focus:px-3 focus:py-2">Skip to content</a>
       <header className="sticky top-0 z-40 h-16 border-b border-ink-200/80 bg-white/90 backdrop-blur-xl lg:fixed lg:left-0 lg:top-0 lg:h-screen lg:w-64 lg:border-b-0 lg:border-r">
-        <div className="mx-auto flex h-full max-w-[1600px] items-center gap-4 px-4 lg:mx-0 lg:flex-col lg:items-stretch lg:gap-6 lg:px-5 lg:py-7">
+        <div className="mx-auto flex h-full max-w-[1600px] items-center gap-2 px-3 sm:gap-4 sm:px-4 lg:mx-0 lg:flex-col lg:items-stretch lg:gap-6 lg:px-5 lg:py-7">
           <Link href="/" className="flex shrink-0 items-center" aria-label="NovaShip Averis home">
-            <img src="/novaship-logo-clean.png" alt="NovaShip" className="h-auto w-[122px] lg:w-[132px]" />
+            <img src="/novaship-logo-clean.png" alt="NovaShip" className="h-auto w-[104px] sm:w-[122px] lg:w-[132px]" />
           </Link>
           <nav className="hidden items-center gap-0.5 text-sm lg:flex lg:w-full lg:flex-col" aria-label="Primary">
             {nav.map((n) => (
@@ -65,8 +65,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
               </div>
             ))}
           </nav>
-          <button className="rounded-md border border-ink-200 px-2 py-1 text-xs text-ink-700 lg:hidden" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-nav">Menu</button>
-          <div className="ml-auto flex items-center gap-3 text-xs lg:mt-auto lg:ml-0 lg:w-full lg:max-w-full lg:flex-col lg:items-stretch lg:rounded-2xl lg:border lg:border-[#eaded3] lg:bg-[#fbf7f2] lg:p-2.5">
+          <button className="rounded-md border border-ink-200 px-2 py-1 text-xs text-ink-700 lg:hidden" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-nav">{open ? "Close" : "Menu"}</button>
+          <div className="ml-auto flex items-center gap-3 text-xs transition duration-200 hover:-translate-y-0.5 hover:shadow-sm lg:mt-auto lg:ml-0 lg:w-full lg:max-w-full lg:flex-col lg:items-stretch lg:rounded-2xl lg:border lg:border-[#eaded3] lg:bg-[#fbf7f2] lg:p-2.5 lg:hover:border-orange-300 lg:hover:bg-[#fffaf5]">
             <span className={`hidden items-center gap-1.5 whitespace-nowrap xl:flex ${health ? "text-match" : "text-mismatch"}`} title={health ? `repository: ${health.backend}` : "backend unreachable"}>
               <span className={`h-2 w-2 rounded-full ${health ? "bg-match" : "bg-mismatch"}`} aria-hidden />{health ? `API online, ${health.cases} cases` : "API offline"}
             </span>
@@ -82,12 +82,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
         {open && (
-          <nav id="mobile-nav" className="border-t border-ink-200 bg-white px-4 py-2 lg:hidden" aria-label="Primary mobile">
+          <nav id="mobile-nav" className="max-h-[calc(100vh-4rem)] overflow-y-auto border-t border-ink-200 bg-white px-4 py-2 shadow-lg lg:hidden" aria-label="Primary mobile">
             {nav.map((n) => <Link key={n.href} href={n.href} onClick={() => setOpen(false)} className={`block rounded-md px-2 py-2 text-sm ${active(n.href) ? "bg-accent-bg text-accent-fg" : "text-ink-700"}`}>{n.label}</Link>)}
           </nav>
         )}
       </header>
-      <main id="main" className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-6 lg:ml-64 lg:w-[calc(100%-16rem)] lg:max-w-none lg:px-8 lg:py-8">{children}</main>
+      <main id="main" className="mx-auto w-full min-w-0 max-w-[1600px] flex-1 px-3 py-5 sm:px-4 sm:py-6 lg:ml-64 lg:w-[calc(100%-16rem)] lg:max-w-none lg:px-8 lg:py-8">{children}</main>
       <footer className="border-t border-ink-200/80 bg-white/60 px-4 py-3 text-center text-[11px] text-ink-500 lg:ml-64 lg:w-[calc(100%-16rem)]">SI is the source of truth. Seven fields compared deterministically. AI proposes, humans approve. Every action audited.</footer>
     </div>
   );

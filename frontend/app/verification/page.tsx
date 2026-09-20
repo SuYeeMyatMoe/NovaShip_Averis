@@ -29,10 +29,10 @@ export default function VerificationPage() {
         <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
         <div className="mt-6 flex flex-wrap items-end justify-between gap-5">
           <div>
-            <h1 className="dashboard-number text-5xl font-bold tracking-[-.04em] text-[#583521] sm:text-6xl">Seven field verification</h1>
-            <p className="mt-3 max-w-3xl text-lg font-semibold leading-relaxed text-[#7d6251]">The Shipping Instruction is the source of truth. Every case is checked across all seven fields independently, so you can see exactly what needs attention.</p>
+            <h1 className="dashboard-number text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl lg:text-6xl">Seven field verification</h1>
+            <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">The Shipping Instruction is the source of truth. Every case is checked across all seven fields independently, so you can see exactly what needs attention.</p>
           </div>
-          <div className="rounded-2xl border border-orange-200 bg-accent-bg px-5 py-3 text-right"><div className="text-3xl font-bold text-accent">{total}</div><div className="text-sm font-bold text-accent-fg">cases compared</div></div>
+        <div className="rounded-2xl border border-orange-200 bg-accent-bg px-4 py-3 text-left sm:px-5 sm:text-right"><div className="text-3xl font-bold text-accent">{total}</div><div className="text-sm font-bold text-accent-fg">cases compared</div></div>
         </div>
       </header>
 

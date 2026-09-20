@@ -10,7 +10,7 @@ AI-assisted shipping inbox and deterministic Shipping Instruction (SI) to Draft 
 | API and Swagger UI | `http://localhost:8000/docs` |
 | Default mode | Offline demo, in-memory repository, no API keys required |
 | Demo data | 520 emails and 250 attachments |
-| Verified test baseline | **66 backend tests passed**, frontend production build passed, Compose configuration valid (20 September 2026) |
+| Verified test baseline | **187 backend tests passed**, frontend production build passed, Compose configuration valid (20 September 2026) |
 | Recorded SDOC score | `1.0000`; reproducing the score requires the private organiser `ground_truth.json` |
 | Demo password | `novaship123` for every seeded account |
 
@@ -147,7 +147,7 @@ A missing or low-confidence value is not counted as a mismatch. It is routed to 
 ```mermaid
 flowchart LR
     subgraph Sources
-        Graph[Microsoft Graph mailbox]
+        Gmail[Gmail API mailbox]
         Webhook[Email webhook]
         Bundle[SDOC bundle]
     end
@@ -171,7 +171,7 @@ flowchart LR
     end
 
     UI[Next.js dashboard] --> Auth
-    Graph & Webhook & Bundle --> Pipeline
+    Gmail & Webhook & Bundle --> Pipeline
     Auth --> Pipeline
     Pipeline --> Security --> AI --> Compare --> Human
     Pipeline --> Repo
@@ -226,13 +226,13 @@ The security and intent stages can end the flow early. A security-review message
 | Vector storage | Local JSON index or Supabase pgvector |
 | Document parsing | pypdf, python-docx, openpyxl; optional OCR hook |
 | Persistence | In-memory fixtures or Supabase PostgreSQL, Storage, RLS, and JWT |
-| Mail | SDOC bundle connector or Microsoft Graph inbound adapter |
+| Mail | SDOC bundle connector or Gmail API for inbound polling and approved outbound delivery |
 | Containers | Docker multi-stage images and Docker Compose |
 | Tests | pytest plus a production Next.js build |
 
 ## 6. Quick start with Docker
 
-Docker is the recommended first run. It uses the checked-in demo snapshot and does not require Supabase, OpenAI, Gemini, or Microsoft credentials.
+Docker is the recommended first run. It uses the checked-in demo snapshot and does not require Supabase, OpenAI, Gemini, or Gmail credentials.
 
 ### Prerequisites
 
@@ -312,7 +312,7 @@ Every seeded account uses `DEMO_PASSWORD`, which defaults to `novaship123`.
 | Batch actions | No | Yes | Yes | No |
 | Ingest email | Yes | Yes | Yes | No |
 
-Self-registration at `/register` defaults to `OPERATIONS_STAFF`. `REGISTER_ALLOWED_ROLES` controls every role exposed by the form and accepted by the API. Keep `ADMIN` out of this allowlist; the current implementation trusts the configured allowlist.
+Self-registration at `/register` defaults to `OPERATIONS_STAFF`. It is enabled in `demo` mode, disabled by default in `local` mode, and unavailable in `jwt` mode. `REGISTER_ALLOWED_ROLES` controls every role exposed by the form and accepted by the API; the server restricts self-registration to Operations Staff even if a broader value is configured.
 
 Sessions are HMAC-signed and expire after 12 hours by default. Logout revokes the session server-side. Login, failed login, registration, and logout outcomes are audited.
 
@@ -414,20 +414,22 @@ Copy `.env.example` to `.env`. Never commit `.env`. Variables with public fronte
 | `SEED_SNAPSHOT` | `./supabase/seed/snapshot.json` | Snapshot loaded by `MemoryRepository` |
 | `AUTO_SEED` | `1` | Load the snapshot at API startup |
 | `SUPABASE_URL` | placeholder | Supabase project URL |
-| `SUPABASE_ANON_KEY` | placeholder | Fallback key for Supabase access |
-| `SUPABASE_SERVICE_ROLE_KEY` | placeholder | Server-only key used by the repository and seed push |
-| `SUPABASE_JWT_SECRET` | placeholder | Verifies Supabase HS256 bearer tokens |
+| `SUPABASE_SECRET_KEY` | empty | Preferred modern `sb_secret_*` server credential |
+| `SUPABASE_SERVICE_ROLE_KEY` | placeholder | Supported legacy server-only credential used when the modern secret is absent |
+| `SUPABASE_JWT_ALGORITHM` | `JWKS` | JWT verification mode; use `HS256` only for an explicitly configured legacy shared secret |
+| `SUPABASE_JWT_SECRET` | placeholder | Legacy HS256 secret; not used by the default JWKS mode |
 | `SUPABASE_STORAGE_BUCKET` | `documents` | Private attachment bucket |
 
 ### Authentication
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `AUTH_MODE` | `demo` | `demo` accepts session tokens and `X-User-Id`; `jwt` disables header impersonation |
+| `AUTH_MODE` | `demo` | `demo` accepts local sessions and `X-User-Id`; `local` accepts hardened local sessions; `jwt` accepts Supabase JWTs only |
 | `SESSION_SECRET` | insecure development fallback | HMAC secret for built-in session tokens; mandatory to replace in production |
 | `SESSION_TTL_HOURS` | `12` | Session lifetime |
 | `DEMO_PASSWORD` | `novaship123` | Password assigned to seeded users without a credential |
-| `REGISTER_ALLOWED_ROLES` | `OPERATIONS_STAFF` | Comma-separated self-registration allowlist; never include `ADMIN` in a real deployment |
+| `REGISTER_ALLOWED_ROLES` | `OPERATIONS_STAFF` | Configured registration roles; the API currently permits self-registration only as Operations Staff |
+| `SELF_REGISTRATION_ENABLED` | `0` | Enables registration in `local` mode; demo mode keeps hackathon registration enabled |
 
 ### Classification and LLM
 
@@ -449,27 +451,34 @@ If the model artifact or API call fails, the application falls back to determini
 | `GOOGLE_API_KEY` | empty | Gemini embedding key |
 | `GEMINI_EMBEDDING_MODEL` | `models/text-embedding-004` | Gemini embedding model |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `EMBEDDING_DIMENSIONS` | `768` in `.env.example` | Output dimension; must match the selected provider and vector schema |
 | `VECTOR_STORE` | `local` | `local` JSON index or `supabase` pgvector |
+| `SUPABASE_VECTOR_DIMENSIONS` | `768` | Expected live pgvector column dimension; startup rejects mismatches |
 | `RAG_DATA_DIR` | `backend/data` | Markdown knowledge and local index directory |
 | `LANGGRAPH_CHECKPOINT` | `memory` | `memory` or `postgres` |
 | `LANGGRAPH_PG_URL` | empty | PostgreSQL connection string for durable agent checkpoints |
+| `LANGGRAPH_STRICT_MSGPACK` | `true` in `.env.example` | Restricts persisted checkpoint deserialisation to known-safe types |
 
 The local, Gemini, and OpenAI embeddings use different dimensions. Rebuild the index after changing provider or model. The pgvector migration defaults to 768 dimensions and must be adjusted before using a provider with another dimension.
 
-The optional PostgreSQL LangGraph checkpointer also requires `langgraph-checkpoint-postgres` and `psycopg[binary]`; these packages are not included in the default requirements file.
+The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requirements.txt`. For replaceable serverless instances, use a durable PostgreSQL checkpoint store rather than process memory.
 
 ### Email, OCR, and networking
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `EMAIL_PROVIDER` | `none` | `none`, `bundle`, or `graph` for inbound polling |
-| `MS_TENANT_ID` | placeholder | Microsoft Entra tenant ID |
-| `MS_CLIENT_ID` | placeholder | Microsoft Graph application/client ID |
-| `MS_CLIENT_SECRET` | placeholder | Microsoft Graph client secret |
-| `MS_MAILBOX` | placeholder | Shared mailbox user principal name |
-| `EMAIL_SEND_MODE` | `simulate` in `.env.example` | Reserved setting; current case notifier records a simulated send and does not call Graph `sendMail` |
+| `EMAIL_PROVIDER` | `none` | `none`, `bundle`, or `gmail` for inbound polling |
+| `EMAIL_SEND_MODE` | `simulate` | `simulate` or `gmail`; real delivery still requires the normal human approval path |
+| `GMAIL_CLIENT_ID` | empty | Google OAuth client ID |
+| `GMAIL_CLIENT_SECRET` | empty | Google OAuth client secret |
+| `GMAIL_REFRESH_TOKEN` | empty | Refresh token created by the local authorisation helper |
+| `GMAIL_ADDRESS` | empty | Monitored and sending mailbox |
 | `OCR_ENABLED` | `0` | Set to `1` to try the optional OCR hook for image-only PDFs |
+| `MAX_UPLOAD_BYTES` | `10485760` | Maximum bytes accepted for one attachment |
+| `MAX_ATTACHMENT_COUNT` | `10` | Maximum attachments accepted in one inbound message |
 | `CORS_ORIGINS` | local UI origins | Comma-separated API origins |
+| `APP_ENV` | `development` | Requires an explicit non-wildcard CORS allowlist outside development, test, and demo |
+| `API_PREFIX` | empty locally; `/api` on Vercel | Optional prefix applied to the API, docs, and OpenAPI routes |
 | `LOG_LEVEL` | `INFO` | Backend log level |
 | `PORT` | `8000` | API container listen port used by the Docker image command |
 | `NEXT_PUBLIC_API_BASE` | `http://localhost:8000` | API base embedded in the frontend production build |
@@ -477,6 +486,12 @@ The optional PostgreSQL LangGraph checkpointer also requires `langgraph-checkpoi
 | `API_PORT` | `8000` | Host port used by Compose for the API |
 
 OCR additionally requires `pytesseract`, `pdf2image`, Tesseract, and Poppler. They are not installed by the default Docker image or Python requirements.
+
+After setting the Gmail client ID and secret in a local `.env`, create or rotate the refresh token without printing it:
+
+```bash
+python backend/scripts/gmail_authorize.py
+```
 
 ## 10. Using the application
 
@@ -590,7 +605,7 @@ curl 'http://localhost:8000/cases?mismatch=yes&limit=5' \
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/webhooks/email` | Ingest an email with base64 attachments or fixture paths |
-| POST | `/connectors/poll?limit=25` | Poll the configured bundle or Microsoft Graph connector |
+| POST | `/connectors/poll?limit=25` | Poll the configured bundle or Gmail connector |
 | POST | `/ingest/bundle?limit=0` | Import the local SDOC fixture bundle |
 
 The webhook is idempotent on message content. A duplicate returns the existing case instead of creating another one.
@@ -630,7 +645,7 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | --- | --- | --- |
 | POST | `/cases/{case_id}/draft` | Generate another draft, optionally translated |
 | POST | `/cases/{case_id}/draft/edit` | Edit and version a draft |
-| POST | `/cases/{case_id}/approve` | Approve a draft and record a simulated notification |
+| POST | `/cases/{case_id}/approve` | Approve a draft, then simulate or deliver it through Gmail according to `EMAIL_SEND_MODE` |
 | POST | `/cases/{case_id}/reject` | Reject a draft and return the case to review |
 | POST | `/cases/{case_id}/assign` | Assign a user or team |
 | POST | `/cases/{case_id}/no-action` | Mark the case as no action required |
@@ -682,6 +697,8 @@ Apply migrations in order:
 2. `supabase/migrations/0002_rls.sql`: tenant-aware row-level security and role-gated policies.
 3. `supabase/migrations/0003_vector.sql`: pgvector `case_embeddings` table and scoped similarity RPC.
 4. `supabase/migrations/0004_accounts.sql`: `user_credentials` and `revoked_sessions`.
+5. `supabase/migrations/0005_rag_scoped_search.sql`: tenant/case/source filtering before vector ranking.
+6. `supabase/migrations/0006_recoverable_share_confirmation.sql`: recoverable, idempotent external-delivery finalisation.
 
 Then load `supabase/seed/seed.sql`, or push a generated seed:
 
@@ -786,12 +803,12 @@ The following checks were run on 20 September 2026:
 
 | Check | Result |
 | --- | --- |
-| Backend tests in the API container | **66 passed in 1.60s** |
+| Backend tests in the API container | **187 passed in 13.52s** |
 | Frontend `npm run build` | Passed, including TypeScript and Next.js page generation |
 | `docker compose config --quiet` | Passed |
 | Offline 520-email replay | Completed in 2.8s on the verification machine; timing is machine-dependent |
 
-Backend coverage includes comparator and normalisation edge cases, extraction evidence, document readers, security, duplicate handling, end-to-end notification flow, RBAC, login/register/logout, policy permissions, batch confirmation, trained-classifier fallback, LangGraph interrupt/resume, RAG case scoping, field analytics, and security queue endpoints.
+Backend coverage includes comparator and normalisation edge cases, extraction evidence, document readers, upload hardening, Gmail polling and delivery, duplicate handling, recoverable external delivery, RBAC, login/register/logout, policy permissions, batch confirmation, trained-classifier fallback, LangGraph persistence and interrupt/resume, RAG case scoping, field analytics, and security queue endpoints.
 
 ### Run backend tests locally
 
@@ -863,17 +880,21 @@ Keep `LLM_PROVIDER=none` during regression scoring to make the run deterministic
 - The default Compose file starts only `api` and `web`; it does not start a local Supabase stack.
 - The optional `scoring` profile also expects the organiser server and private ground truth to be present.
 
+### Vercel Services deployment
+
+The repository also supports a single Vercel project: the root `vercel.json` builds `frontend/` as Next.js, exposes `backend/` as FastAPI under `/api`, and lets the browser use the same-origin API by default. Start with `.env.vercel.example`, keep server credentials out of `NEXT_PUBLIC_*`, and follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the exact handoff and smoke tests.
+
 ### Production checklist
 
 - Set `REPO_BACKEND=supabase` and apply all migrations.
-- Replace `SESSION_SECRET`; use `AUTH_MODE=jwt` to disable demo `X-User-Id` impersonation. Built-in signed sessions remain accepted.
+- Replace `SESSION_SECRET`; use `AUTH_MODE=local` for hardened application sessions or complete the frontend identity wiring before selecting JWT-only mode.
 - Set exact production `CORS_ORIGINS`.
 - Store secrets in the deployment platform, not in the repository or frontend variables.
 - Put the API behind TLS and a reverse proxy/load balancer.
 - Use external object storage and database backups.
 - Decide and test a durable LangGraph checkpoint store if paused graphs must survive restarts.
 - Review pgvector dimensions before building a Supabase index.
-- Keep `EMAIL_SEND_MODE` effectively simulated until a real outbound adapter is wired and acceptance-tested.
+- Keep `EMAIL_SEND_MODE=simulate` until the deployed approval, recipient, idempotency, and recovery controls are acceptance-tested. Enable `gmail` deliberately.
 - Add observability, rate limiting, secret rotation, retention rules, and incident procedures before real production use.
 
 ## 17. Troubleshooting
@@ -941,7 +962,7 @@ Default images do not include OCR system packages. Either request a text-readabl
 
 ### An approved draft did not send real email
 
-This is expected. The current notifier records `NOTIFICATION_SENT` with `mode: simulated`. Microsoft Graph supports inbound polling, and the connector class contains a send method, but the case service does not call it yet.
+Check `EMAIL_SEND_MODE`. In the safe default `simulate` mode, the item is recorded as simulated and no provider call occurs. For live delivery, set `EMAIL_SEND_MODE=gmail` and configure all four Gmail OAuth variables. If an item reaches `DELIVERY_UNKNOWN`, do not retry automatically: reconcile the audited recipient, subject, and approval time against Gmail Sent first.
 
 ### `GET /` on port 8000 returns 404
 
@@ -972,12 +993,12 @@ NovaShip_Averis/
 │   ├── app/repositories/             Memory and Supabase implementations
 │   ├── app/services/                 Case actions and submission conversion
 │   ├── app/auth/                     Accounts, sessions, JWT, RBAC
-│   ├── app/connectors/               Bundle and Microsoft Graph adapters
+│   ├── app/connectors/               Bundle and Gmail inbound/outbound adapters
 │   ├── app/seed/                      Snapshot and SQL seed generator
 │   ├── data/                          RAG knowledge files and local index target
 │   ├── models/                        Trained classifier and evaluation artifacts
 │   ├── scripts/                       Bundle replay and model training
-│   └── tests/                         66 collected backend tests
+│   └── tests/                         187 passing backend tests at the documented baseline
 ├── frontend/
 │   ├── app/                           10 App Router pages
 │   ├── components/                    Shell, comparison, policy, collaboration UI
@@ -986,24 +1007,23 @@ NovaShip_Averis/
 ├── supabase/
 │   ├── migrations/                    Schema, RLS, vector, and account migrations
 │   └── seed/                          SQL, snapshot, and per-table JSON data
-├── docs/                               Contracts, demo script, AI report, handoff notes
+├── docs/                               Contracts, deployment, demo/live-mode, AI, and handoff guides
 ├── sdoc-hackathon-bundle/              520-email runtime fixture bundle
 └── sdoc-hackathon-docker/              Dataset generator and optional scorer service
 ```
 
 ## 19. Known limitations
 
-- Outbound notification is simulated. Real Microsoft Graph sending is not connected to the case-service approval path.
-- The Gmail connector is a stub.
+- Gmail is the live email provider, but the safe default keeps outbound delivery simulated until an operator explicitly enables it.
+- A `DELIVERY_UNKNOWN` outcome requires manual reconciliation against Gmail Sent; automatic resend is intentionally blocked.
 - OCR is optional and its packages are not included in the default environment.
 - The default local RAG embedding is deterministic keyword-level hashing, not a semantic production embedding.
 - Supabase pgvector migration is created at 768 dimensions and must be changed for local 256-dimensional or OpenAI 1536-dimensional vectors.
-- PostgreSQL LangGraph checkpoint dependencies are optional and not in `backend/requirements.txt`.
 - Memory mode loses runtime mutations on restart.
 - The Bash run-mode helper is Windows-oriented; use direct commands on macOS/Linux.
 - The private scorer ground truth is not included in Git.
 - There is no repository `LICENSE` file. Do not assume redistribution or commercial-use rights until the maintainers add one.
-- The project is a production-style prototype. It still needs real-provider integration testing, load testing, observability, rate limiting, operational backups, and a formal security review before production use.
+- The project is a production-style prototype. It still needs deployment-specific Gmail acceptance testing, load testing, observability, rate limiting, operational backups, and a formal security review before production use.
 
 ## 20. Additional documentation
 
@@ -1013,6 +1033,10 @@ NovaShip_Averis/
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | Frozen fields, enums, API contracts, and submission shape |
 | [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Five-minute demonstration flow |
 | [docs/AI_REPORT_SECTION.md](docs/AI_REPORT_SECTION.md) | AI architecture and recorded evaluation |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | One-project Vercel Services deployment and smoke-test checklist |
+| [docs/DEMO_AND_LIVE_MODES.md](docs/DEMO_AND_LIVE_MODES.md) | Exact boundaries between demo-safe, hackathon-live, and production modes |
+| [docs/BACKEND_HANDOFF.md](docs/BACKEND_HANDOFF.md) | Backend deployment contract and acceptance checks |
+| [docs/P2_VERIFICATION.md](docs/P2_VERIFICATION.md) | Assistant, safety, RBAC, RAG, translation, and sharing evidence |
 | [docs/P4_EVIDENCE_HANDOFF.md](docs/P4_EVIDENCE_HANDOFF.md) | Frontend evidence semantics |
 | [supabase/README.md](supabase/README.md) | Supabase schema, seed, verification, and auth model |
 | [P1.md](P1.md) | AI extraction and verification workstream |

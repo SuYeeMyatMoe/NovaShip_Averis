@@ -88,6 +88,9 @@ def test_rag_local_index_scopes_by_case(tmp_path):
     rag.index(case_chunks(a, repo.get_email(a.source_email_id)) + case_chunks(b, repo.get_email(b.source_email_id)))
     hits = rag.search("consignee UAB NOVAKOPA", case_id="case_email_004", k=5)
     assert hits and all(h["case_id"] in (None, "case_email_004") for h in hits)
+    leaked = rag.search("consignee from case_email_001", case_id="case_email_004", k=20)
+    assert all(h.get("case_id") in (None, "case_email_004") for h in leaked)
+    assert not any(h.get("case_id") == "case_email_001" for h in leaked)
     pol = rag.search("source of truth seven fields", sources=["policy"], k=2)
     assert pol and pol[0]["source"] == "policy"
 
@@ -100,3 +103,13 @@ def test_field_stats_and_security_queue_endpoints():
     assert "items" in q
     assert client.get("/audit", headers=OPS).status_code == 403  # ops cannot view global audit
     assert client.get("/audit?limit=5", headers=SUP).status_code == 200
+
+
+def test_local_embedder_can_match_supabase_vector_dimension(monkeypatch):
+    from app.agents.rag import Embedder
+
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "768")
+    embedder = Embedder()
+    assert embedder.dims == 768
+    assert len(embedder.embed_query("shipping instruction")) == 768

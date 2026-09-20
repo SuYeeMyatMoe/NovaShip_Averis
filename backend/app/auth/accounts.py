@@ -2,8 +2,8 @@
 Local accounts: password hashing + signed session tokens.
 
 Standard library only (PBKDF2-HMAC-SHA256 + HMAC-signed tokens) so the offline
-demo needs no extra dependency. Production deployments can keep using Supabase
-JWTs (see rbac._from_jwt) - both are accepted by `current_user`.
+demo needs no extra dependency. Local signed sessions are accepted only in
+AUTH_MODE=demo|local. AUTH_MODE=jwt uses Supabase JWTs exclusively.
 
 Token format:  nsa.<base64url(payload json)>.<base64url(hmac-sha256)>
 Payload:       {"sub": user_id, "sid": session_id, "iat": epoch, "exp": epoch}
@@ -20,13 +20,41 @@ import secrets
 import time
 from typing import Any, Optional
 
-SESSION_SECRET = os.environ.get("SESSION_SECRET") or "novaship-dev-session-secret-change-me"
 SESSION_TTL_S = int(os.environ.get("SESSION_TTL_HOURS", "12")) * 3600
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "novaship123")
 REGISTER_ALLOWED_ROLES = [r.strip().upper() for r in os.environ.get("REGISTER_ALLOWED_ROLES", "OPERATIONS_STAFF").split(",") if r.strip()]
 MIN_PASSWORD_LENGTH = 8
 
 _PBKDF2_ROUNDS = 120_000
+_DEMO_SESSION_SECRET = "novaship-dev-session-secret-change-me"
+_PLACEHOLDER_SECRETS = {
+    "",
+    _DEMO_SESSION_SECRET,
+    "change-me",
+    "change-me-in-production",
+    "your-session-secret",
+}
+
+
+def session_secret() -> str:
+    from app.config import ConfigurationError, auth_mode
+
+    configured = os.environ.get("SESSION_SECRET", "").strip()
+    mode = auth_mode()
+    if mode == "demo":
+        return configured or _DEMO_SESSION_SECRET
+    if mode == "local" and (configured.lower() in _PLACEHOLDER_SECRETS or len(configured) < 32):
+        raise ConfigurationError(
+            "AUTH_MODE=local requires a non-placeholder SESSION_SECRET of at least 32 characters"
+        )
+    return configured
+
+
+def validate_session_configuration() -> None:
+    from app.config import auth_mode
+
+    if auth_mode() == "local":
+        session_secret()
 
 
 # ---------------------------------------------------------------- passwords
@@ -65,7 +93,7 @@ def _b64d(text: str) -> bytes:
 
 
 def _sign(body: str) -> str:
-    return _b64e(hmac.new(SESSION_SECRET.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
+    return _b64e(hmac.new(session_secret().encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
 
 
 def issue_token(user_id: str) -> tuple[str, dict[str, Any]]:

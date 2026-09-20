@@ -215,6 +215,10 @@ class DraftStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     SENT = "SENT"
+    SIMULATED = "SIMULATED"
+    DELIVERING = "DELIVERING"
+    DELIVERY_UNKNOWN = "DELIVERY_UNKNOWN"
+    SEND_FAILED = "SEND_FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -483,11 +487,15 @@ class ShareRecord(BaseModel):
     message: str
     payload_preview: dict[str, Any] = Field(default_factory=dict)
     due_date: Optional[str] = None
+    confirmation_started_at: Optional[datetime] = None
+    delivery_provider: Optional[str] = None
+    provider_message_id: Optional[str] = None
+    delivery_accepted_at: Optional[datetime] = None
     sent_at: Optional[datetime] = None
     viewed_at: Optional[datetime] = None
     acknowledged_at: Optional[datetime] = None
     response: Optional[str] = None
-    status: str = "PENDING_CONFIRMATION"  # PENDING_CONFIRMATION | SENT | VIEWED | ACKNOWLEDGED | REJECTED
+    status: str = "PENDING_CONFIRMATION"  # PENDING_CONFIRMATION | CONFIRMING | DELIVERING | DELIVERY_ACCEPTED | DELIVERY_FAILED | DELIVERY_UNKNOWN | SENT | SIMULATED | VIEWED | ACKNOWLEDGED | REJECTED
 
 
 class UserRecord(BaseModel):
@@ -498,6 +506,7 @@ class UserRecord(BaseModel):
     team_id: Optional[str] = None
     tenant_id: str = "tenant_april"
     is_external: bool = False
+    auth_user_id: Optional[str] = None
 
 
 class PartyContact(BaseModel):
@@ -549,7 +558,8 @@ class ShareRequest(BaseModel):
     recipient_party_id: Optional[str] = None
     message: Optional[str] = None
     due_date: Optional[str] = None
-    include_fields: list[str] = Field(default_factory=list)  # empty = mismatches only
+    # Omitted defaults to mismatch fields; an explicitly supplied [] discloses none.
+    include_fields: list[str] = Field(default_factory=list)
     confirm_external: bool = False
     preview_only: bool = False
 

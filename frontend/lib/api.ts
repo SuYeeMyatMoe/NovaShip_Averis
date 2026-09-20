@@ -4,7 +4,11 @@
  * Typed API client. Auth: the session token from POST /auth/login is sent as
  * `Authorization: Bearer`. A 401 clears the session and sends the person to /login.
  */
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+// Local Next.js development talks to standalone FastAPI on :8000.
+ // Vercel Services routes production FastAPI under same-origin /api.
+export const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  (process.env.NODE_ENV === "production" ? "/api" : "http://localhost:8000");
 
 export const SEVEN_FIELDS = ["shipper", "consignee", "notify_party", "port_of_loading", "port_of_discharge", "container_count", "gross_weight_kg"] as const;
 export const FIELD_LABELS: Record<string, string> = {

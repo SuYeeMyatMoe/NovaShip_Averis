@@ -32,14 +32,14 @@ export default function CasePage() {
   const act = async (path: string, body?: any) => { try { await post(`/cases/${c.id}${path}`, body); say("Done"); load(); } catch (x: any) { say(x.message, "err"); } };
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       {toast && <Toast {...toast} />}
-      <div className="rounded-2xl border border-ink-200 bg-white/95 p-5 shadow-card">
+      <div className="min-w-0 rounded-2xl border border-ink-200 bg-white/95 p-3 shadow-card sm:p-5">
         <div className="flex flex-wrap items-start gap-3">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 text-xs text-ink-500"><Link href="/" className="hover:underline">← Inbox</Link><span>·</span><span className="font-mono">{c.id}</span><span>·</span><Link href={`/cases/${c.id}?tab=email`} onClick={() => setTab("email")} className="text-accent hover:underline">source email {e.id}</Link></div>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-500"><Link href="/" className="hover:underline">← Inbox</Link><span>·</span><span className="font-mono">{c.id}</span><span>·</span><Link href={`/cases/${c.id}?tab=email`} onClick={() => setTab("email")} className="text-accent hover:underline">source email {e.id}</Link></div>
             <div className="mt-3 text-[10px] font-bold uppercase tracking-[0.18em] text-accent">Case command view</div>
-            <h1 className="mt-1 truncate text-xl font-semibold tracking-tight text-ink-900">{e.subject}</h1>
+            <h1 className="mt-1 break-words text-lg font-semibold tracking-tight text-ink-900 sm:text-xl">{e.subject}</h1>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-600">
               <span className="font-mono">{e.sender}</span><span>·</span><span>{fmtDate(e.received_at)}</span><span>·</span>
               <Badge className="bg-ink-100 text-ink-700">{c.intent.replace(/_/g, " ")}</Badge>
@@ -49,9 +49,9 @@ export default function CasePage() {
               {!c.action_required && <Badge className="bg-ink-100 text-ink-600">No reply needed</Badge>}
             </div>
           </div>
-          <div className="flex flex-col items-end gap-2">
+          <div className="flex w-full flex-col items-start gap-2 xl:w-auto xl:items-end">
             <StatusBadge status={c.status} />
-            <div className="flex flex-wrap justify-end gap-1">
+            <div className="flex w-full flex-wrap justify-start gap-1 xl:w-auto xl:justify-end">
               <Button onClick={() => act("/retry")} title="Re-run the whole pipeline">Retry</Button>
               <Button onClick={() => { setTab("drafts"); }}>Draft Reply</Button>
               <Button onClick={() => { setTab("collab"); }}>Assign / Notify Party</Button>
@@ -74,17 +74,19 @@ export default function CasePage() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-1 rounded-xl border border-ink-200 bg-white/80 p-1.5 shadow-sm">
-        {TABS.map(([k, label]) => <button key={k} onClick={() => { setTab(k); router.replace(`/cases/${c.id}?tab=${k}`); }} className={`rounded-lg px-3 py-2 text-sm transition ${tab === k ? "bg-ink-900 font-semibold text-white shadow-sm" : "text-ink-500 hover:bg-ink-100 hover:text-ink-800"}`}>{label}{k === "compare" && c.mismatch_count > 0 && <span className="ml-1 rounded-full bg-mismatch px-1.5 text-[10px] text-white">{c.mismatch_count}</span>}{k === "drafts" && c.drafts.length > 0 && <span className="ml-1 rounded-full bg-accent px-1.5 text-[10px] text-white">{c.drafts.length}</span>}</button>)}
+      <div className="max-w-full overflow-x-auto rounded-xl border border-ink-200 bg-white/80 p-1.5 shadow-sm">
+        <div className="flex min-w-max gap-1">
+        {TABS.map(([k, label]) => <button key={k} onClick={() => { setTab(k); router.replace(`/cases/${c.id}?tab=${k}`); }} className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm transition ${tab === k ? "bg-ink-900 font-semibold text-white shadow-sm" : "text-ink-500 hover:bg-ink-100 hover:text-ink-800"}`}>{label}{k === "compare" && c.mismatch_count > 0 && <span className="ml-1 rounded-full bg-mismatch px-1.5 text-[10px] text-white">{c.mismatch_count}</span>}{k === "drafts" && c.drafts.length > 0 && <span className="ml-1 rounded-full bg-accent px-1.5 text-[10px] text-white">{c.drafts.length}</span>}</button>)}
+        </div>
       </div>
 
       {tab === "overview" && (
-        <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
-          <div className="space-y-4">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          <div className="min-w-0 space-y-4">
             <SevenFieldCard cmp={c.comparison} reviewReason={c.review_reason} onEvidence={(f) => { setEvField(f); setTab("evidence"); }} />
-            <Card title="AI summary" right={<span className="text-[11px] text-ink-500">{c.summary?.generated_by} · evidence: {c.summary?.evidence_refs.length}</span>}><p className="text-sm leading-relaxed">{c.summary?.text || "—"}</p></Card>
+            <Card title="AI summary" right={<span className="text-[11px] text-ink-500">{c.summary?.generated_by} · evidence: {c.summary?.evidence_refs.length}</span>}><p className="break-words text-sm leading-relaxed">{c.summary?.text || "—"}</p></Card>
           </div>
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <Card title="Recommended action">
               {c.recommendation ? (<div className="space-y-1.5 text-sm">
                 <div className="flex items-center gap-2"><Badge className="bg-accent text-white">{c.recommendation.action_type.replace(/_/g, " ")}</Badge><span className={PRIORITY_COLORS[c.recommendation.priority]}>{c.recommendation.priority}</span><Confidence value={c.recommendation.confidence} /></div>
