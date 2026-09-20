@@ -217,7 +217,7 @@ The security and intent stages can end the flow early. A security-review message
 
 | Layer | Technology |
 | --- | --- |
-| Frontend | Next.js 14.2, React 18.3, TypeScript 5.5, Tailwind CSS 3.4 |
+| Frontend | Next.js 16.3, React 19.2, TypeScript 5.5, Tailwind CSS 3.4 |
 | Backend | Python 3.11, FastAPI, Pydantic 2, Uvicorn |
 | Local intent model | scikit-learn TF-IDF + logistic regression, persisted with joblib |
 | Agent orchestration | LangGraph with memory or optional PostgreSQL checkpoints |
