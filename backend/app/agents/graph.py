@@ -15,7 +15,9 @@ thread_id == case_id, so one paused conversation per case.
 """
 from __future__ import annotations
 
+import atexit
 import os
+from contextlib import ExitStack
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -26,6 +28,13 @@ from langgraph.types import Command
 from app.agents.nodes import Nodes
 from app.agents.state import GraphState
 from app.repositories.base import BaseRepository
+
+
+# Keep context-managed Postgres checkpointer resources alive for the process lifetime.
+# Calling PostgresSaver.from_conn_string(...).__enter__() on a temporary context
+# manager closes its connection as soon as that temporary is released.
+_CHECKPOINTER_RESOURCES = ExitStack()
+atexit.register(_CHECKPOINTER_RESOURCES.close)
 
 
 def _route_after_security(state: GraphState) -> str:
@@ -88,7 +97,7 @@ def _make_checkpointer():
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
 
-        saver = PostgresSaver.from_conn_string(pg_url).__enter__()
+        saver = _CHECKPOINTER_RESOURCES.enter_context(PostgresSaver.from_conn_string(pg_url))
         saver.setup()
         return saver
     except Exception as exc:

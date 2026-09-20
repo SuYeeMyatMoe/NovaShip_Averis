@@ -117,16 +117,20 @@ def webhook_email(payload: dict[str, Any], user: UserRecord = Depends(require("i
 
 @router.post("/connectors/poll")
 def connectors_poll(limit: int = 25, user: UserRecord = Depends(require("ingest"))):
-    """Poll the configured email connector (Gmail, Graph, or bundle) and run the pipeline idempotently."""
+    """Poll the configured email connector (Gmail or bundle) and run the pipeline idempotently."""
     from app.connectors.email_connectors import get_connector
 
     conn = get_connector()
     if conn is None:
-        raise HTTPException(400, detail={"error": "EMAIL_PROVIDER is 'none' - set gmail, graph, or bundle in .env", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Configure Gmail OAuth variables and EMAIL_PROVIDER=gmail", "retryable": False})
+        raise HTTPException(400, detail={"error": "EMAIL_PROVIDER is 'none' - set gmail or bundle in .env", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Configure Gmail OAuth variables and EMAIL_PROVIDER=gmail", "retryable": False})
     s = svc()
     created, skipped = [], 0
     try:
         for msg in conn.fetch(limit=limit):
+            incoming_id = msg.raw.get("email_id") or msg.raw.get("id")
+            if incoming_id and s.repo.get_email(str(incoming_id)):
+                skipped += 1
+                continue
             email = s.pipe.ingest_email(msg.raw, msg.blobs, provider=msg.provider, received_at=msg.received_at)
             if email.is_duplicate_of:
                 skipped += 1

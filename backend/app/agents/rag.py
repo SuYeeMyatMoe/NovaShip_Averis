@@ -42,7 +42,9 @@ class Embedder:
         from app.config import ConfigurationError
 
         self.provider = os.environ.get("EMBEDDING_PROVIDER", "local").lower()
-        self.dims = 256
+        self.dims = int(os.environ.get("EMBEDDING_DIMENSIONS", "256"))
+        if self.dims <= 0:
+            raise ConfigurationError("EMBEDDING_DIMENSIONS must be a positive integer")
         self._impl = None
         try:
             if self.provider == "gemini":

@@ -374,6 +374,7 @@ def test_postgres_checkpoint_selection_never_silently_falls_back(monkeypatch):
 def test_rag_supabase_credentials_and_dimensions_are_validated(monkeypatch):
     monkeypatch.setenv("VECTOR_STORE", "supabase")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "256")
     monkeypatch.setenv("SUPABASE_VECTOR_DIMENSIONS", "768")
     with pytest.raises(ConfigurationError, match="vector dimension"):
         RAG()
@@ -384,6 +385,18 @@ def test_rag_supabase_credentials_and_dimensions_are_validated(monkeypatch):
     monkeypatch.setenv("SUPABASE_ANON_KEY", "public")
     with pytest.raises(ConfigurationError, match="SUPABASE_SECRET_KEY"):
         RAG()
+
+
+def test_scoped_rag_search_filters_before_vector_ranking():
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "supabase"
+        / "migrations"
+        / "0005_rag_scoped_search.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "with filtered as materialized" in migration
+    assert "p_case_id is null or e.case_id is null or e.case_id = p_case_id" in migration
+    assert migration.index("with filtered as materialized") < migration.index("order by e.embedding")
 
 
 def test_production_cors_requires_explicit_non_wildcard_origins(monkeypatch):

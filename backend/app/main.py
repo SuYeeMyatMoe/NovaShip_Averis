@@ -30,10 +30,21 @@ from app.config import auth_mode, cors_allowed_origins, get_repo
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format='{"t":"%(asctime)s","lvl":"%(levelname)s","msg":"%(message)s"}')
 log = logging.getLogger("novaship")
 
+# Vercel Services exposes FastAPI under /api. Local Docker / uvicorn keeps the
+# historical root-level API. API_PREFIX can override either behavior.
+_default_prefix = "/api" if os.environ.get("VERCEL") else ""
+API_PREFIX = os.environ.get("API_PREFIX", _default_prefix).strip()
+if API_PREFIX and not API_PREFIX.startswith("/"):
+    API_PREFIX = "/" + API_PREFIX
+API_PREFIX = API_PREFIX.rstrip("/")
+
 app = FastAPI(
     title="NovaShip Averis - AI Shipping Inbox & SI<->BL Verification",
     version="1.0.0",
     description="Ingest -> secure -> classify -> extract -> deterministic seven-field compare -> evidence -> draft -> human approval -> notify -> audit.",
+    docs_url=f"{API_PREFIX}/docs" if API_PREFIX else "/docs",
+    redoc_url=f"{API_PREFIX}/redoc" if API_PREFIX else "/redoc",
+    openapi_url=f"{API_PREFIX}/openapi.json" if API_PREFIX else "/openapi.json",
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=cors_allowed_origins(), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -62,6 +73,6 @@ def startup() -> None:
     log.info("repository=%s cases=%d llm=%s demo_credentials_seeded=%d", type(repo).__name__, len(repo.list_cases()), os.environ.get("LLM_PROVIDER", "none"), seeded)
 
 
-app.include_router(auth_router)
-app.include_router(router)
-app.include_router(agent_router)
+app.include_router(auth_router, prefix=API_PREFIX)
+app.include_router(router, prefix=API_PREFIX)
+app.include_router(agent_router, prefix=API_PREFIX)

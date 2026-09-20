@@ -231,6 +231,44 @@ def test_batch_requires_confirmation_for_drafts_and_metrics_work():
 
 
 @pytest.mark.skipif(not (BUNDLE / "inbox").exists(), reason="bundle not present")
+
+def test_connector_poll_reports_replayed_gmail_message_as_duplicate(monkeypatch):
+    from app.connectors import email_connectors
+    from app.connectors.email_connectors import InboundMessage
+
+    message = InboundMessage(
+        raw={
+            "email_id": "poll_replay_gmail_001",
+            "provider_message_id": "gmail-api-message-001",
+            "from": "sender@example.com",
+            "to": ["documentation@example.com"],
+            "cc": [],
+            "subject": "P3 Gmail replay reporting test",
+            "body": "Plain-text connector test message.",
+            "attachments": [],
+        },
+        provider="gmail",
+    )
+
+    class FakeGmailConnector:
+        name = "gmail"
+
+        def fetch(self, since=None, limit=50):
+            return [message]
+
+    monkeypatch.setattr(email_connectors, "get_connector", lambda: FakeGmailConnector())
+
+    first = client.post("/connectors/poll?limit=5", headers=SUP)
+    assert first.status_code == 200, first.text
+    assert first.json()["created"] == ["case_poll_replay_gmail_001"]
+    assert first.json()["duplicates_skipped"] == 0
+
+    second = client.post("/connectors/poll?limit=5", headers=SUP)
+    assert second.status_code == 200, second.text
+    assert second.json()["created"] == []
+    assert second.json()["duplicates_skipped"] == 1
+
+
 def test_bundle_sample_email_004_two_mismatches():
     raw = json.loads((BUNDLE / "inbox" / "email_004.json").read_text(encoding="utf-8"))
     r = client.post("/webhooks/email", json={**raw, "email_id": "bundle_004"}, headers=SUP).json()

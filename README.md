@@ -14,6 +14,7 @@
 | **Tests**                              | `65 passed` — comparator, normalization, extraction, security, RBAC, login/register/logout, trained intent classifier, Notify Party, E2E, LangGraph interrupt/resume, RAG scoping |
 | **AI agent docs**                      | [AGENT.md](AGENT.md) — every AI file, LangGraph workflow, RAG, keys, Docker rebuild, test scenarios                                                                     |
 | **Team guides**                        | [P1.md](P1.md) AI & Verification · [P2.md](P2.md) Assistant & Safety · [P3.md](P3.md) Backend/Supabase/Cloud · [P4.md](P4.md) Frontend & E2E                            |
+| **Deploy / handoff**                   | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) · [docs/BACKEND_HANDOFF.md](docs/BACKEND_HANDOFF.md) · [docs/DEMO_AND_LIVE_MODES.md](docs/DEMO_AND_LIVE_MODES.md) |
 
 
 ---
