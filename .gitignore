@@ -8,3 +8,4 @@ node_modules/
 scratch_submission.json
 sdoc-hackathon-docker/data_v2/ground_truth.json
 backend/data/index.json
+testkit/

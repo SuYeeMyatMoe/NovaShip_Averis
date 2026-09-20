@@ -87,6 +87,7 @@ class Pipeline:
     def _error(self, case: CaseRecord, category: ErrorCategory, step: str, message: str, recovery: str, retryable: bool = True) -> None:
         err = ProcessingError(id=_id("err"), case_id=case.id, category=category, step=step, message=message, recovery=recovery, retryable=retryable)
         case.errors.append(err)
+        self.repo.save_case(case)   # the error row references the case (FK): make sure the case exists before the first error is stored
         self.repo.save_error(err)
         self.audit(case.id, ActorType.SYSTEM, "pipeline", "ERROR", after={"category": category.value, "step": step, "message": message})
 
