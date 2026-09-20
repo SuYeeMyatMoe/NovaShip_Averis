@@ -210,7 +210,7 @@ def test_p2_knowledge_answers_approval_and_thc_queries(tmp_path):
 class FakeTranslationLLM:
     enabled = True
 
-    def complete(self, system, prompt, max_tokens=1200):
+    def complete(self, system, prompt, max_tokens=1200, **kwargs):
         text = (
             prompt.replace("Please confirm", "يرجى التأكيد")
             .replace("APRIL FAR EAST (M) SDN BHD", "CHANGED COMPANY")
@@ -247,7 +247,7 @@ def test_translation_preserves_shipping_values(monkeypatch):
 class FakePrefixChangingTranslationLLM:
     enabled = True
 
-    def complete(self, system, prompt, max_tokens=1200):
+    def complete(self, system, prompt, max_tokens=1200, **kwargs):
         text = (
             prompt.replace("Please confirm", "يرجى التأكيد")
             .replace("APRIL FAR EAST (", "CHANGED COMPANY (")
@@ -279,8 +279,8 @@ def test_translation_masks_complete_mixed_case_company_values(monkeypatch):
 class FakeTokenDroppingTranslationLLM:
     enabled = True
 
-    def complete(self, system, prompt, max_tokens=1200):
-        return SimpleNamespace(text=prompt.replace("__ID0__", "[omitted]"))
+    def complete(self, system, prompt, max_tokens=1200, **kwargs):
+        return SimpleNamespace(text=prompt.replace("__ID1__", "[omitted]"))
 
 
 def test_translation_fails_safe_when_a_protection_token_is_missing(monkeypatch):
@@ -297,11 +297,11 @@ def test_translation_fails_safe_when_a_protection_token_is_missing(monkeypatch):
 class FakeTokenReorderingTranslationLLM:
     enabled = True
 
-    def complete(self, system, prompt, max_tokens=1200):
+    def complete(self, system, prompt, max_tokens=1200, **kwargs):
         return SimpleNamespace(
-            text=prompt.replace("__ID0__", "__SWAP__")
-            .replace("__ID1__", "__ID0__")
-            .replace("__SWAP__", "__ID1__")
+            text=prompt.replace("__ID1__", "__SWAP__")
+            .replace("__ID2__", "__ID1__")
+            .replace("__SWAP__", "__ID2__")
         )
 
 
@@ -421,7 +421,7 @@ def test_policy_explanation_is_complete_and_human_readable():
 class FakeUnsafeAnswerLLM:
     enabled = True
 
-    def complete(self, system, prompt, max_tokens=500):
+    def complete(self, system, prompt, max_tokens=500, **kwargs):
         return SimpleNamespace(text="Shipper mismatch requires correction.")
 
 
@@ -447,7 +447,7 @@ class FakeStaticAnswerLLM:
     def __init__(self, text):
         self.text = text
 
-    def complete(self, system, prompt, max_tokens=500):
+    def complete(self, system, prompt, max_tokens=500, **kwargs):
         return SimpleNamespace(text=self.text)
 
 

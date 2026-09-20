@@ -369,7 +369,8 @@ def _llm_answer(question: str, ctx: dict[str, Any]) -> Optional[str]:
         return None
     import json
 
-    res = llm.complete(_LLM_SYSTEM, f"Context:\n{json.dumps(ctx, default=str)[:12000]}\n\nQuestion: {question}", max_tokens=500)
+    res = llm.complete(_LLM_SYSTEM, f"Context:\n{json.dumps(ctx, default=str)[:12000]}\n\nQuestion: {question}", max_tokens=500,
+                       purpose="ask_ai", case_id=str(ctx.get("case_id") or "") or None)
     if not res or res.text.startswith("__LLM_ERROR__"):
         return None
     text = res.text.strip()
@@ -382,19 +383,9 @@ def _llm_answer(question: str, ctx: dict[str, Any]) -> Optional[str]:
 # Translation - preserves names, numbers, ports, units, identifiers
 # ---------------------------------------------------------------------------
 LANG_NAMES = {"en": "English", "zh": "Chinese", "ms": "Malay", "id": "Indonesian", "vi": "Vietnamese", "ko": "Korean", "ar": "Arabic", "fr": "French", "es": "Spanish", "de": "German", "ja": "Japanese"}
-_PROTECT = re.compile(r"\b[A-Z]{3,}[A-Z0-9\-]*\d[A-Z0-9\-]*\b|\b\d[\d,\.]*\s?(KG|kg|MT|x\s?\d0'[A-Z]{2})\b|\b5[A-Z]{3}-\d{5}\b")
-_COMPANY_NAME = re.compile(
-    r"(?<!\w)(?:[A-Z0-9][A-Z0-9&.,'()/-]*\s+){1,10}"
-    r"(?:LTD|LIMITED|LLC|LLP|INC|CORP|CORPORATION|SDN\s+BHD|PTE\s+LTD|"
-    r"PTY\s+LTD|CO\.,?\s+LTD|FZE|FZ-LLC|GMBH|PLC|S\.?A\.?|S\.?P\.?A\.?|B\.?V\.?)\b",
-    re.I,
-)
-_LABELED_PROTECTED_VALUE = re.compile(
-    r"(?im)^((?:Shipper(?:/Exporter)?|Consignee|Notify Party|Notify|"
-    r"Port of Loading|Load Port|POL|Port of Discharge|Discharge Port|POD|"
-    r"No\. of Containers or Packages|Container Count|Gross Weight(?: \(KG\))?|"
-    r"Gross Wt(?: \(kgs\))?|Booking Ref|Bill of Lading No\.)\s*:\s*)(.+)$"
-)
+# Identifier masking now lives in app.ai.privacy (shared by translation and every provider call).
+
+
 def _target_language(q: str) -> Optional[str]:
     for code, name in LANG_NAMES.items():
         if name.lower() in q or f" {code} " in f" {q} ":
@@ -417,38 +408,26 @@ def detect_language(text: str) -> str:
 
 
 def translate_text(text: str, target: str) -> str:
-    """LLM translation with identifier protection; deterministic passthrough offline."""
+    """LLM translation with identifier protection (shared masker); deterministic passthrough offline."""
+    from app.ai.privacy import IdentifierMasker
+
     llm = get_llm()
-    protected: dict[str, str] = {}
-
-    def _mask_value(value: str) -> str:
-        key = f"__ID{len(protected)}__"
-        protected[key] = value
-        return key
-
-    masked = _LABELED_PROTECTED_VALUE.sub(
-        lambda match: match.group(1) + _mask_value(match.group(2)),
-        text,
-    )
-    masked = _COMPANY_NAME.sub(lambda match: _mask_value(match.group(0)), masked)
-    masked = _PROTECT.sub(lambda match: _mask_value(match.group(0)), masked)
-    expected_tokens = re.findall(r"__ID\d+__", masked)
+    masker = IdentifierMasker()
+    masked = masker.mask(text)
+    expected_tokens = masker.tokens_in(masked)
     if not llm.enabled:
         note = f"[Translation to {LANG_NAMES.get(target, target)} requires LLM_PROVIDER; showing original]\n\n"
         return note + text
     res = llm.complete(
         f"Translate the message to {LANG_NAMES.get(target, target)}. Keep every __IDn__ token, number, unit, company name and port name unchanged. Return only the translation.",
-        masked, max_tokens=1200,
+        masked, max_tokens=1200, purpose="translate", mask=True, masker=masker,
     )
     if not res or res.text.startswith("__LLM_ERROR__"):
         return text
     out = res.text
-    returned_tokens = re.findall(r"__ID\d+__", out)
-    if returned_tokens != expected_tokens:
+    if masker.tokens_in(out) != expected_tokens:
         return text
-    for k, v in protected.items():
-        out = out.replace(k, v)
-    return out
+    return masker.unmask(out)
 
 
 # ---------------------------------------------------------------------------

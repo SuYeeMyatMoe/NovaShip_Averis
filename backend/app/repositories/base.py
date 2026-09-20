@@ -19,6 +19,7 @@ from app.contracts.schemas import (
     PolicyRecord,
     ProcessingError,
     ShareRecord,
+    UserMailbox,
     UserRecord,
 )
 
@@ -137,6 +138,26 @@ class BaseRepository(ABC):
 
     def is_session_revoked(self, session_id: str) -> bool:
         return session_id in self.__dict__.setdefault("_revoked_sessions", set())
+
+    # ---- operator history (adaptive operator guard) ------------------------
+    def list_audit_for_actor(self, actor_id: str, since: datetime) -> list[AuditEvent]:
+        """All audit events by one actor since `since`, oldest first. Default filters the global list."""
+        return sorted((e for e in self.list_audit(None) if e.actor_id == actor_id and e.timestamp >= since), key=lambda e: e.timestamp)
+
+    # ---- connected mailboxes (Google sign-in) ----------------------------
+    # Default: process memory. MemoryRepository persists them in its snapshot,
+    # SupabaseRepository stores them in `user_mailboxes` (migration 0007).
+    def get_mailbox(self, user_id: str) -> Optional[UserMailbox]:
+        return self.__dict__.setdefault("_mailboxes", {}).get(user_id)
+
+    def list_mailboxes(self) -> list[UserMailbox]:
+        return list(self.__dict__.setdefault("_mailboxes", {}).values())
+
+    def save_mailbox(self, mailbox: UserMailbox) -> None:
+        self.__dict__.setdefault("_mailboxes", {})[mailbox.user_id] = mailbox
+
+    def delete_mailbox(self, user_id: str) -> None:
+        self.__dict__.setdefault("_mailboxes", {}).pop(user_id, None)
 
     # ---- idempotency ------------------------------------------------------
     @abstractmethod

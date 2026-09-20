@@ -33,6 +33,7 @@ cloudpickle==3.1.2
     # via joblib
 cryptography==50.0.1
     # via
+    #   -r requirements.txt
     #   google-auth
     #   pyjwt
 deprecation==2.1.0
@@ -173,6 +174,8 @@ openai==3.16.2
     # via
     #   -r requirements.txt
     #   langchain-openai
+olefile==0.47
+    # via -r requirements.txt
 openpyxl==3.1.5
     # via -r requirements.txt
 opentelemetry-api==1.44.0
@@ -362,6 +365,8 @@ xxhash==4.0.1
     # via
     #   langgraph
     #   langsmith
+xlrd==2.0.2
+    # via -r requirements.txt
 yarl==1.25.1
     # via
     #   postgrest

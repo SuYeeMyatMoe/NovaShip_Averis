@@ -231,3 +231,27 @@ def test_ocr_prefers_gemini_then_tesseract(monkeypatch):
     assert result.status.value == "EXTRACTED"
     assert "lower confidence" in (result.note or "")
     assert "OCR FROM GEMINI" in result.text
+
+
+def test_overall_report_xlsx_has_all_sheets_and_consistent_overview():
+    from app.services.reporting import REPORT_SHEETS
+
+    r = client.get("/export/report.xlsx", headers=SUP)
+    assert r.status_code == 200 and r.headers["content-disposition"].endswith("novaship-report.xlsx")
+    wb = load_workbook(io.BytesIO(r.content), read_only=True)
+    assert wb.sheetnames == REPORT_SHEETS
+    overview = {row[0]: row[1] for row in wb["Overview"].iter_rows(min_row=2, values_only=True) if row and row[0]}
+    metrics = client.get("/dashboard/metrics", headers=SUP).json()
+    assert overview["scope"] == "whole desk" and overview["generated_by"] == "u_sup_1"
+    assert overview["mismatches_detected"] == metrics["mismatches_detected"] and overview["human_review"] == metrics["human_review"]
+    fields = list(wb["Seven fields"].iter_rows(min_row=2, values_only=True))
+    assert [row[0] for row in fields] == ["shipper", "consignee", "notify_party", "port_of_loading", "port_of_discharge", "container_count", "gross_weight_kg"]
+    assert any(row[0] == "shared" for row in wb["Mailboxes"].iter_rows(min_row=2, values_only=True))
+
+    cid = _ingest("report_sel_001")["id"]
+    batch = client.post("/cases/batch", json={"action": "report_xlsx", "case_ids": [cid]}, headers=SUP)
+    assert batch.status_code == 200 and batch.json()["filename"] == "novaship-report.xlsx"
+    selected = load_workbook(io.BytesIO(base64.b64decode(batch.json()["xlsx_base64"])), read_only=True)
+    rows = list(selected["Cases"].iter_rows(min_row=2, values_only=True))
+    assert [row[0] for row in rows] == [cid]
+    assert client.get("/export/report.xlsx", headers=OPS).status_code == 403

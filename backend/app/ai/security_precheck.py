@@ -129,7 +129,7 @@ def assess_security(email: EmailMessage, attachments: Iterable[AttachmentMeta], 
             signals.append(SecuritySignal(
                 signal="UNSUPPORTED_ATTACHMENT_TYPE", severity="LOW",
                 evidence=f"Attachment '{a.file_name}' type '{ext}' is not processed automatically.",
-                recommended_action="Ask sender for PDF/DOCX/XLSX/TXT.",
+                recommended_action="Ask sender for PDF, DOCX, XLSX, an image scan or plain text.",
             ))
         if a.is_duplicate_of:
             signals.append(SecuritySignal(

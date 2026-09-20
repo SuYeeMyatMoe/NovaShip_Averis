@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import getaddresses, parseaddr
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -71,7 +70,11 @@ class BundleConnector(BaseConnector):
 
 
 class GmailConnector(BaseConnector):
-    """Gmail API connector using a one-time user grant and a server-side refresh token."""
+    """Gmail API connector using a one-time user grant and a server-side refresh token.
+
+    `GmailConnector()` / `from_env()` is the shared desk mailbox configured in .env.
+    `from_mailbox()` is a user's own Gmail connected through Google sign-in.
+    """
 
     name = "gmail"
     TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -80,20 +83,42 @@ class GmailConnector(BaseConnector):
         "https://www.googleapis.com/auth/gmail.send",
     )
 
-    def __init__(self) -> None:
-        required = ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS")
-        missing = [name for name in required if not os.environ.get(name, "").strip()]
-        if missing:
+    def __init__(self, *, client_id: Optional[str] = None, client_secret: Optional[str] = None,
+                 refresh_token: Optional[str] = None, address: Optional[str] = None) -> None:
+        if client_id is None and client_secret is None and refresh_token is None and address is None:
+            required = ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS")
+            missing = [name for name in required if not os.environ.get(name, "").strip()]
+            if missing:
+                from app.config import ConfigurationError
+
+                raise ConfigurationError(f"Gmail provider requires {', '.join(missing)}")
+            client_id = os.environ["GMAIL_CLIENT_ID"]
+            client_secret = os.environ["GMAIL_CLIENT_SECRET"]
+            refresh_token = os.environ["GMAIL_REFRESH_TOKEN"]
+            address = os.environ["GMAIL_ADDRESS"]
+        if not (client_id and client_secret and refresh_token and address):
             from app.config import ConfigurationError
 
-            raise ConfigurationError(f"Gmail provider requires {', '.join(missing)}")
-        self.client_id = os.environ["GMAIL_CLIENT_ID"].strip()
-        self.client_secret = os.environ["GMAIL_CLIENT_SECRET"].strip()
-        self.refresh_token = os.environ["GMAIL_REFRESH_TOKEN"].strip()
-        self.address = os.environ["GMAIL_ADDRESS"].strip()
+            raise ConfigurationError("Gmail connector requires client id, client secret, refresh token and address")
+        self.client_id = client_id.strip()
+        self.client_secret = client_secret.strip()
+        self.refresh_token = refresh_token.strip()
+        self.address = address.strip()
         self._credentials: Optional[GoogleCredentials] = None
         self._service = None
         self._token_expires_at = 0.0
+
+    @classmethod
+    def from_env(cls) -> "GmailConnector":
+        return cls()
+
+    @classmethod
+    def from_mailbox(cls, mailbox) -> "GmailConnector":
+        """Connector for a user's connected Gmail (see app.api.google_auth_routes)."""
+        from app.auth.mailbox_tokens import decrypt_token
+
+        client_id, client_secret = google_oauth_client()
+        return cls(client_id=client_id, client_secret=client_secret, refresh_token=decrypt_token(mailbox.refresh_token_enc), address=mailbox.address)
 
     def token(self) -> str:
         if self._credentials and self._credentials.token and time.monotonic() < self._token_expires_at:
@@ -226,6 +251,17 @@ class GmailConnector(BaseConnector):
         return {"status": 200, "id": sent["id"], "thread_id": sent.get("threadId")}
 
 
+def google_oauth_client() -> tuple[str, str]:
+    """OAuth client used for Google sign-in / per-user mailboxes; falls back to the shared Gmail client."""
+    client_id = (os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or os.environ.get("GMAIL_CLIENT_ID") or "").strip()
+    client_secret = (os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or os.environ.get("GMAIL_CLIENT_SECRET") or "").strip()
+    if not client_id or not client_secret:
+        from app.config import ConfigurationError
+
+        raise ConfigurationError("Google sign-in requires GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET (or the GMAIL_* client)")
+    return client_id, client_secret
+
+
 def get_connector() -> Optional[BaseConnector]:
     provider = os.environ.get("EMAIL_PROVIDER", "none").lower()
     if provider == "none":
@@ -318,36 +354,10 @@ def _unique_attachment_path(name: str, blobs: dict[str, bytes]) -> str:
     return f"attachments/{stem}_{index}{suffix}"
 
 
-class _TextHTMLParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.text: list[str] = []
-        self._ignored_depth = 0
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        if tag in {"script", "style"}:
-            self._ignored_depth += 1
-        elif not self._ignored_depth and tag in {"br", "p", "div", "tr", "li"}:
-            self.text.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style"} and self._ignored_depth:
-            self._ignored_depth -= 1
-        elif not self._ignored_depth and tag in {"p", "div", "tr", "li"}:
-            self.text.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self._ignored_depth:
-            self.text.append(data)
-
-
 def _strip_html(html: str) -> str:
-    import re
+    from app.readers.textutil import strip_html
 
-    parser = _TextHTMLParser()
-    parser.feed(html)
-    text = "".join(parser.text)
-    return re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
+    return strip_html(html)
 
 
 def _safe_id(s: str) -> str:

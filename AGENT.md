@@ -121,7 +121,7 @@ Order of operations for P3: run `0001_schema.sql`, `0002_rls.sql`, `0003_vector.
 | Variable | Get it at | Unlocks |
 |---|---|---|
 | `LLM_PROVIDER=openai` + `OPENAI_API_KEY=sk-proj-...` | platform.openai.com -> API keys | security agent reasoning, intent tie-break, extraction fallback, draft polish, free-form Ask AI, translation (`LLM_MODEL=gpt-4.1-mini` in the example configuration) |
-| `LLM_PROVIDER=gemini` + `GOOGLE_API_KEY=AIzaSy...` | aistudio.google.com/app/apikey | Same chat uses as OpenAI, via `GEMINI_CHAT_MODEL` (default `gemini-2.0-flash`). Comparator stays code-only. |
+| `LLM_PROVIDER=gemini` + `GOOGLE_API_KEY=AIzaSy...` | aistudio.google.com/app/apikey | Same chat uses as OpenAI, via `GEMINI_CHAT_MODEL` (default `gemini-3.6-flash`). Comparator stays code-only. |
 | `OCR_ENABLED=1` + `GOOGLE_API_KEY` | aistudio.google.com/app/apikey | Gemini vision OCR on image-only PDFs, then pytesseract if installed. Unreadable still escalates. |
 | `EMBEDDING_PROVIDER=gemini` + `GOOGLE_API_KEY=AIzaSy...` | aistudio.google.com/app/apikey | Gemini `text-embedding-004` for RAG |
 | `EMBEDDING_PROVIDER=openai` | (uses `OPENAI_API_KEY`) | OpenAI embeddings for RAG |

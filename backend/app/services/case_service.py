@@ -19,11 +19,12 @@ from fastapi import HTTPException
 
 from app.ai.assistant import build_share_message
 from app.ai.operator_behaviour import (
-    AUTO_DRAFT_THRESHOLD,
     auto_draft_signal,
     burst_warning,
     count_user_mutations,
+    guard_settings,
     has_live_draft,
+    off_hours_warning,
     rapid_archive_warning,
     share_denied_warning,
 )
@@ -67,6 +68,19 @@ class CaseService:
     def __init__(self, repo: BaseRepository) -> None:
         self.repo = repo
         self.pipe = Pipeline(repo)
+        self.operator_signals: list[SecuritySignal] = []   # raised during this service call; routes surface them as `operator_warning`
+
+    def pop_operator_warning(self) -> Optional[dict[str, Any]]:
+        """The most serious operator signal raised in this call (for the UI warning dialog), then reset."""
+        if not self.operator_signals:
+            return None
+        order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        top = sorted(self.operator_signals, key=lambda sig: order.get(sig.severity, 9))[0]
+        self.operator_signals = []
+        return {**top.model_dump(mode="json"), "dialog": self.guard()["warning_dialog"]}
+
+    def guard(self) -> dict[str, Any]:
+        return guard_settings(self.policy())
 
     # ------------------------------------------------------------ helpers
     def get(self, case_id: str) -> CaseRecord:
@@ -85,6 +99,7 @@ class CaseService:
         return merged_policy(self.repo.get_active_policy().values)
 
     def _append_operator_signal(self, case: CaseRecord, user: UserRecord, signal: SecuritySignal) -> None:
+        self.operator_signals.append(signal)
         recent = {a.signal for a in case.anomalies[-8:]}
         if signal.signal in recent and signal.signal != "OPERATOR_BURST_MUTATIONS":
             return
@@ -98,15 +113,21 @@ class CaseService:
         )
 
     def _after_user_mutation(self, case: CaseRecord, user: UserRecord, *, auto_draft: bool = True) -> CaseRecord:
-        burst = burst_warning(user.id)
+        settings = self.guard()
+        burst = burst_warning(self.repo, user.id, settings=settings)
         if burst:
             self._append_operator_signal(case, user, burst)
+        late = off_hours_warning(self.repo, user.id, settings)
+        if late:
+            self._append_operator_signal(case, user, late)
         if auto_draft:
             n = count_user_mutations(self.repo, case.id)
-            if n >= AUTO_DRAFT_THRESHOLD and not has_live_draft(case):
+            if n >= settings["auto_draft_after"] and not has_live_draft(case):
                 self.repo.save_case(case)
                 case = self.generate_draft(case.id, user, use_llm=False)
-                case.anomalies.append(auto_draft_signal(n))
+                signal = auto_draft_signal(n)
+                case.anomalies.append(signal)
+                self.operator_signals.append(signal)
                 self.pipe.audit(
                     case.id,
                     ActorType.SYSTEM,
@@ -125,17 +146,30 @@ class CaseService:
             "payload": share.payload_preview,
         }
 
-    def _deliver_email(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None) -> tuple[str, Optional[dict[str, Any]]]:
+    def _outbound_mailbox(self, case: CaseRecord):
+        """The user mailbox a reply should leave from: the one the request arrived in, when it can still send."""
+        email = self.repo.get_email(case.source_email_id) if case.source_email_id else None
+        if not email or not email.mailbox_user_id:
+            return None
+        mailbox = self.repo.get_mailbox(email.mailbox_user_id)
+        return mailbox if mailbox and mailbox.can_send() else None
+
+    def _deliver_email(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None,
+                       mailbox=None) -> tuple[str, Optional[dict[str, Any]]]:
+        """Send through the owner's connected Gmail when `mailbox` is given, otherwise the shared desk mailbox."""
         recipients = [address.strip() for address in to]
         copies = [address.strip() for address in (cc or [])]
         if not recipients or any(not _EMAIL_RE.fullmatch(address) for address in recipients + copies):
             raise ValueError("outbound email contains an invalid recipient")
         mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
         if mode == "simulate":
-            return "simulate", None
-        from app.connectors.email_connectors import get_outbound_connector
+            return "simulate", ({"from": mailbox.address} if mailbox else None)
+        from app.connectors.email_connectors import GmailConnector, get_outbound_connector
 
-        connector = get_outbound_connector(mode)
+        if mailbox is not None and mode == "gmail":
+            connector = GmailConnector.from_mailbox(mailbox)
+        else:
+            connector = get_outbound_connector(mode)
         if connector is None:  # pragma: no cover - simulate returned above
             raise RuntimeError("configured outbound connector is unavailable")
         try:
@@ -144,7 +178,7 @@ class CaseService:
             raise DeliveryOutcomeUnknown(
                 "outbound provider outcome is unknown"
             ) from exc
-        return mode, result
+        return mode, {**(result or {}), "from": getattr(connector, "address", None)}
 
     def _delivery_failure(self, case: CaseRecord, user: UserRecord, item_id: str, exc: Exception) -> None:
         err = ProcessingError(id=_id("err_notify"), case_id=case.id, category=ErrorCategory.NOTIFICATION_ERROR, step="outbound_email",
@@ -270,7 +304,7 @@ class CaseService:
             d.status = DraftStatus.DELIVERING
             self.repo.save_case(case)
         try:
-            mode, _provider_result = self._deliver_email(d.to, d.subject, d.body, d.cc)
+            mode, provider_result = self._deliver_email(d.to, d.subject, d.body, d.cc, mailbox=self._outbound_mailbox(case))
         except DeliveryOutcomeUnknown as exc:
             d.status = DraftStatus.DELIVERY_UNKNOWN
             self._delivery_unknown(case, d.id or dec.draft_id, exc)
@@ -292,7 +326,8 @@ class CaseService:
         d.status = DraftStatus.SENT if accepted else DraftStatus.SIMULATED
         action = "NOTIFICATION_SENT" if accepted else "NOTIFICATION_SIMULATED"
         self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", action,
-                        after={"channel": "email", "to": d.to, "subject": d.subject, "draft_id": d.id, "mode": mode, "provider_accepted": accepted})
+                        after={"channel": "email", "to": d.to, "subject": d.subject, "draft_id": d.id, "mode": mode, "provider_accepted": accepted,
+                               "from": (provider_result or {}).get("from") or os.environ.get("GMAIL_ADDRESS") or "shared"})
         self._status(case, CaseStatus.AWAITING_RESPONSE, user)
         self.repo.save_case(case)
         return case
@@ -483,6 +518,7 @@ class CaseService:
                             [party.email],
                             f"NovaShip case {case.id}",
                             share.message,
+                            mailbox=self._outbound_mailbox(case),
                         )
                     except DeliveryOutcomeUnknown as exc:
                         share.status = "DELIVERY_UNKNOWN"
@@ -631,46 +667,89 @@ class CaseService:
         return share
 
     # ------------------------------------------------------------ batch
+    PARALLEL_BATCH_ACTIONS = {"classify", "compare", "draft", "request_review", "mark_no_action", "assign"}
+
+    @staticmethod
+    def batch_parallelism(requested: Any = None) -> int:
+        try:
+            value = int(requested if requested not in (None, "") else os.environ.get("BATCH_PARALLELISM", "4") or 4)
+        except (TypeError, ValueError):
+            value = 4
+        return max(1, min(value, 16))
+
+    def _batch_one(self, action: str, cid: str, params: dict[str, Any], user: UserRecord) -> dict[str, Any]:
+        """One case of a batch: every outcome is a result row, never an exception out of the pool."""
+        import time
+
+        t0 = time.time()
+        try:
+            if action == "classify" or action == "compare":
+                c = self.reprocess(cid, user)
+            elif action == "mark_no_action":
+                c = self.mark_no_action(cid, user)
+            elif action == "assign":
+                c = self.assign(cid, AssignRequest(**params), user)
+            elif action == "draft":
+                c = self.generate_draft(cid, user, use_llm=False)
+            elif action == "archive":
+                c = self.complete(cid, user, note="batch archive")
+            elif action == "request_review":
+                c = self.request_review(cid, user, note=params.get("note"))
+            elif action in ("export", "export_xlsx", "report_xlsx"):
+                c = self.get(cid)
+            else:
+                raise HTTPException(400, detail={"error": f"unknown batch action {action}", "category": "DATABASE_ERROR"})
+            return {"ok": True, "status": c.status.value, "ms": int((time.time() - t0) * 1000)}
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+            return {"ok": False, "error": {**detail, "retryable": detail.get("retryable", exc.status_code >= 500)}, "ms": int((time.time() - t0) * 1000)}
+        except Exception as exc:  # unexpected failure on one case must not sink the batch
+            return {"ok": False, "error": {"error": type(exc).__name__, "category": "DATABASE_ERROR", "retryable": True}, "ms": int((time.time() - t0) * 1000)}
+
     def batch(self, req: BatchRequest, user: UserRecord) -> dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
+
         results: dict[str, Any] = {}
         if req.action in ("draft", "request_review") and not req.confirm:
             return {"requires_confirmation": True, "action": req.action, "count": len(req.case_ids), "note": "Batch drafts are generated but never sent; confirm to proceed."}
-        for cid in req.case_ids:
-            try:
-                if req.action == "classify" or req.action == "compare":
-                    c = self.reprocess(cid, user)
-                elif req.action == "mark_no_action":
-                    c = self.mark_no_action(cid, user)
-                elif req.action == "assign":
-                    c = self.assign(cid, AssignRequest(**req.params), user)
-                elif req.action == "draft":
-                    c = self.generate_draft(cid, user, use_llm=False)
-                elif req.action == "archive":
-                    c = self.complete(cid, user, note="batch archive")
-                elif req.action == "request_review":
-                    c = self.request_review(cid, user, note=req.params.get("note"))
-                elif req.action == "export" or req.action == "export_xlsx":
-                    c = self.get(cid)
-                else:
-                    raise HTTPException(400, detail={"error": f"unknown batch action {req.action}", "category": "DATABASE_ERROR"})
-                results[cid] = {"ok": True, "status": c.status.value}
-            except HTTPException as exc:
-                results[cid] = {"ok": False, "error": exc.detail}
-        self.pipe.audit(None, ActorType.USER, user.id, "BATCH_ACTION", after={"action": req.action, "count": len(req.case_ids), "ok": sum(1 for r in results.values() if r["ok"])})
+        case_ids = list(dict.fromkeys(req.case_ids))
+        params = dict(req.params or {})
+        retry_only = params.pop("retry_failed", None)
+        if isinstance(retry_only, list) and retry_only:
+            keep = {str(x) for x in retry_only}
+            case_ids = [cid for cid in case_ids if cid in keep]
+        workers = self.batch_parallelism(params.pop("parallel", None)) if req.action in self.PARALLEL_BATCH_ACTIONS else 1
+        if workers > 1 and len(case_ids) > 1:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="case-batch") as pool:
+                results = dict(zip(case_ids, pool.map(lambda cid: self._batch_one(req.action, cid, params, user), case_ids)))
+        else:
+            for cid in case_ids:
+                results[cid] = self._batch_one(req.action, cid, params, user)
+        failed = [cid for cid, r in results.items() if not r["ok"]]
+        self.pipe.audit(None, ActorType.USER, user.id, "BATCH_ACTION",
+                        after={"action": req.action, "count": len(case_ids), "ok": len(case_ids) - len(failed), "failed": len(failed), "parallel": workers})
         if req.action == "archive":
-            warn = rapid_archive_warning(user.id, len(req.case_ids))
+            warn = rapid_archive_warning(user.id, len(req.case_ids), self.guard())
             if warn and req.case_ids:
                 first = self.get(req.case_ids[0])
                 self._append_operator_signal(first, user, warn)
                 self.repo.save_case(first)
-        out: dict[str, Any] = {"requires_confirmation": False, "results": results}
+        out: dict[str, Any] = {"requires_confirmation": False, "results": results, "failed_ids": failed, "parallel": workers, "operator_warning": self.pop_operator_warning()}
         want_xlsx = req.action == "export_xlsx" or (req.action == "export" and str(req.params.get("format", "")).lower() == "xlsx")
         if req.action == "export" and not want_xlsx:
             out["csv"] = self.export_csv(req.case_ids)
         if want_xlsx:
             out["xlsx_base64"] = base64.b64encode(self.export_xlsx(req.case_ids)).decode("ascii")
             out["filename"] = "cases.xlsx"
+        if req.action == "report_xlsx":
+            out["xlsx_base64"] = base64.b64encode(self.export_report_xlsx(req.case_ids, generated_by=user.id)).decode("ascii")
+            out["filename"] = "novaship-report.xlsx"
         return out
+
+    def export_report_xlsx(self, case_ids: Optional[list[str]] = None, *, generated_by: str = "system") -> bytes:
+        from app.services.reporting import build_report_xlsx
+
+        return build_report_xlsx(self.repo, case_ids, generated_by=generated_by)
 
     def export_csv(self, case_ids: Optional[list[str]] = None) -> str:
         buf = io.StringIO()

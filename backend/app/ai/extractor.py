@@ -173,7 +173,7 @@ Only use text that literally appears in the document. If a field is absent, set 
 
 
 def _llm_fill(result: SevenFieldExtraction, text: str, document_id: str, fields: list[str]) -> None:
-    data = get_llm().complete_json(_LLM_SYSTEM, f"Fields: {', '.join(fields)}\n\nDocument:\n{text[:6000]}", max_tokens=600)
+    data = get_llm().complete_json(_LLM_SYSTEM, f"Fields: {', '.join(fields)}\n\nDocument:\n{text[:6000]}", max_tokens=600, purpose="extract")
     if not data or "fields" not in data:
         return
     for field in fields:

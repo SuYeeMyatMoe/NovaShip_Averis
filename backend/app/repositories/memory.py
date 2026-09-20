@@ -18,6 +18,7 @@ from app.contracts.schemas import (
     ProcessingError,
     Role,
     ShareRecord,
+    UserMailbox,
     UserRecord,
 )
 from app.core.policy import DEFAULT_POLICY
@@ -69,6 +70,7 @@ class MemoryRepository(BaseRepository):
         self.jobs: dict[str, dict[str, Any]] = {}
         self.credentials: dict[str, str] = {}      # user_id -> password hash
         self.revoked_sessions: set[str] = set()
+        self.mailboxes: dict[str, UserMailbox] = {}  # user_id -> connected Gmail (token encrypted)
 
     # emails
     def save_email(self, email: EmailMessage) -> None:
@@ -303,6 +305,23 @@ class MemoryRepository(BaseRepository):
     def is_session_revoked(self, session_id: str) -> bool:
         return session_id in self.revoked_sessions
 
+    def list_audit_for_actor(self, actor_id: str, since: datetime) -> list[AuditEvent]:
+        return sorted((e for e in self.audit if e.actor_id == actor_id and e.timestamp >= since), key=lambda e: e.timestamp)
+
+    def get_mailbox(self, user_id: str) -> Optional[UserMailbox]:
+        return self.mailboxes.get(user_id)
+
+    def list_mailboxes(self) -> list[UserMailbox]:
+        return list(self.mailboxes.values())
+
+    def save_mailbox(self, mailbox: UserMailbox) -> None:
+        with self._lock:
+            self.mailboxes[mailbox.user_id] = mailbox
+
+    def delete_mailbox(self, user_id: str) -> None:
+        with self._lock:
+            self.mailboxes.pop(user_id, None)
+
     def list_parties(self) -> list[PartyContact]:
         return list(self.parties.values())
 
@@ -338,6 +357,7 @@ class MemoryRepository(BaseRepository):
             "parties": [p.model_dump(mode="json") for p in self.parties.values()],
             "policies": [p.model_dump(mode="json") for p in self.policies],
             "credentials": dict(self.credentials),
+            "mailboxes": [m.model_dump(mode="json") for m in self.mailboxes.values()],
         }
 
     def load(self, snapshot: dict[str, Any]) -> None:
@@ -355,6 +375,8 @@ class MemoryRepository(BaseRepository):
                 self.policies = [PolicyRecord(**p) for p in snapshot["policies"]]
             if snapshot.get("credentials"):
                 self.credentials = dict(snapshot["credentials"])
+            if snapshot.get("mailboxes"):
+                self.mailboxes = {m["user_id"]: UserMailbox(**m) for m in snapshot["mailboxes"]}
 
     def load_file(self, path: str | Path) -> None:
         p = Path(path)

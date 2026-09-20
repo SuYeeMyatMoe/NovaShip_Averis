@@ -173,7 +173,7 @@ def polish_with_llm(draft: DraftAction, comparison: Optional[ComparisonResult]) 
     llm = get_llm()
     if not llm.enabled:
         return draft
-    data = llm.complete_json(_POLISH_SYSTEM, draft.body, max_tokens=700)
+    data = llm.complete_json(_POLISH_SYSTEM, draft.body, max_tokens=700, purpose="draft_polish")
     if not data or not isinstance(data.get("body"), str):
         return draft
     new_body = data["body"]

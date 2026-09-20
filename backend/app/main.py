@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.agent_routes import router as agent_router
 from app.api.auth_routes import router as auth_router, seed_demo_credentials
+from app.api.google_auth_routes import router as google_auth_router
 from app.api.routes import router
 from app.auth.accounts import validate_session_configuration
 from app.config import auth_mode, cors_allowed_origins, get_repo
@@ -74,8 +75,16 @@ def startup() -> None:
     repo.list_users()
     seeded = seed_demo_credentials() if auth_mode() == "demo" else 0
     log.info("repository=%s cases=%d emails=%d llm=%s demo_credentials_seeded=%d", type(repo).__name__, n_cases, n_emails, os.environ.get("LLM_PROVIDER", "none"), seeded)
+    from app.services.mailbox_poller import start_background_poller
+
+    start_background_poller()  # no-op unless GMAIL_POLL_INTERVAL_SECONDS > 0
+    from app.ai.privacy import privacy_mode
+
+    if os.environ.get("LLM_PROVIDER", "none").lower() != "none" and privacy_mode() == "off":
+        log.warning("LLM_PRIVACY=off with an external provider: company identifiers will reach %s unmasked", os.environ.get("LLM_PROVIDER"))
 
 
 app.include_router(auth_router, prefix=API_PREFIX)
+app.include_router(google_auth_router, prefix=API_PREFIX)
 app.include_router(router, prefix=API_PREFIX)
 app.include_router(agent_router, prefix=API_PREFIX)

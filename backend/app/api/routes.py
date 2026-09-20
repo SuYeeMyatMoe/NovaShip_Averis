@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from datetime import datetime
 from typing import Any, Optional
 
@@ -14,6 +15,7 @@ from app.auth.rbac import current_user, has_permission, require
 from app.config import BUNDLE_DIR, get_repo
 from app.contracts.schemas import (
     SEVEN_FIELDS,
+    ActorType,
     AskRequest,
     AskResponse,
     AssignRequest,
@@ -83,6 +85,13 @@ def _case_view(case, email) -> dict[str, Any]:
     return d
 
 
+def _mutation_view(s: CaseService, case) -> dict[str, Any]:
+    """Case view plus the operator signal raised by this call (the UI opens a warning dialog on it)."""
+    d = _case_view(case, s.repo.get_email(case.source_email_id))
+    d["operator_warning"] = s.pop_operator_warning()
+    return d
+
+
 def _case_row(c, e) -> dict[str, Any]:
     return {
         "id": c.id, "email_id": c.source_email_id, "subject": e.subject if e else "", "sender": e.sender if e else "", "received_at": e.received_at.isoformat() if e else None,
@@ -91,33 +100,11 @@ def _case_row(c, e) -> dict[str, Any]:
         "mismatch_count": c.mismatch_count, "comparison_status": c.comparison_status.value if c.comparison_status else None, "review_reason": c.review_reason.value if c.review_reason else None,
         "confidence": c.confidence, "assigned_user_id": c.assigned_user_id, "shared_with": c.shared_with, "status": c.status.value, "updated_at": c.updated_at.isoformat(),
         "summary": c.summary.text if c.summary else "", "errors": len([x for x in c.errors if not x.resolved]), "drafts": len(c.drafts),
+        "mailbox_user_id": e.mailbox_user_id if e else None, "mailbox": e.mailbox_address if e else None,
     }
 
 
-def _dashboard_metrics(cases, n_emails: int) -> dict[str, Any]:
-    m = {
-        "incoming_emails": n_emails,
-        "action_required": sum(1 for c in cases if c.action_required and c.status != CaseStatus.COMPLETED),
-        "no_action_required": sum(1 for c in cases if not c.action_required),
-        "document_verification_cases": sum(1 for c in cases if c.hackathon_category.value == "BL_COMPARISON"),
-        "mismatches_detected": sum(1 for c in cases if c.mismatch_count > 0),
-        "no_mismatch_cases": sum(1 for c in cases if c.comparison and c.comparison.comparison_status.value == "PASSED"),
-        "waiting_for_documents": sum(1 for c in cases if c.status == CaseStatus.WAITING_DOCUMENTS),
-        "human_review": sum(1 for c in cases if c.status == CaseStatus.HUMAN_REVIEW),
-        "notify_party": sum(1 for c in cases if c.status in (CaseStatus.NOTIFY_PARTY, CaseStatus.AWAITING_RESPONSE)),
-        "processing_errors": sum(len([e for e in c.errors if not e.resolved]) for c in cases),
-        "security_flagged": sum(1 for c in cases if c.security.outcome.value != "SAFE"),
-        "completed": sum(1 for c in cases if c.status == CaseStatus.COMPLETED),
-        "avg_processing_ms": round(sum(c.processing_ms for c in cases) / len(cases), 1) if cases else 0,
-        "by_status": {},
-        "by_intent": {},
-        "by_priority": {},
-    }
-    for c in cases:
-        m["by_status"][c.status.value] = m["by_status"].get(c.status.value, 0) + 1
-        m["by_intent"][c.intent.value] = m["by_intent"].get(c.intent.value, 0) + 1
-        m["by_priority"][c.priority.value] = m["by_priority"].get(c.priority.value, 0) + 1
-    return m
+from app.services.reporting import dashboard_metrics as _dashboard_metrics  # noqa: E402  (shared with the Excel report)
 
 
 # ---------------------------------------------------------------- health
@@ -128,14 +115,75 @@ def health():
         "cases": len(repo.list_cases()),
         "emails": len(repo.list_emails()),
     }
-    return {"status": "ok", "backend": type(repo).__name__, **counts, "time": datetime.utcnow().isoformat()}
+    return {"status": "ok", "backend": type(repo).__name__, **counts, "time": datetime.utcnow().isoformat(), "llm": llm_posture()}
+
+
+def llm_posture() -> dict[str, Any]:
+    """What leaves the desk towards a model provider right now (no secrets): provider, model, masking, OCR, call counters."""
+    from app.ai.llm import get_llm, llm_call_stats
+    from app.ai.privacy import privacy_settings
+    from app.readers.document_reader import ocr_enabled
+
+    llm = get_llm()
+    settings = privacy_settings()
+    return {
+        "provider": llm.provider if llm.enabled else "none",
+        "model": llm.model if llm.enabled else None,
+        "privacy": "mask" if settings["mask_identifiers"] else "off",
+        "audit_provider_calls": settings["audit_provider_calls"],
+        "vision_ocr": bool(ocr_enabled() and settings["allow_vision_ocr"] and os.environ.get("GOOGLE_API_KEY")),
+        "embeddings": os.environ.get("EMBEDDING_PROVIDER", "local"),
+        "calls": llm_call_stats(),
+    }
+
+
+def mailbox_summary(user_id: str) -> dict[str, Any]:
+    """Safe view of a user's connected Gmail for /me, /auth/session and the shell; never includes the token."""
+    mailbox = get_repo().get_mailbox(user_id)
+    return mailbox.public() if mailbox else {"connected": False}
 
 
 @router.get("/me")
 def me(user: UserRecord = Depends(current_user)):
     from app.auth.rbac import PERMISSIONS
 
-    return {**user.model_dump(mode="json"), "permissions": [p for p in PERMISSIONS if has_permission(user, p)]}
+    return {**user.model_dump(mode="json"), "permissions": [p for p in PERMISSIONS if has_permission(user, p)], "mailbox": mailbox_summary(user.id)}
+
+
+@router.get("/me/operator-profile")
+def my_operator_profile(user: UserRecord = Depends(current_user)):
+    """What the operator guard has learned for the caller from the audit log, and the limits that apply now."""
+    from app.ai.operator_behaviour import operator_baseline
+
+    s = svc()
+    settings = s.guard()
+    return {"settings": settings, "baseline": operator_baseline(s.repo, user.id, settings)}
+
+
+@router.get("/me/mailbox")
+def my_mailbox(user: UserRecord = Depends(current_user)):
+    return mailbox_summary(user.id)
+
+
+@router.delete("/me/mailbox")
+def disconnect_mailbox(user: UserRecord = Depends(current_user)):
+    """Forget the connected Gmail: best-effort revoke at Google, then delete the encrypted token."""
+    repo = get_repo()
+    mailbox = repo.get_mailbox(user.id)
+    if not mailbox:
+        raise HTTPException(404, detail={"error": "no mailbox is connected to this account", "category": "EMAIL_CONNECTOR_ERROR"})
+    revoked = False
+    try:
+        from app.auth.mailbox_tokens import decrypt_token
+        import httpx
+
+        httpx.post("https://oauth2.googleapis.com/revoke", data={"token": decrypt_token(mailbox.refresh_token_enc)}, timeout=10)
+        revoked = True
+    except Exception:  # the local record is removed regardless; the user can also revoke at myaccount.google.com
+        revoked = False
+    repo.delete_mailbox(user.id)
+    svc().pipe.audit(None, ActorType.USER, user.id, "MAILBOX_DISCONNECTED", after={"address": mailbox.address, "google_revoked": revoked})
+    return {"ok": True, "address": mailbox.address, "google_revoked": revoked}
 
 
 @router.get("/me/notifications")
@@ -225,31 +273,31 @@ def webhook_email(payload: dict[str, Any], user: UserRecord = Depends(require("i
 
 
 @router.post("/connectors/poll")
-def connectors_poll(limit: int = 25, user: UserRecord = Depends(require("ingest"))):
-    """Poll the configured email connector (Gmail or bundle) and run the pipeline idempotently."""
-    from app.connectors.email_connectors import get_connector
+def connectors_poll(limit: int = 25, source: str = Query(default="auto", description="auto | mine | shared"), user: UserRecord = Depends(require("ingest"))):
+    """Poll a mailbox and run the pipeline idempotently.
 
-    conn = get_connector()
-    if conn is None:
-        raise HTTPException(400, detail={"error": "EMAIL_PROVIDER is 'none' - set gmail or bundle in .env", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Configure Gmail OAuth variables and EMAIL_PROVIDER=gmail", "retryable": False})
+    `mine` = the caller's connected Gmail; `shared` = the desk mailbox from .env (EMAIL_PROVIDER);
+    `auto` = the caller's mailbox when connected, otherwise the shared one.
+    """
+    from app.connectors.email_connectors import get_connector
+    from app.services.mailbox_service import MailboxPollError, poll_connector, poll_user_mailbox
+
     s = svc()
-    created, skipped = [], 0
+    source = (source or "auto").strip().lower()
+    if source not in {"auto", "mine", "shared"}:
+        raise HTTPException(400, detail={"error": "source must be auto, mine or shared", "category": "EMAIL_CONNECTOR_ERROR", "retryable": False})
+    mailbox = s.repo.get_mailbox(user.id) if source != "shared" else None
+    if source == "mine" and mailbox is None:
+        raise HTTPException(400, detail={"error": "no Gmail is connected to this account - sign in with Google or connect a mailbox first", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Connect Gmail from the Guide page", "retryable": False})
     try:
-        for msg in conn.fetch(limit=limit):
-            incoming_id = msg.raw.get("email_id") or msg.raw.get("id")
-            if incoming_id and s.repo.get_email(str(incoming_id)):
-                skipped += 1
-                continue
-            email = s.pipe.ingest_email(msg.raw, msg.blobs, provider=msg.provider, received_at=msg.received_at)
-            if email.is_duplicate_of:
-                skipped += 1
-                continue
-            case = s.pipe.run(email, actor_id=user.id)
-            created.append(case.id)
-    except Exception as exc:  # connector failure is visible + recoverable
-        s.pipe.audit(None, "SYSTEM", "connector", "ERROR", after={"category": "EMAIL_CONNECTOR_ERROR", "message": type(exc).__name__})
-        raise HTTPException(502, detail={"error": f"connector {conn.name} failed: {type(exc).__name__}", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Check credentials / network and retry", "retryable": True})
-    return {"connector": conn.name, "created": created, "duplicates_skipped": skipped}
+        if mailbox is not None and mailbox.status != "revoked":
+            return poll_user_mailbox(s, mailbox, actor_id=user.id, limit=limit)
+        conn = get_connector()
+        if conn is None:
+            raise HTTPException(400, detail={"error": "EMAIL_PROVIDER is 'none' - set gmail or bundle in .env", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Configure Gmail OAuth variables and EMAIL_PROVIDER=gmail, or connect your own Gmail", "retryable": False})
+        return poll_connector(s, conn, actor_id=user.id, limit=limit)
+    except MailboxPollError as exc:
+        raise HTTPException(502, detail={"error": str(exc), "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Check credentials / network and retry", "retryable": True})
 
 
 @router.post("/ingest/bundle")
@@ -315,9 +363,12 @@ def list_cases(
     mismatch: Optional[str] = Query(default=None, description="yes|no"), assigned: Optional[str] = None, shared: Optional[str] = None,
     sender: Optional[str] = None, q: Optional[str] = None, min_confidence: Optional[float] = None, security: Optional[str] = None,
     date_from: Optional[str] = None, date_to: Optional[str] = None, attention: Optional[str] = Query(default=None, description="yes to restrict to human-needed cases"),
+    mailbox: Optional[str] = Query(default=None, description="user id of a connected mailbox, 'me', or 'shared'"),
     limit: int = 100, offset: int = 0, sort: str = "updated_desc",
     user: UserRecord = Depends(require("view_case")),
 ):
+    if mailbox == "me":
+        mailbox = user.id
     repo = get_repo()
     emails = {e.id: e for e in repo.list_emails()}
     rows = []
@@ -345,6 +396,10 @@ def list_cases(
             continue
         if sender and (not e or sender.lower() not in e.sender.lower()):
             continue
+        if mailbox == "shared" and e and e.mailbox_user_id:
+            continue
+        if mailbox and mailbox != "shared" and (not e or e.mailbox_user_id != mailbox):
+            continue
         if min_confidence is not None and c.confidence < min_confidence:
             continue
         if date_from and e and e.received_at.isoformat() < date_from:
@@ -361,11 +416,42 @@ def list_cases(
     return {"total": len(rows), "items": rows[offset: offset + limit]}
 
 
+@router.get("/cases/suggest")
+def suggest_cases(q: str = "", limit: int = 10, user: UserRecord = Depends(require("view_case"))):
+    """Autocomplete for case pickers: substring match on case id, subject and sender; id prefix matches rank first."""
+    repo = get_repo()
+    needle = (q or "").strip().lower()
+    emails = {e.id: e for e in repo.list_emails()}
+    cap = max(1, min(int(limit or 10), 50))
+    scored: list[tuple[int, str, dict[str, Any]]] = []
+    for c in repo.list_cases():
+        e = emails.get(c.source_email_id)
+        cid = c.id.lower()
+        subject = (e.subject if e else "").lower()
+        sender = (e.sender if e else "").lower()
+        if needle:
+            if cid.startswith(needle) or cid.replace("case_", "").startswith(needle):
+                rank = 0
+            elif needle in cid:
+                rank = 1
+            elif needle in subject or needle in sender:
+                rank = 2
+            else:
+                continue
+        else:
+            rank = 3
+        scored.append((rank, c.updated_at.isoformat(), {"id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "status": c.status.value,
+                                                        "priority": c.priority.value, "mismatch_count": c.mismatch_count, "mailbox": e.mailbox_address if e else None}))
+    ranked = sorted(scored, key=lambda t: t[1], reverse=True)          # newest first ...
+    ranked.sort(key=lambda t: t[0])                                       # ... within rank (stable)
+    return {"items": [row for _rank, _ts, row in ranked[:cap]], "total": len(ranked)}
+
+
 @router.get("/cases/{case_id}")
 def get_case(case_id: str, user: UserRecord = Depends(require("view_case"))):
     s = svc()
     case = s.get(case_id)
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.get("/cases/{case_id}/comparison")
@@ -443,7 +529,10 @@ def get_document_raw(case_id: str, attachment_id: str, user: UserRecord = Depend
         except UnsafeUpload as exc:
             raise HTTPException(400, detail={"error": str(exc), "category": "ATTACHMENT_DOWNLOAD_ERROR"})
         data = f.read_bytes() if f.exists() else b""
-    media = {"pdf": "application/pdf", "txt": "text/plain; charset=utf-8", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}.get(a.file_type, "application/octet-stream")
+    media = {"pdf": "application/pdf", "txt": "text/plain; charset=utf-8", "md": "text/plain; charset=utf-8", "csv": "text/csv; charset=utf-8", "tsv": "text/tab-separated-values; charset=utf-8",
+             "html": "text/plain; charset=utf-8", "htm": "text/plain; charset=utf-8", "eml": "message/rfc822", "rtf": "application/rtf",
+             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+             "doc": "application/msword", "xls": "application/vnd.ms-excel", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif", "bmp": "image/bmp", "tif": "image/tiff", "tiff": "image/tiff"}.get(a.file_type, "application/octet-stream")
     return Response(content=data, media_type=media, headers={"Content-Disposition": f'inline; filename="{a.file_name}"', "X-Content-Type-Options": "nosniff"})
 
 
@@ -452,28 +541,28 @@ def get_document_raw(case_id: str, attachment_id: str, user: UserRecord = Depend
 def classify(case_id: str, user: UserRecord = Depends(require("compare"))):
     s = svc()
     case = s.reprocess(case_id, user, step="classify")
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/extract")
 def extract(case_id: str, user: UserRecord = Depends(require("compare"))):
     s = svc()
     case = s.reprocess(case_id, user, step="extract")
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/compare")
 def compare(case_id: str, user: UserRecord = Depends(require("compare"))):
     s = svc()
     case = s.reprocess(case_id, user, step="compare")
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/retry")
 def retry(case_id: str, user: UserRecord = Depends(require("compare"))):
     s = svc()
     case = s.reprocess(case_id, user, step="retry")
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/upload")
@@ -502,7 +591,8 @@ async def upload_document(case_id: str, file: UploadFile = File(...), kind: str 
     pointer = f"upload/{e.id}/{name}"
     s.repo.save_blob(pointer, data)
     e.attachments.append(AttachmentMeta(id=f"att_{e.id}_{kind}_{rr.checksum[:8]}", source_email_id=e.id, file_name=name, file_type=rr.file_type, size_bytes=rr.size_bytes,
-                                        checksum=rr.checksum, storage_pointer=pointer, extraction_status=rr.status, raw_text=rr.text or None, page_count=rr.page_count))
+                                        checksum=rr.checksum, storage_pointer=pointer, extraction_status=rr.status, raw_text=rr.text or None, page_count=rr.page_count,
+                                        reader_note=rr.note, ocr=bool(rr.note and "OCR" in rr.note and rr.text)))
     s.repo.save_email(e)
     s.pipe.audit(case.id, "USER", user.id, "DOCUMENT_UPLOADED", after={"file": name, "kind": kind, "status": rr.status.value})
     case = s.pipe.run(e, actor_id=user.id, force=True)
@@ -518,56 +608,56 @@ def draft(case_id: str, req: DraftRequest = DraftRequest(), user: UserRecord = D
         d = case.drafts[-1]
         d.body = translate_text(d.body, req.language)
         s.repo.save_case(case)
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/draft/edit")
 def draft_edit(case_id: str, dec: DraftDecision, user: UserRecord = Depends(require("generate_draft"))):
     s = svc()
     case = s.edit_draft(case_id, dec, user)
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/approve")
 def approve(case_id: str, dec: DraftDecision, user: UserRecord = Depends(require("generate_draft"))):
     s = svc()
     case = s.approve_draft(case_id, dec, user)
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/reject")
 def reject(case_id: str, dec: DraftDecision, user: UserRecord = Depends(require("generate_draft"))):
     s = svc()
     case = s.reject_draft(case_id, dec, user)
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/assign")
 def assign(case_id: str, req: AssignRequest, user: UserRecord = Depends(require("assign"))):
     s = svc()
     case = s.assign(case_id, req, user)
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/no-action")
 def no_action(case_id: str, user: UserRecord = Depends(require("mutate_case"))):
     s = svc()
     case = s.mark_no_action(case_id, user)
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/complete")
 def complete(case_id: str, body: dict[str, Any] | None = None, user: UserRecord = Depends(require("mutate_case"))):
     s = svc()
     case = s.complete(case_id, user, note=(body or {}).get("note"))
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 @router.post("/cases/{case_id}/request-review")
 def request_review(case_id: str, body: dict[str, Any] | None = None, user: UserRecord = Depends(require("mutate_case"))):
     s = svc()
     case = s.request_review(case_id, user, note=(body or {}).get("note"))
-    return _case_view(case, s.repo.get_email(case.source_email_id))
+    return _mutation_view(s, case)
 
 
 # ---------------------------------------------------------------- notify party / share
@@ -634,6 +724,16 @@ def export_xlsx(user: UserRecord = Depends(require("export_data"))):
         content=svc().export_xlsx(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=cases.xlsx"},
+    )
+
+
+@router.get("/export/report.xlsx")
+def export_report_xlsx(user: UserRecord = Depends(require("export_data"))):
+    """Overall desk report: overview KPIs, seven fields, cases, field results, security, drafts/delivery, operator activity, mailboxes, errors."""
+    return Response(
+        content=svc().export_report_xlsx(generated_by=user.id),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=novaship-report.xlsx"},
     )
 
 

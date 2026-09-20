@@ -92,7 +92,7 @@ The inbox has 124 messages with two attachments, two with one attachment, and 39
 
 ### Document verification
 
-- Reads `.txt`, text-layer `.pdf`, `.docx`, and `.xlsx` attachments.
+- Reads `.txt` `.md` `.csv` `.tsv` `.html` `.eml` `.rtf`, `.docx` `.xlsx`, legacy `.doc` `.xls`, text-layer `.pdf`, and — through OCR — scanned PDFs and `.png` `.jpg` `.webp` `.tiff` images. OCR-derived text is flagged on the attachment and its extraction confidence is capped at 0.9; the verdict still comes from the deterministic comparator.
 - Detects SI, Draft BL, Invoice, Supporting Document, and Unknown Document.
 - Extracts the required fields with the source document, page, line, literal snippet, and detected label.
 - Preserves original values alongside normalised values.
@@ -103,14 +103,14 @@ The inbox has 124 messages with two attachments, two with one attachment, and 39
 ### Human review and collaboration
 
 - Generates confirmation, correction, missing-document, and information-response drafts.
-- Allows a user to edit, approve, reject, reassign, retry, request review, mark no action, or complete a case. After three of those mutations with no live draft, a draft is auto-saved and never sent. Unusual operator bursts, denied external shares, and rapid archives raise a warning without locking the account.
+- Allows a user to edit, approve, reject, reassign, retry, request review, mark no action, or complete a case. After `operator_guard.auto_draft_after` (default 3) of those mutations with no live draft, a draft is auto-saved and never sent. Unusual operator bursts, off-hours activity, denied external shares, and rapid archives raise a **warning dialog** without locking the account; burst limits are learned per user from the audit log (see §13).
 - Separates the extracted Notify Party value from permission to contact a recipient.
 - Requires an authorised recipient, a data preview, sufficient role permissions, and an extra confirmation for an external party.
 - Records sent, viewed, acknowledged, response, and status metadata for a share.
 
 ### Oversight
 
-- Provides a seven-field analytics page, Workbench run console, security queue, AI-agent diagram, global audit page, policy editor, and in-app guide.
+- Provides a seven-field analytics page, Workbench run console (case autocomplete, parallel batch, multi-case agent runs with per-case review), security queue, AI-agent diagram, global audit page, policy editor, an overall Excel report, and in-app guide.
 - Stores actor type (`USER`, `AI`, or `SYSTEM`), before/after state, evidence references, and policy version in audit events.
 - Uses role-based access control (RBAC) for every protected API operation.
 - Keeps policy changes versioned and audited.
@@ -229,7 +229,7 @@ The security and intent stages can end the flow early. A security-review message
 | LLM integration | OpenAI or Gemini chat through `LLM_PROVIDER=openai` or `LLM_PROVIDER=gemini`; default `none` |
 | Embeddings | Local deterministic hashing, Gemini, or OpenAI |
 | Vector storage | Local JSON index or Supabase pgvector |
-| Document parsing | pypdf, python-docx, openpyxl; optional OCR hook |
+| Document parsing | pypdf, python-docx, openpyxl, xlrd, olefile, standard-library csv/html/eml/rtf readers; Gemini vision OCR for scans and images (on when `GOOGLE_API_KEY` is set), pytesseract fallback |
 | Persistence | In-memory fixtures or Supabase PostgreSQL, Storage, RLS, and JWT |
 | Mail | SDOC bundle connector or Gmail API for inbound polling and approved outbound delivery |
 | Containers | Docker multi-stage images and Docker Compose |
@@ -318,6 +318,26 @@ Every seeded account uses `DEMO_PASSWORD`, which defaults to `novaship123`.
 | Ingest email | Yes | Yes | Yes | No |
 
 Self-registration at `/register` creates an account on the **shared desk** (seeded cases stay visible). Default `REGISTER_ALLOWED_ROLES=OPERATIONS_STAFF`. The hackathon demo can set `ADMIN,SUPERVISOR,OPERATIONS_STAFF` so a visitor can register with their own email as Admin and manage the current project. Registration is enabled in `demo` mode, disabled by default in `local` mode, and unavailable in `jwt` mode. The API accepts only roles listed in `REGISTER_ALLOWED_ROLES`.
+
+### Sign up with Google and connected mailboxes
+
+`/register` and `/login` also offer **Continue with Google**. One consent (`openid email profile gmail.readonly gmail.send`) does three things:
+
+1. creates the desk account for that Google address (role from the register form, validated against `REGISTER_ALLOWED_ROLES`) or logs in the existing account with that email;
+2. stores the Gmail refresh token **encrypted** (`user_mailboxes`, Fernet with `MAILBOX_TOKEN_KEY` or a key derived from `SESSION_SECRET`);
+3. returns a normal `nsa.*` session, so RBAC, audit, and every other route are unchanged.
+
+A signed-in password user can also connect a Gmail later (Guide page → *Connect Gmail*); the grant links to the current account instead of creating one.
+
+Once a mailbox is connected:
+
+- **Fetch Inbox** (and `POST /connectors/poll?source=auto`) polls that user's Gmail instead of the shared `GMAIL_ADDRESS`; `source=shared` still polls the desk mailbox.
+- Every case pulled this way lands on the **shared desk** tagged with `mailbox` / `mailbox_user_id`; the Inbox shows the tag and offers a *My mailbox* preset (`GET /cases?mailbox=me`).
+- With `GMAIL_POLL_INTERVAL_SECONDS>0` a background thread polls every connected mailbox and the shared one on that interval (actor `scheduler`).
+- When a draft or external share on such a case is approved and `EMAIL_SEND_MODE=gmail`, the reply is sent **from the owner's Gmail** (the mailbox the request arrived in). Without `gmail.send` on that grant it falls back to the shared mailbox; the audit event records `from`.
+- `GET /me/mailbox` shows the connection; `DELETE /me/mailbox` disconnects it (best-effort revoke at Google, audited).
+
+Google Cloud prerequisites: an OAuth client of type **Web application** whose authorized redirect URI is `GOOGLE_OAUTH_REDIRECT_URI` (`http://localhost:8000/auth/google/callback` locally, `https://<domain>/api/auth/google/callback` on Vercel); the Gmail API enabled; and, while the consent screen is in *Testing*, each Google account added as a test user. Password-only accounts keep working; Google-only accounts have no password and sign in with Google.
 
 Sessions are HMAC-signed and expire after 12 hours by default. Logout revokes the session server-side. Login, failed login, registration, and logout outcomes are audited.
 
@@ -445,7 +465,7 @@ Copy `.env.example` to `.env`. Never commit `.env`. Variables with public fronte
 | `LLM_PROVIDER` | `none` | `none`, `openai`, or `gemini` |
 | `OPENAI_API_KEY` | empty | Used only when OpenAI chat or embeddings are enabled |
 | `LLM_MODEL` | `gpt-4o-mini` in code when unset | Optional chat-model override; `.env.example` suggests `gpt-4.1-mini` for OpenAI |
-| `GEMINI_CHAT_MODEL` | `gemini-2.0-flash` | Chat model when `LLM_PROVIDER=gemini` |
+| `GEMINI_CHAT_MODEL` | `gemini-3.6-flash` | Chat model when `LLM_PROVIDER=gemini` |
 | `GEMINI_OCR_MODEL` | same as chat model | Vision model for optional image-only PDF OCR |
 
 If the model artifact or API call fails, the application falls back to deterministic rules. The comparator never falls back to an LLM.
@@ -475,12 +495,20 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 | Variable | Default | Description |
 | --- | --- | --- |
 | `EMAIL_PROVIDER` | `none` | `none`, `bundle`, or `gmail` for inbound polling |
-| `EMAIL_SEND_MODE` | `simulate` | `simulate` or `gmail`; real delivery still requires the normal human approval path |
+| `EMAIL_SEND_MODE` | `simulate` | `simulate` or `gmail`; real delivery still requires the normal human approval path. In `gmail` mode a case fetched from a user's connected mailbox replies from that mailbox |
+| `GOOGLE_OAUTH_CLIENT_ID` | falls back to `GMAIL_CLIENT_ID` | Web-application OAuth client for Sign in with Google |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | falls back to `GMAIL_CLIENT_SECRET` | Secret for that client (server-only) |
+| `GOOGLE_OAUTH_REDIRECT_URI` | `http://localhost:8000/auth/google/callback` | Must be listed as an authorized redirect URI on the client |
+| `FRONTEND_URL` | first `CORS_ORIGINS` entry | Where the callback sends the browser (`/auth/callback`) |
+| `MAILBOX_TOKEN_KEY` | derived from `SESSION_SECRET` | Fernet key that encrypts stored Gmail refresh tokens; rotating it forces users to reconnect |
+| `GMAIL_POLL_INTERVAL_SECONDS` | `0` | `>0` starts the background poller for every connected mailbox plus the shared one |
 | `GMAIL_CLIENT_ID` | empty | Google OAuth client ID |
 | `GMAIL_CLIENT_SECRET` | empty | Google OAuth client secret |
 | `GMAIL_REFRESH_TOKEN` | empty | Refresh token created by the local authorisation helper |
 | `GMAIL_ADDRESS` | empty | Monitored and sending mailbox |
-| `OCR_ENABLED` | `0` | Set to `1` to try Gemini vision then pytesseract on image-only PDFs |
+| `OCR_ENABLED` | `auto` | `auto` = on when `GOOGLE_API_KEY` is set; `1` forces on, `0` off. Gemini vision then pytesseract for scanned PDFs and image attachments; policy `ai_privacy.allow_vision_ocr` can veto it |
+| `LLM_PRIVACY` | `mask` | `mask` replaces company names, references, addresses and document values with `__IDn__` tokens before any OpenAI/Gemini prompt; `off` sends plain text |
+| `BATCH_PARALLELISM` | `4` | Default worker count for `/cases/batch` and `/agent/run-batch` (1–16) |
 | `MAX_UPLOAD_BYTES` | `10485760` | Maximum bytes accepted for one attachment |
 | `MAX_ATTACHMENT_COUNT` | `10` | Maximum attachments accepted in one inbound message |
 | `CORS_ORIGINS` | local UI origins | Comma-separated API origins |
@@ -492,7 +520,7 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 | `WEB_PORT` | `3000` | Host port used by Compose for the frontend |
 | `API_PORT` | `8000` | Host port used by Compose for the API |
 
-OCR additionally requires `GOOGLE_API_KEY` for Gemini vision, or `pytesseract`, `pdf2image`, Tesseract, and Poppler for the local fallback. They are not installed by the default Docker image or Python requirements. OCR never decides MATCH/MISMATCH; unreadable scans still escalate to review.
+Gemini vision OCR needs only `GOOGLE_API_KEY`; the pytesseract fallback additionally needs `pytesseract`, `pdf2image`, Tesseract, and Poppler, which the default image does not install. OCR never decides MATCH/MISMATCH; scans that stay unreadable still escalate to review. `scripts/run_bundle.py` keeps OCR off unless `--ocr` is passed so scoring stays deterministic.
 
 After setting the Gmail client ID and secret in a local `.env`, create or rotate the refresh token without printing it:
 
@@ -516,7 +544,8 @@ python backend/scripts/gmail_authorize.py
 | `/policies` | Effective policy for permitted roles; editing for Admin only |
 | `/welcome` | Product guide |
 | `/login` | Sign in and demo account picker |
-| `/register` | Self-registration onto the shared desk; roles come from `REGISTER_ALLOWED_ROLES` |
+| `/register` | Self-registration onto the shared desk (password or Google); roles come from `REGISTER_ALLOWED_ROLES` |
+| `/auth/callback` | Landing page after Google consent; stores the session from the URL fragment and continues |
 
 There is no customer portal route yet. The pages above are the internal operations UI. The first open of Seven fields, Security, Audit, Agent, or a case can be slow on the 520-case demo; see [§17](#pages-load-slowly-after-sign-in).
 
@@ -532,7 +561,7 @@ There is no customer portal route yet. The pages above are the internal operatio
 8. For Notify Party, select an authorised recipient and inspect the disclosure preview.
 9. Confirm an external share if your role permits it.
 10. Use the case timeline or Audit page to verify the recorded action.
-11. For multi-case runs, open Workbench (`/workbench`): run the agent, batch classify/compare/draft/review, and export CSV or Excel. Batch never sends external email.
+11. For multi-case runs, open Workbench (`/workbench`): pick cases with the autocomplete, run the agent on all of them in parallel, review each paused case from the results table, batch classify/compare/draft/review with per-case errors and *Retry failed*, and export CSV, Excel or the overall report. Batch never sends external email.
 
 ### Case states
 
@@ -609,14 +638,18 @@ curl 'http://localhost:8000/cases?mismatch=yes&limit=5' \
 | POST | `/auth/login` | Issue a session token |
 | POST | `/auth/register` | Create an account (role from `REGISTER_ALLOWED_ROLES`) and session |
 | POST | `/auth/logout` | Revoke the current session |
-| GET | `/auth/session` | Validate the current session and return permissions |
+| GET | `/auth/session` | Validate the current session and return permissions and the connected mailbox |
+| GET | `/auth/google/start?role=&next=` | Build the Google consent URL; with a session it connects Gmail to that account |
+| GET | `/auth/google/callback` | Google redirect target; creates/logs in the user, stores the encrypted refresh token, redirects to the UI |
+| GET | `/me/mailbox` | The caller's connected Gmail (address, scopes, status, last poll) |
+| DELETE | `/me/mailbox` | Disconnect the caller's Gmail (revoke at Google best-effort, audited) |
 
 #### Ingestion and connectors
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/webhooks/email` | Ingest an email with base64 attachments or fixture paths |
-| POST | `/connectors/poll?limit=25` | Poll the configured bundle or Gmail connector |
+| POST | `/connectors/poll?limit=25&source=auto` | Poll a mailbox: `mine` (caller's connected Gmail), `shared` (bundle/Gmail from `.env`), `auto` (mine when connected, else shared) |
 | POST | `/ingest/bundle?limit=0` | Import the local SDOC fixture bundle |
 
 The webhook is idempotent on message content. A duplicate returns the existing case instead of creating another one.
@@ -629,6 +662,7 @@ The webhook is idempotent on message content. A duplicate returns the existing c
 | GET | `/dashboard/fields` | Aggregate results for each verification field |
 | GET | `/dashboard/field/{field}` | Cases for one field and optional result filter |
 | GET | `/cases` | Search, filter, sort, and paginate cases |
+| GET | `/cases/suggest?q=&limit=10` | Autocomplete for case pickers (id prefix, then id, subject, sender) |
 | GET | `/cases/{case_id}` | Complete case view with source email |
 | GET | `/cases/{case_id}/comparison` | Seven-field comparison |
 | GET | `/cases/{case_id}/report` | Compact and structured discrepancy report |
@@ -636,7 +670,7 @@ The webhook is idempotent on message content. A duplicate returns the existing c
 | GET | `/cases/{case_id}/documents/{attachment_id}` | Attachment metadata and optional signed URL |
 | GET | `/cases/{case_id}/documents/{attachment_id}/raw` | Raw attachment bytes with `nosniff` |
 
-`GET /cases` supports `status`, `priority`, `intent`, `category`, `mismatch=yes|no`, `assigned`, `shared`, `sender`, `q`, `min_confidence`, `security`, `date_from`, `date_to`, `limit`, `offset`, and `sort`.
+`GET /cases` supports `status`, `priority`, `intent`, `category`, `mismatch=yes|no`, `assigned`, `shared`, `sender`, `q`, `min_confidence`, `security`, `date_from`, `date_to`, `mailbox=<user_id>|me|shared`, `limit`, `offset`, and `sort`.
 
 #### Pipeline and recovery
 
@@ -667,7 +701,7 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | POST | `/cases/{case_id}/share` | Preview or create an internal/external share |
 | POST | `/cases/{case_id}/share/{share_id}/confirm` | Confirm a pending external share |
 | POST | `/shares/{share_id}/acknowledge` | Record view, acknowledgement, and response |
-| POST | `/cases/batch` | Confirmed batch draft/review operations; `export` returns CSV and `export_xlsx` returns a base64 `.xlsx` blob. Never sends email. |
+| POST | `/cases/batch` | Confirmed batch operations run in parallel (`params.parallel`, default `BATCH_PARALLELISM`) with a per-case `ok/error/ms` row, `failed_ids`, and `params.retry_failed=[ids]`; `export` returns CSV, `export_xlsx` / `report_xlsx` a base64 `.xlsx` blob. Never sends email. |
 
 #### Ask AI, translation, export, and policy
 
@@ -677,6 +711,8 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | POST | `/cases/{case_id}/translate` | Translate supplied text or the source email |
 | GET | `/export/cases.csv` | Export cases as CSV |
 | GET | `/export/cases.xlsx` | Export cases as Excel (Cases, Field results, Summary sheets) |
+| GET | `/export/report.xlsx` | Overall desk report: Overview, Seven fields, Cases, Field results, Security, Drafts & delivery, Operator activity, Mailboxes, Errors |
+| GET | `/me/operator-profile` | What the operator guard has learned for the caller (pace, hours, effective limits) |
 | GET | `/export/submission.json` | Export SDOC submission JSON |
 | GET | `/policies` | Active, effective, explained, and versioned policy |
 | PUT | `/policies` | Update policy with an audit note; Admin only |
@@ -689,6 +725,8 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | POST | `/agent/run/{case_id}` | Run the agent until completion or interrupt |
 | GET | `/agent/state/{case_id}` | Read checkpoint and interrupt state |
 | POST | `/agent/resume/{case_id}` | Resume with a human decision |
+| POST | `/agent/run-batch` | Run the agent on many cases in parallel; per-case ok / paused / error, `paused_ids`, `failed_ids` |
+| POST | `/agent/resume-batch` | Resume paused graphs in bulk with a non-sending decision (`retry`, `request_review`, `reject`, `mark_no_action`, `complete`, `reassign`); `approve`/`notify_party` stay per case |
 | GET | `/rag/info` | Embedding provider, dimensions, store, and chunk count |
 | POST | `/rag/search` | Search knowledge and optional case-scoped chunks |
 | POST | `/rag/reindex` | Rebuild knowledge and case vectors; Admin only |
@@ -711,6 +749,7 @@ Apply migrations in order:
 4. `supabase/migrations/0004_accounts.sql`: `user_credentials` and `revoked_sessions`.
 5. `supabase/migrations/0005_rag_scoped_search.sql`: tenant/case/source filtering before vector ranking.
 6. `supabase/migrations/0006_recoverable_share_confirmation.sql`: recoverable, idempotent external-delivery finalisation.
+7. `supabase/migrations/0007_user_mailboxes.sql`: `user_mailboxes` (encrypted per-user Gmail grants) and `email_messages.mailbox_user_id`.
 
 Then load `supabase/seed/seed.sql`, or push a generated seed:
 
@@ -804,7 +843,24 @@ security_precheck
 
 The graph pauses only when a human decision is required. Resume actions include `approve`, `edit`, `reject`, `reassign`, `notify_party`, `retry`, `mark_no_action`, and `complete`. The resume path invokes the same permission-checked case services used by the standard UI.
 
-After three operator mutations on a case (`draft/edit`, `reject`, `retry`, `request_review`, `assign`, `complete`, or `no-action`) with no live draft, the API auto-saves a draft and audits `AUTO_DRAFT_AFTER_REPEATED_ACTIONS`. It never sends. Burst mutations, repeated login failures, denied external shares, and rapid batch archives raise `UNUSUAL_OPERATOR_BEHAVIOUR` warnings. They do not lock the account.
+### Operator guard (learned from the audit log)
+
+After `operator_guard.auto_draft_after` (default 3) operator mutations on a case (`draft/edit`, `reject`, `retry`, `request_review`, `assign`, `complete`, or `no-action`) with no live draft, the API auto-saves a draft and audits `AUTO_DRAFT_AFTER_REPEATED_ACTIONS`. It never sends. Burst mutations, off-hours activity, repeated login failures, denied external shares, and rapid batch archives raise `UNUSUAL_OPERATOR_BEHAVIOUR` warnings; the UI shows them as a modal warning box (`operator_warning` in the mutation response) and they never lock the account.
+
+Limits live in the `operator_guard` policy section (Policies page, Admin) and are **adaptive**: the guard reads the user's own audit history (`audit_events`, last `baseline_days`) and, once `min_baseline_events` actions exist, tightens the burst limit to `baseline_multiplier` × the user's median actions per active minute (never below `min_effective_burst`, never above `burst_limit`). It also learns the user's usual working hours and flags actions far outside them (`OPERATOR_OFF_HOURS`, LOW). Because everything is computed from the audit log there is no in-process state to lose on restart, and every instance sees the same window. `GET /me/operator-profile` shows what was learned.
+
+### What the model provider sees
+
+| Data | With `LLM_PROVIDER=none` | With OpenAI / Gemini and `LLM_PRIVACY=mask` (default) | With `LLM_PRIVACY=off` |
+| --- | --- | --- | --- |
+| Company names, addresses, e-mails, phone numbers | never leaves the desk | replaced by `__IDn__` tokens before the prompt, restored in the answer | sent as-is |
+| BL / booking / OC / PO references, container numbers, weights, counts | never | tokens | sent as-is |
+| Seven-field values of the case being discussed | never | tokens (also when they appear without a label) | sent as-is |
+| Scanned pages for OCR | never | sent to Gemini vision only when `ai_privacy.allow_vision_ocr` is true (images cannot be masked) | same |
+| Prompt / completion text in our logs or audit | not stored | not stored — `AI_PROVIDER_CALL` audit rows carry provider, model, purpose, token counts, masked-identifier count only | same |
+
+OpenAI chat requests are sent with `store=false`. The OpenAI API and the Gemini paid tier do not use API traffic for training; the free Gemini tier may, so use a billed key in production. The seven-field verdict, security precheck and comparator never call a model. `/health.llm` and the Workbench card show the current posture.
+
 
 ## 14. Security and safety model
 

@@ -46,10 +46,98 @@ def agent_resume(case_id: str, decision: dict[str, Any], user: UserRecord = Depe
     return get_agent().resume(case_id, decision)
 
 
+_BULK_RESUME_ACTIONS = {"retry", "request_review", "reject", "mark_no_action", "complete", "reassign"}
+
+
+def _parallelism(requested: Optional[int]) -> int:
+    import os
+
+    default = int(os.environ.get("BATCH_PARALLELISM", "4") or 4)
+    return max(1, min(int(requested or default), 16))
+
+
+@router.post("/agent/run-batch")
+def agent_run_batch(body: dict[str, Any], user: UserRecord = Depends(require("compare"))):
+    """Run the LangGraph agent on many cases in parallel. Every case gets its own ok/paused/error result;
+    one failure never stops the others. Paused cases are then resumed one by one (or via /agent/resume-batch)."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    case_ids = [str(c).strip() for c in (body.get("case_ids") or []) if str(c).strip()]
+    if not case_ids:
+        raise HTTPException(400, detail={"error": "case_ids is required", "category": "DATABASE_ERROR"})
+    if len(case_ids) > 200:
+        raise HTTPException(400, detail={"error": "at most 200 cases per run", "category": "DATABASE_ERROR"})
+    workers = _parallelism(body.get("parallel"))
+    agent = get_agent()
+
+    def one(case_id: str) -> dict[str, Any]:
+        t0 = time.time()
+        try:
+            st = agent.run(case_id, actor_id=user.id)
+            return {"ok": True, "paused": bool(st.get("paused")), "next": st.get("next") or [], "status": st.get("status"),
+                    "interrupt": st.get("interrupt"), "ms": int((time.time() - t0) * 1000)}
+        except ValueError as exc:
+            return {"ok": False, "error": {"category": "DATABASE_ERROR", "message": str(exc), "retryable": False}, "ms": int((time.time() - t0) * 1000)}
+        except Exception as exc:  # per-case isolation; the agent already audits pipeline errors
+            return {"ok": False, "error": {"category": "COMPARISON_ERROR", "message": type(exc).__name__, "retryable": True}, "ms": int((time.time() - t0) * 1000)}
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-batch") as pool:
+        results = dict(zip(case_ids, pool.map(one, case_ids)))
+    failed = [cid for cid, r in results.items() if not r["ok"]]
+    paused = [cid for cid, r in results.items() if r["ok"] and r["paused"]]
+    CaseServiceAudit.audit(user.id, "AGENT_BATCH_RUN", {"count": len(case_ids), "ok": len(case_ids) - len(failed), "failed": len(failed), "paused": len(paused), "parallel": workers})
+    return {"results": results, "failed_ids": failed, "paused_ids": paused, "parallel": workers}
+
+
+@router.post("/agent/resume-batch")
+def agent_resume_batch(body: dict[str, Any], user: UserRecord = Depends(require("generate_draft"))):
+    """Resume several paused graphs with the same non-sending decision (retry / request_review / reject / mark_no_action / complete / reassign).
+    `approve`, `edit` and `notify_party` stay per case."""
+    action = str(body.get("action") or "").strip()
+    case_ids = [str(c).strip() for c in (body.get("case_ids") or []) if str(c).strip()]
+    if action not in _BULK_RESUME_ACTIONS:
+        raise HTTPException(400, detail={"error": f"bulk resume allows {', '.join(sorted(_BULK_RESUME_ACTIONS))}; approve/edit/notify_party are per case", "category": "AUTH_ERROR"})
+    if not case_ids:
+        raise HTTPException(400, detail={"error": "case_ids is required", "category": "DATABASE_ERROR"})
+    agent = get_agent()
+    results: dict[str, Any] = {}
+    for cid in case_ids:
+        try:
+            st = agent.state(cid)
+            if not st["paused"]:
+                results[cid] = {"ok": False, "error": {"category": "COMPARISON_ERROR", "message": "graph is not waiting for a human decision", "retryable": False}}
+                continue
+            decision = {"action": action, "note": body.get("note"), "user_id": user.id, "draft_id": (st.get("interrupt") or {}).get("draft_id")}
+            if body.get("recipient"):
+                decision["recipient"] = body["recipient"]
+            out = agent.resume(cid, decision)
+            results[cid] = {"ok": True, "paused": bool(out.get("paused")), "status": out.get("status")}
+        except HTTPException as exc:
+            results[cid] = {"ok": False, "error": exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}}
+        except Exception as exc:
+            results[cid] = {"ok": False, "error": {"category": "COMPARISON_ERROR", "message": type(exc).__name__, "retryable": True}}
+    CaseServiceAudit.audit(user.id, "AGENT_BATCH_RESUME", {"action": action, "count": len(case_ids), "ok": sum(1 for r in results.values() if r["ok"])})
+    return {"results": results, "failed_ids": [cid for cid, r in results.items() if not r["ok"]]}
+
+
+class CaseServiceAudit:
+    """Desk-level audit rows for batch agent runs (no case id)."""
+
+    @staticmethod
+    def audit(user_id: str, action: str, after: dict[str, Any]) -> None:
+        from app.contracts.schemas import ActorType
+        from app.pipeline.orchestrator import Pipeline
+
+        Pipeline(get_repo()).audit(None, ActorType.USER, user_id, action, after=after)
+
+
 # ---------------------------------------------------------------- RAG
 @router.get("/rag/info")
 def rag_info(user: UserRecord = Depends(require("view_case"))):
-    return get_rag().info()
+    from app.api.routes import llm_posture
+
+    return {**get_rag().info(), "llm": llm_posture()}
 
 
 @router.post("/rag/search")
@@ -81,35 +169,7 @@ def rag_reindex(body: dict[str, Any] | None = None, user: UserRecord = Depends(r
 
 
 # ---------------------------------------------------------------- seven-field analytics
-def _field_stats(cases) -> list[dict[str, Any]]:
-    stats = {f: {"field": f, "label": FIELD_LABELS[f], "match": 0, "mismatch": 0, "review": 0, "examples": []} for f in SEVEN_FIELDS}
-    for c in cases:
-        if not c.comparison:
-            continue
-        for fld in c.comparison.fields:
-            s = stats[fld.field]
-            if fld.result.value == "MATCH":
-                s["match"] += 1
-            elif fld.result.value == "MISMATCH":
-                s["mismatch"] += 1
-                if len(s["examples"]) < 5:
-                    s["examples"].append({"case_id": c.id, "si": fld.si_original, "bl": fld.bl_original})
-            else:
-                s["review"] += 1
-    return list(stats.values())
-
-
-def _security_rows(cases, emails: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = []
-    for c in cases:
-        if c.security.outcome.value == "SAFE" and not c.anomalies:
-            continue
-        e = emails.get(c.source_email_id)
-        rows.append({"case_id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "outcome": c.security.outcome.value, "score": c.security.score,
-                     "signals": [s.model_dump(mode="json") for s in c.security.signals], "anomalies": [a.model_dump(mode="json") for a in c.anomalies], "status": c.status.value})
-    order = {"SECURITY_REVIEW": 0, "SUSPICIOUS": 1, "SPAM": 2, "SAFE": 3}
-    rows.sort(key=lambda r: (order.get(r["outcome"], 9), -r["score"]))
-    return rows
+from app.services.reporting import field_stats as _field_stats, security_rows as _security_rows  # noqa: E402
 
 
 @router.get("/dashboard/fields")

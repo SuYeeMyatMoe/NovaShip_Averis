@@ -50,8 +50,28 @@ def _session_payload(user: UserRecord) -> dict[str, Any]:
     return {
         "token": token,
         "expires_at": datetime.utcfromtimestamp(payload["exp"]).isoformat() + "Z",
-        "user": {**user.model_dump(mode="json"), "permissions": [p for p in PERMISSIONS if has_permission(user, p)]},
+        "user": {**user.model_dump(mode="json"), "permissions": [p for p in PERMISSIONS if has_permission(user, p)], "mailbox": _mailbox(user.id)},
     }
+
+
+def _mailbox(user_id: str) -> dict[str, Any]:
+    from app.api.routes import mailbox_summary
+
+    return mailbox_summary(user_id)
+
+
+def registration_enabled() -> bool:
+    mode = auth_mode()
+    return mode == "demo" or (mode == "local" and env_bool("SELF_REGISTRATION_ENABLED"))
+
+
+def new_user_id(repo, email: str) -> str:
+    """Derive a readable, unique user id from the address (shared by password and Google registration)."""
+    uid = "u_" + re.sub(r"[^a-z0-9]+", "_", email.split("@", 1)[0]).strip("_")[:24]
+    base, i = uid, 2
+    while repo.get_user(uid):
+        uid, i = f"{base}_{i}", i + 1
+    return uid
 
 
 def seed_demo_credentials() -> int:
@@ -70,9 +90,12 @@ def seed_demo_credentials() -> int:
 @router.get("/config")
 def auth_config():
     """Register-form options. In demo mode also lists the seeded accounts so the login page can offer one-click fills."""
+    from app.api.google_auth_routes import google_sign_in_enabled
+
     mode = auth_mode()
-    enabled = mode == "demo" or (mode == "local" and env_bool("SELF_REGISTRATION_ENABLED"))
-    out: dict[str, Any] = {"register_roles": allowed_register_roles() if enabled else [], "min_password_length": 8, "auth_mode": mode, "registration_enabled": enabled}
+    enabled = registration_enabled()
+    out: dict[str, Any] = {"register_roles": allowed_register_roles() if enabled else [], "min_password_length": 8, "auth_mode": mode, "registration_enabled": enabled,
+                           "google_enabled": google_sign_in_enabled()}
     if mode == "demo":
         out["demo_password"] = DEMO_PASSWORD
         out["demo_accounts"] = [{"email": u.email, "display_name": u.display_name, "roles": [r.value for r in u.roles]}
@@ -93,7 +116,10 @@ def login(req: LoginRequest):
         _audit(user.id if user else email, "LOGIN_FAILED", {"email": email})
         from app.ai.operator_behaviour import login_failed_warning
 
-        warn = login_failed_warning(repo, email)
+        from app.ai.operator_behaviour import guard_settings
+        from app.core.policy import merged_policy
+
+        warn = login_failed_warning(repo, email, settings=guard_settings(merged_policy(repo.get_active_policy().values)))
         if warn:
             _audit(user.id if user else email, "UNUSUAL_OPERATOR_BEHAVIOUR", {"signal": warn.signal, "evidence": warn.evidence})
         raise HTTPException(401, detail={"error": "invalid email or password", "category": "AUTH_ERROR", "operator_warning": bool(warn)})
@@ -118,11 +144,7 @@ def register(req: RegisterRequest):
     role_name = (req.role or (allowed[0] if allowed else "OPERATIONS_STAFF")).upper()
     if role_name not in allowed:
         raise HTTPException(403, detail={"error": f"self-registration may only pick {', '.join(allowed) or 'no role'}; ask an ADMIN for other roles", "category": "AUTH_ERROR"})
-    uid = "u_" + re.sub(r"[^a-z0-9]+", "_", email.split("@", 1)[0]).strip("_")[:24]
-    base, i = uid, 2
-    while repo.get_user(uid):
-        uid, i = f"{base}_{i}", i + 1
-    user = UserRecord(id=uid, email=email, display_name=req.display_name.strip(), roles=[Role(role_name)])
+    user = UserRecord(id=new_user_id(repo, email), email=email, display_name=req.display_name.strip(), roles=[Role(role_name)])
     try:
         repo.save_user(user)
     except NotImplementedError:
@@ -145,4 +167,4 @@ def logout(user: UserRecord = Depends(current_user), authorization: Optional[str
 
 @router.get("/session")
 def session(user: UserRecord = Depends(current_user)):
-    return {**user.model_dump(mode="json"), "permissions": [p for p in PERMISSIONS if has_permission(user, p)]}
+    return {**user.model_dump(mode="json"), "permissions": [p for p in PERMISSIONS if has_permission(user, p)], "mailbox": _mailbox(user.id)}

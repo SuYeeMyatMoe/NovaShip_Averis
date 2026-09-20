@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { api, post, type CaseView } from "@/lib/api";
 import { Badge, Button, Card, Empty, fmtDate } from "@/components/ui";
+import { useOperatorWarning } from "@/lib/operator-warning";
 
 type Recipient = { id: string; label: string; recipient_type: string; external: boolean; roles: string[]; allowed: boolean };
 
@@ -12,6 +13,7 @@ const STEPS = ["Notify Party values", "Select recipient", "Preview", "Send / sha
  * Notify Party values -> Select recipient -> Preview -> Confirm -> Send/Share -> Audit -> Status.
  */
 export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange: () => void; say: (m: string, k?: "ok" | "err") => void }) {
+  const warn = useOperatorWarning();
   const [recips, setRecips] = useState<Recipient[]>([]);
   const [started, setStarted] = useState(["NOTIFY_PARTY", "AWAITING_RESPONSE"].includes(c.status));
   const [pick, setPick] = useState<string>("");
@@ -44,7 +46,7 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
     recipient_type: chosen!.recipient_type, recipient_user_id: chosen!.external ? undefined : chosen!.id, recipient_party_id: chosen!.external ? chosen!.id : undefined,
     message: message || undefined, due_date: due || undefined, include_fields: fields, preview_only, confirm_external,
   });
-  const doPreview = async () => { if (!chosen) return say("Select a recipient", "err"); setBusy(true); try { setPreview(await post(`/cases/${c.id}/share`, body(true))); } catch (e: any) { say(e.detail?.operator_warning ? `Unusual operator signal: ${e.message}` : e.message, "err"); } finally { setBusy(false); } };
+  const doPreview = async () => { if (!chosen) return say("Select a recipient", "err"); setBusy(true); try { setPreview(await post(`/cases/${c.id}/share`, body(true))); } catch (e: any) { if (!warn.notice(e)) say(e.message, "err"); } finally { setBusy(false); } };
   const doSend = async () => {
     if (!chosen) return; setBusy(true);
     try {
@@ -60,6 +62,7 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
 
   return (
     <div className="grid min-w-0 max-w-full gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+      {warn.dialog}
       <Card title="Notify Party" right={!started ? <Button kind="primary" disabled={busy} onClick={beginNotify}>Start Notify Party flow</Button> : <Badge className="bg-accent-soft text-accent-fg">flow active</Badge>}>
         <Stepper step={step} />
 

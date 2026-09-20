@@ -12,3 +12,5 @@ os.environ["EMBEDDING_PROVIDER"] = "local"
 os.environ["LANGGRAPH_CHECKPOINT"] = "memory"
 os.environ["LLM_PROVIDER"] = "none"
 os.environ["APP_ENV"] = "test"
+os.environ["OCR_ENABLED"] = "0"          # readers never call Gemini vision in tests; OCR tests opt in explicitly
+os.environ["LLM_PRIVACY"] = "mask"

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { MailboxCard } from "@/components/mailbox-card";
 
 /**
  * Guide page for first-time users and demo judges.
@@ -8,7 +9,7 @@ import Link from "next/link";
 export const metadata = { title: "Guide, NovaShip Averis" };
 
 const STEPS = [
-  { title: "Using your own email", body: "Register with your address as Admin. You join this shared desk — the 520 test cases stay in the Inbox. The bell shows work that needs a person. Fetch Inbox pulls live Gmail next to the seeded cases.", href: "/register", cta: "Create an account" },
+  { title: "Using your own email", body: "Sign up with Google and your Gmail is connected in the same consent. You join this shared desk — the 520 test cases stay in the Inbox. Fetch Inbox pulls your mailbox next to the seeded cases, each tagged with its address, and approved replies leave from it.", href: "/register", cta: "Create an account" },
   { title: "Open the Inbox", body: "Every email is already a case. Filter Needs human or Mismatch = yes to see what needs a decision today.", href: "/", cta: "Open inbox" },
   { title: "Read the seven fields", body: "On a case, the comparison card shows Shipper, Consignee, Notify Party, Port of Loading, Port of Discharge, Container Count and Gross Weight side by side with the Shipping Instruction as truth.", href: "/cases/case_email_004", cta: "See a mismatch case" },
   { title: "Check the evidence", body: "Each value links to the exact line in the document and shows which label was resolved, for example Load Port to Port of Loading.", href: "/cases/case_email_004?tab=evidence", cta: "View evidence" },
@@ -49,6 +50,8 @@ export default function WelcomePage() {
           <p className="mt-3 text-xs text-ink-500">One field differs, so only one field is flagged. When all seven match the result reads: No mismatch detected.</p>
         </div>
       </section>
+
+      <MailboxCard />
 
       <section>
         <h2 className="text-xl font-semibold text-ink-900">How to use the desk</h2>

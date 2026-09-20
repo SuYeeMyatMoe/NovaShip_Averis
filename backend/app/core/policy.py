@@ -47,6 +47,29 @@ DEFAULT_POLICY: dict[str, Any] = {
         "intent_model_override_margin": 0.05,
         "intent_llm_threshold": 0.75,
     },
+    # Operator guard: warnings only, never a lock. Learned limits come from the user's own audit history.
+    "operator_guard": {
+        "auto_draft_after": 3,          # N user actions on a case with no live draft -> a draft is saved, never sent
+        "burst_limit": 10,              # fixed ceiling: actions per window before a warning
+        "burst_window_s": 60,
+        "adaptive": True,               # tighten the burst limit to baseline_multiplier x the user's usual pace
+        "baseline_days": 30,            # audit history considered for the baseline
+        "baseline_multiplier": 3.0,
+        "min_baseline_events": 20,      # below this the fixed limit applies (not enough history to learn)
+        "min_effective_burst": 3,
+        "off_hours_warning": True,      # LOW warning outside the user's usual working hours (learned)
+        "rapid_archive_limit": 5,       # cases archived in one batch
+        "login_fail_limit": 3,
+        "login_fail_window_s": 900,
+        "warning_dialog": True,         # UI shows a modal warning box instead of a passing toast
+    },
+    # What may leave the desk towards an external model provider.
+    "ai_privacy": {
+        "mask_identifiers": True,       # company names, addresses, references, ports, numbers -> __IDn__ before any prompt
+        "allow_vision_ocr": True,       # scanned pages are sent to Gemini vision for OCR (cannot be masked)
+        "audit_provider_calls": True,   # AI_PROVIDER_CALL audit events (metadata only, never text)
+        "providers_no_training_note": "OpenAI API and Gemini paid tier do not train on API traffic; the free Gemini tier may. Use a billed key in production.",
+    },
 }
 
 
@@ -80,4 +103,24 @@ def explain_policy(policy: dict[str, Any]) -> list[str]:
         "External email is never auto-sent: " + ("every external draft requires human confirmation." if c["external_drafts_require_confirmation"] else "confirmation is optional."),
         f"Only roles {', '.join(c['external_notify_roles'])} may notify an external party; {', '.join(c['internal_share_roles'])} may share internally.",
         f"Blocked attachment types: {', '.join(s['blocked_attachment_types'])}. Max attachments per email: {s['max_attachments']}.",
+        _explain_operator_guard(policy.get("operator_guard") or {}),
+        _explain_ai_privacy(policy.get("ai_privacy") or {}),
     ]
+
+
+def _explain_operator_guard(g: dict[str, Any]) -> str:
+    base = (f"Operator guard: after {g.get('auto_draft_after', 3)} actions on a case with no live draft a draft is saved (never sent); "
+            f"more than {g.get('burst_limit', 10)} actions in {g.get('burst_window_s', 60)}s raises a warning")
+    if g.get("adaptive", True):
+        base += (f", tightened to {g.get('baseline_multiplier', 3.0):g}x each user's usual pace once {g.get('min_baseline_events', 20)} "
+                 f"audited actions exist in the last {g.get('baseline_days', 30)} days")
+    base += "; warnings never lock an account."
+    return base
+
+
+def _explain_ai_privacy(a: dict[str, Any]) -> str:
+    parts = []
+    parts.append("company identifiers are masked before any prompt reaches OpenAI or Gemini" if a.get("mask_identifiers", True) else "prompts are sent to the model provider unmasked")
+    parts.append("scanned pages may be sent to Gemini vision for OCR" if a.get("allow_vision_ocr", True) else "vision OCR is disabled")
+    parts.append("each provider call is audited as metadata only" if a.get("audit_provider_calls", True) else "provider calls are not audited")
+    return "AI privacy: " + "; ".join(parts) + ". The seven-field verdict never uses a model."

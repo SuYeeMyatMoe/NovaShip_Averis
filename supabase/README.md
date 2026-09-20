@@ -6,6 +6,7 @@ supabase/
 ├── migrations/0002_rls.sql      RLS on every table: tenant-scoped reads, role-gated writes, storage policies
 ├── migrations/0003_vector.sql   pgvector `case_embeddings` for RAG
 ├── migrations/0004_accounts.sql `user_credentials` + `revoked_sessions` for the built-in login / register / logout
+├── migrations/0007_user_mailboxes.sql `user_mailboxes` (Fernet-encrypted Gmail refresh tokens from Sign in with Google) + `email_messages.mailbox_user_id`
 └── seed/
     ├── seed.sql                 one idempotent transaction (ON CONFLICT DO UPDATE) — all tables, 520 cases
     ├── tables/<table>.json      row arrays per table (Table Editor → Import, or scripts)

@@ -13,6 +13,7 @@ Person 1 regression tool: run after any change to extractor/normalizer/comparato
 from __future__ import annotations
 
 import argparse
+import os
 import collections
 import importlib.util
 import json
@@ -47,7 +48,10 @@ def main() -> int:
     ap.add_argument("--scoring", default=str(ROOT / "sdoc-hackathon-docker" / "server" / "scoring.py"))
     ap.add_argument("--snapshot", default=None, help="Also write a repository snapshot JSON (seed for the API / Supabase)")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--ocr", action="store_true", help="Allow Gemini/pytesseract OCR during the replay (off by default so scoring stays deterministic and offline)")
     args = ap.parse_args()
+    if not args.ocr:
+        os.environ["OCR_ENABLED"] = "0"
 
     bundle = Path(args.bundle)
     repo = MemoryRepository()

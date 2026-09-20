@@ -8,6 +8,7 @@ import { EvidencePanel, SevenFieldCard } from "@/components/comparison";
 import { CollaborationPanel } from "@/components/collab";
 import { AskPanel, AttachmentsPanel, AuditPanel, DraftPanel, EmailPanel, Timeline } from "@/components/panels";
 import { AgentPanel } from "@/components/agent-panel";
+import { useOperatorWarning } from "@/lib/operator-warning";
 
 const TABS = [["overview","Overview"],["email","Original Email"],["attachments","Attachments"],["compare","Seven-Field Comparison"],["evidence","Evidence"],["summary","AI Summary"],["drafts","Draft Actions"],["collab","Collaboration"],["ask","Ask AI"],["agent","AI Agent"],["audit","Audit History"]] as const;
 
@@ -30,26 +31,29 @@ export default function CasePage() {
     else api("/me").then((m) => setPerms(m.permissions)).catch(() => {});
   }, [load]);
 
+  const warn = useOperatorWarning();
   if (err) return <div className="rounded-xl border border-mismatch bg-mismatch-bg p-4 text-sm text-mismatch-fg">Could not load case: {err}</div>;
   if (!c) return <div className="p-8 text-center text-sm text-ink-500">Loading case…</div>;
   const e = c.email!;
   const docs: Record<string, { name: string; text: string | null }> = Object.fromEntries(e.attachments.map((a) => [a.id, { name: a.file_name, text: a.raw_text }]));
   const act = async (path: string, body?: any) => {
     try {
-      await post(`/cases/${c.id}${path}`, body);
+      const r = await post(`/cases/${c.id}${path}`, body);
       const d = await api<CaseView>(`/cases/${c.id}`);
       setC(d);
+      if (warn.notice(r)) return;           // modal warning box (operator guard); nothing else to say
       const notice = (d.anomalies || []).find((a) => a.signal === "AUTO_DRAFT_AFTER_REPEATED_ACTIONS" || a.signal.startsWith("OPERATOR_"));
-      if (notice) say(notice.evidence, notice.signal.startsWith("OPERATOR_") ? "err" : "ok");
+      if (notice && r?.operator_warning) say(notice.evidence, notice.signal.startsWith("OPERATOR_") ? "err" : "ok");
       else say("Done");
     } catch (x: any) {
-      say(x.message, "err");
+      if (!warn.notice(x)) say(x.message, "err");
     }
   };
 
   return (
     <div className="min-w-0 space-y-4">
       {toast && <Toast {...toast} />}
+      {warn.dialog}
       <div className="min-w-0 rounded-2xl border border-ink-200 bg-white/95 p-3 shadow-card sm:p-5">
         <div className="flex flex-wrap items-start gap-3">
           <div className="min-w-0 flex-1">

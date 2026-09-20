@@ -46,9 +46,23 @@ No external chat model is required. Deterministic comparison remains authoritati
 
 RAG uses deterministic local hashing embeddings, configured at 768 dimensions and persisted in Supabase pgvector.
 
+### LLM_PRIVACY=mask (default)
+
+Company identifiers never reach OpenAI or Gemini in clear text: names, addresses, references and the case's seven-field values are tokenised before the prompt and restored afterwards; every call is audited as `AI_PROVIDER_CALL` with metadata only. Scanned pages are the exception (vision OCR); `ai_privacy.allow_vision_ocr=false` in the policy turns that off. `LLM_PROVIDER=none` sends nothing anywhere.
+
+### OCR_ENABLED=auto
+
+Gemini vision OCR is on whenever `GOOGLE_API_KEY` exists, so scanned PDFs and image attachments become readable instead of escalating as `unreadable`. The scoring replay (`scripts/run_bundle.py`) keeps it off unless `--ocr` is given.
+
 ### EMAIL_SEND_MODE=simulate
 
 Real inbound Gmail can be processed, but outbound email is not transmitted.
+
+### Per-user Gmail (Sign in with Google)
+
+Independent of `EMAIL_PROVIDER`. A user who signs in with Google gets their own Gmail connected (`user_mailboxes`, token encrypted). Fetch Inbox then polls *their* mailbox; the shared `GMAIL_ADDRESS` remains available through `source=shared` and the scheduler. In `EMAIL_SEND_MODE=simulate` nothing leaves either mailbox. In `gmail` mode an approved reply on a case that arrived in a user's mailbox is sent from that user's address, which is what the customer expects to see in the thread.
+
+Requires: a Web-application OAuth client (`GOOGLE_OAUTH_CLIENT_ID/SECRET`), its redirect URI (`GOOGLE_OAUTH_REDIRECT_URI`) registered in Google Cloud, migration `0007_user_mailboxes.sql` on Supabase, and each tester added as a test user while the consent screen is unverified. `GMAIL_POLL_INTERVAL_SECONDS` enables background polling; keep it `0` on serverless (Vercel) because there is no long-lived process, and poll from the UI or an external cron instead.
 
 ## Hackathon live
 
@@ -63,6 +77,7 @@ For a controlled hackathon deployment, keep:
 - `EMAIL_SEND_MODE=simulate`
 - `LANGGRAPH_CHECKPOINT=postgres`
 - `VECTOR_STORE=supabase`
+- `GOOGLE_OAUTH_CLIENT_ID/SECRET` + `GOOGLE_OAUTH_REDIRECT_URI` for Sign in with Google (optional; the password path keeps working without it)
 
 This is a **live deployed demo**: Vercel, Supabase, Gmail inbound and workflow persistence are real, while authentication remains demo-oriented and outbound email remains safe.
 
@@ -115,7 +130,7 @@ or
 ```text
 LLM_PROVIDER=gemini
 GOOGLE_API_KEY=<server secret>
-GEMINI_CHAT_MODEL=gemini-2.0-flash
+GEMINI_CHAT_MODEL=gemini-3.6-flash
 ```
 
 The seven-field verdict remains deterministic regardless of LLM choice.
@@ -143,7 +158,7 @@ Before claiming production readiness verify:
 - RAG shows zero cross-case leakage;
 - LangGraph survives instance replacement;
 - real outbound email, if enabled, is human-approved and audited;
-- secrets are server-only;
+- secrets are server-only (including `MAILBOX_TOKEN_KEY`; set it explicitly rather than relying on the `SESSION_SECRET`-derived key);
 - CORS is restricted to intended origins.
 
 ## Summary

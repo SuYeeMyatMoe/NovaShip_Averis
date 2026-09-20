@@ -15,6 +15,7 @@ case save (idempotent upsert on deterministic ids).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from datetime import datetime
@@ -29,10 +30,13 @@ from app.contracts.schemas import (
     PolicyRecord,
     ProcessingError,
     ShareRecord,
+    UserMailbox,
     UserRecord,
 )
 from app.core.policy import DEFAULT_POLICY
 from app.repositories.base import BaseRepository, StorageAuthorizationError, StorageProviderError
+
+log = logging.getLogger("novaship.supabase")
 
 
 def _j(model) -> dict[str, Any]:
@@ -57,7 +61,10 @@ class SupabaseRepository(BaseRepository):
         from app.config import supabase_server_credentials
 
         url, key = supabase_server_credentials()
-        self.client = create_client(url, key)
+        self._url, self._key = url, key
+        self._create_client = create_client
+        self._clients = threading.local()          # supabase-py's sync client mutates shared session state per request: one per thread
+        self.client = create_client(url, key)      # main-thread client; also validates credentials eagerly
         self.bucket = os.environ.get("SUPABASE_STORAGE_BUCKET", "documents")
         self.tenant = os.environ.get("TENANT_ID", "tenant_april")
         self._lock = threading.RLock()
@@ -69,6 +76,30 @@ class SupabaseRepository(BaseRepository):
         self._audit_recent: Optional[list[AuditEvent]] = None
         self._revoked_sids: set[str] = set()
         self._live_sids: set[str] = set()
+
+    def _thread_clients(self) -> threading.local:
+        clients = self.__dict__.get("_clients")
+        if clients is None:  # test doubles built with __new__ skip __init__
+            clients = self.__dict__["_clients"] = threading.local()
+        return clients
+
+    @property
+    def client(self):
+        """A Supabase client owned by the calling thread (parallel batch / agent runs never share one)."""
+        clients = self._thread_clients()
+        client = getattr(clients, "client", None)
+        if client is None:
+            shared = self.__dict__.get("_shared_client")
+            if shared is not None and not hasattr(self, "_create_client"):
+                return shared
+            client = self._create_client(self._url, self._key)
+            clients.client = client
+        return client
+
+    @client.setter
+    def client(self, value) -> None:
+        self._thread_clients().client = value
+        self.__dict__["_shared_client"] = value   # doubles assigned from a test are visible to every thread
 
     def cached_counts(self) -> dict[str, int]:
         """Health/status without a Supabase round trip once the desk is warmed."""
@@ -91,6 +122,8 @@ class SupabaseRepository(BaseRepository):
             "received_at": email.received_at.isoformat(), "language": email.language, "checksum": email.checksum,
             "is_duplicate_of": email.is_duplicate_of, "payload": _j(email),
         }
+        if email.mailbox_user_id:  # column added by migration 0007; omitted otherwise so older schemas keep working
+            row["mailbox_user_id"] = email.mailbox_user_id
         self._t("email_messages").upsert(row).execute()
         for a in email.attachments:
             self._t("attachments").upsert({
@@ -450,6 +483,53 @@ class SupabaseRepository(BaseRepository):
 
     def set_password_hash(self, user_id: str, password_hash: str) -> None:
         self._t("user_credentials").upsert({"user_id": user_id, "password_hash": password_hash, "updated_at": datetime.utcnow().isoformat()}).execute()
+
+    def list_audit_for_actor(self, actor_id: str, since: datetime) -> list[AuditEvent]:
+        rows = (self._t("audit_events").select("*").eq("tenant_id", self.tenant).eq("actor_id", actor_id)
+                .gte("timestamp", since.isoformat()).order("timestamp").limit(5000).execute().data)
+        return [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in rows]
+
+    # connected mailboxes (migration 0007). Tokens are Fernet-encrypted before they reach this table.
+    @staticmethod
+    def _mailbox_from_row(r: dict[str, Any]) -> UserMailbox:
+        return UserMailbox(user_id=r["user_id"], tenant_id=r["tenant_id"], provider=r.get("provider") or "gmail", address=r["address"],
+                           google_sub=r.get("google_sub"), refresh_token_enc=r["refresh_token_enc"], scopes=r.get("scopes") or [],
+                           status=r.get("status") or "active", connected_at=r["connected_at"], last_polled_at=r.get("last_polled_at"),
+                           last_error=r.get("last_error"))
+
+    @staticmethod
+    def _missing_table(exc: Exception) -> bool:
+        text = str(getattr(exc, "message", "") or exc)
+        return "user_mailboxes" in text and ("does not exist" in text or "PGRST205" in text or "schema cache" in text)
+
+    def get_mailbox(self, user_id: str) -> Optional[UserMailbox]:
+        try:
+            res = self._t("user_mailboxes").select("*").eq("tenant_id", self.tenant).eq("user_id", user_id).limit(1).execute()
+        except Exception as exc:  # migration 0007 not applied: reads degrade to "not connected" instead of breaking /me
+            if self._missing_table(exc):
+                log.warning("user_mailboxes table missing; apply supabase/migrations/0007_user_mailboxes.sql")
+                return None
+            raise
+        return self._mailbox_from_row(res.data[0]) if res.data else None
+
+    def list_mailboxes(self) -> list[UserMailbox]:
+        try:
+            res = self._t("user_mailboxes").select("*").eq("tenant_id", self.tenant).execute()
+        except Exception as exc:
+            if self._missing_table(exc):
+                log.warning("user_mailboxes table missing; apply supabase/migrations/0007_user_mailboxes.sql")
+                return []
+            raise
+        return [self._mailbox_from_row(r) for r in res.data]
+
+    def save_mailbox(self, mailbox: UserMailbox) -> None:
+        row = mailbox.model_dump(mode="json")
+        row["tenant_id"] = self.tenant
+        row["updated_at"] = datetime.utcnow().isoformat()
+        self._t("user_mailboxes").upsert(row).execute()
+
+    def delete_mailbox(self, user_id: str) -> None:
+        self._t("user_mailboxes").delete().eq("tenant_id", self.tenant).eq("user_id", user_id).execute()
 
     def revoke_session(self, session_id: str) -> None:
         self._t("revoked_sessions").upsert({"session_id": session_id, "revoked_at": datetime.utcnow().isoformat()}).execute()

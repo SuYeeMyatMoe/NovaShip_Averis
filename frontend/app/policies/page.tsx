@@ -94,6 +94,7 @@ export default function PoliciesPage() {
           <Card className="border-orange-200 transition duration-200 hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-md" title={<span>Active policy <Badge className="bg-accent-bg text-accent-fg">{data.active.version}</Badge></span>} right={<span className="text-xs text-ink-500">by {data.active.updated_by} · {fmtDate(data.active.updated_at)}</span>}>
             <ul className="list-disc space-y-1 pl-5 text-sm">{data.explanation.map((l: string, i: number) => <li key={i}>{l}</li>)}</ul>
           </Card>
+          <OperatorProfileCard />
           <Card className="border-orange-200 transition duration-200 hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-md" title="Version history (every change is audited)">
             {data.versions.length ? <table className="w-full text-xs"><thead className="text-[11px] uppercase text-ink-500"><tr><th className="py-1 text-left">Version</th><th className="text-left">By</th><th className="text-left">When</th><th className="text-left">Note</th></tr></thead>
               <tbody>{[...data.versions].reverse().map((v: any) => <tr key={v.id} className="border-t border-ink-100"><td className="py-1 font-mono">{v.version}{v.version === data.active.version && <span className="ml-1 text-[10px] text-match-fg">active</span>}</td><td>{v.updated_by}</td><td className="whitespace-nowrap">{fmtDate(v.updated_at)}</td><td>{v.change_note}</td></tr>)}</tbody></table> : <Empty text="No versions" />}
@@ -106,3 +107,23 @@ export default function PoliciesPage() {
 
 function nextVersion(data: any) { return `v${(data?.versions?.length || 0) + 1}`; }
 function safeParse(text: string, fallback: any) { try { return JSON.parse(text); } catch { return fallback; } }
+
+/** What the operator guard has learned for the signed-in user from the audit log, and the limits that apply right now. */
+function OperatorProfileCard() {
+  const [profile, setProfile] = useState<any>(null);
+  useEffect(() => { api("/me/operator-profile").then(setProfile).catch(() => setProfile(null)); }, []);
+  if (!profile) return null;
+  const b = profile.baseline, s = profile.settings;
+  return (
+    <Card className="border-orange-200 transition duration-200 hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-md" title="Operator guard · learned for you">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+        <dt className="text-ink-500">audited actions ({b.baseline_days} days)</dt><dd className="font-mono">{b.events}</dd>
+        <dt className="text-ink-500">your usual pace</dt><dd className="font-mono">{b.median_per_min.toFixed(1)} / min (p95 {b.p95_per_min})</dd>
+        <dt className="text-ink-500">usual hours (UTC)</dt><dd className="font-mono">{b.usual_hours_utc ? `${String(b.usual_hours_utc[0]).padStart(2, "0")}:00-${String(b.usual_hours_utc[1]).padStart(2, "0")}:59` : "not enough history"}</dd>
+        <dt className="text-ink-500">burst warning at</dt><dd className="font-mono">{b.effective_burst_limit} actions / {b.burst_window_s}s <span className="text-ink-500">({b.learned ? "learned" : `fixed until ${s.min_baseline_events} actions`})</span></dd>
+        <dt className="text-ink-500">auto-draft after</dt><dd className="font-mono">{b.auto_draft_after} actions with no live draft</dd>
+      </dl>
+      <p className="mt-2 text-[11px] text-ink-500">Warnings are shown as a dialog{s.warning_dialog ? "" : " (off in policy)"}, recorded in the audit trail, and never lock an account. Edit the <span className="font-mono">operator_guard</span> section to change the rules.</p>
+    </Card>
+  );
+}

@@ -177,7 +177,7 @@ GENERAL = internal updates/reports/HR/bots. SPAM = unsolicited/phishing."""
 
 
 def _llm_category(email: EmailMessage) -> Optional[HackathonCategory]:
-    data = get_llm().complete_json(_LLM_SYSTEM, f"Subject: {email.subject}\n\nBody:\n{email.body[:2500]}", max_tokens=200)
+    data = get_llm().complete_json(_LLM_SYSTEM, f"Subject: {email.subject}\n\nBody:\n{email.body[:2500]}", max_tokens=200, purpose="intent")
     if not data:
         return None
     try:

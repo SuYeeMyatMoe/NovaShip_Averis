@@ -99,7 +99,7 @@ class Nodes:
         llm = get_llm()
         if llm.enabled:
             payload = f"Precheck: {sec}\n\nFrom: {email.sender}\nSubject: {email.subject}\nBody:\n{email.body[:1500]}\nAttachments: {[a.file_name for a in email.attachments]}"
-            data = llm.complete_json(prompts.SECURITY_AGENT_PROMPT, payload, max_tokens=300)
+            data = llm.complete_json(prompts.SECURITY_AGENT_PROMPT, payload, max_tokens=300, purpose="security", case_id=state.get("case_id"))
             if data and str(data.get("outcome", "")).upper() in SecurityOutcome.__members__:
                 # The agent may only ESCALATE (never downgrade a rule-based SPAM/SECURITY_REVIEW to SAFE)
                 order = ["SAFE", "SUSPICIOUS", "SPAM", "SECURITY_REVIEW"]

@@ -58,3 +58,38 @@ export function fmtDate(s?: string | null) { if (!s) return "—"; const d = new
 export function Toast({ msg, kind }: { msg: string; kind: "ok" | "err" }) {
   return <div className={`fixed bottom-4 right-4 z-50 rounded-xl px-4 py-3 text-sm shadow-lg ${kind === "ok" ? "bg-ink-900 text-white" : "bg-mismatch text-white"}`}>{msg}</div>;
 }
+
+/** Operator signal raised by a mutation (`operator_warning` in API responses / `detail.operator_warning` on errors). */
+export type OperatorWarning = { signal: string; severity: string; evidence: string; recommended_action: string; dialog?: boolean };
+
+/** Modal warning box for unusual operator behaviour. Warnings never block: the only action is to acknowledge. */
+export function WarningDialog({ warning, onClose }: { warning: OperatorWarning | null; onClose: () => void }) {
+  const ref = React.useRef<HTMLButtonElement>(null);
+  React.useEffect(() => {
+    if (!warning) return;
+    ref.current?.focus();
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [warning, onClose]);
+  if (!warning) return null;
+  const auto = warning.signal === "AUTO_DRAFT_AFTER_REPEATED_ACTIONS";
+  const tone = auto ? "border-accent bg-accent-bg text-accent-fg" : warning.severity === "LOW" ? "border-review bg-review-bg text-review-fg" : "border-mismatch bg-mismatch-bg text-mismatch-fg";
+  return (
+    <div role="presentation" className="fixed inset-0 z-[60] flex items-center justify-center bg-ink-900/40 p-4" onClick={onClose}>
+      <div role="alertdialog" aria-modal="true" aria-labelledby="warning-title" aria-describedby="warning-body" onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-2xl border border-ink-200 bg-white p-5 shadow-xl">
+        <div className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide ${tone}`}>
+          <span aria-hidden>{auto ? "✎" : "⚠"}</span>{auto ? "Draft saved" : `Operator warning · ${warning.severity}`}
+        </div>
+        <h2 id="warning-title" className="mt-3 text-base font-semibold text-ink-900">{warning.signal.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase())}</h2>
+        <p id="warning-body" className="mt-2 text-sm text-ink-700">{warning.evidence}</p>
+        <p className="mt-2 rounded-lg bg-ink-50 px-3 py-2 text-xs text-ink-600"><b>What to do:</b> {warning.recommended_action}</p>
+        <p className="mt-2 text-[11px] text-ink-500">This is a warning only. Nothing was sent and your account is not locked. It is recorded in the audit trail.</p>
+        <div className="mt-4 flex justify-end">
+          <button ref={ref} type="button" onClick={onClose} className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white shadow-glow transition hover:bg-accent-hover">I understand</button>
+        </div>
+      </div>
+    </div>
+  );
+}

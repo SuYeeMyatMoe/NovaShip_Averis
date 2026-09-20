@@ -4,10 +4,12 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, post, getSession, ApiError, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
 import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
+import { MailboxCard } from "@/components/mailbox-card";
+import { useOperatorWarning } from "@/lib/operator-warning";
 
 const STATUSES = ["RECEIVED","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","WAITING_DOCUMENTS","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const INTENTS = ["DOCUMENT_VERIFICATION","DOCUMENT_CORRECTION","PREPARE_SHIPPING_INSTRUCTION","INVOICE_QUERY","OPERATIONAL_UPDATE","GENERAL_ENQUIRY","INFORMATION_ONLY","NO_ACTION_REQUIRED","UNKNOWN_REVIEW"];
-const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "" };
+const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "", mailbox: "" };
 const STATUS_ORDER = ["RECEIVED","SECURITY_CHECK","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","DOCUMENTS_DETECTED","WAITING_DOCUMENTS","EXTRACTING","COMPARING","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const STATUS_TONE: Record<string, string> = { HUMAN_REVIEW: "bg-review", MISMATCH_DETECTED: "bg-mismatch", SECURITY_REVIEW: "bg-mismatch", ERROR: "bg-mismatch", WAITING_DOCUMENTS: "bg-review", NO_MISMATCH_DETECTED: "bg-match", COMPLETED: "bg-match", NO_ACTION_INFO: "bg-ink-300" };
 
@@ -31,6 +33,8 @@ export default function Dashboard() {
   const limit = 5;
   const me = getSession()?.user;
   const canIngest = me?.permissions.includes("ingest") ?? false;
+  const myMailbox = me?.mailbox?.connected ? me.mailbox.address : null;
+  const warn = useOperatorWarning();
 
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 3500); };
 
@@ -79,16 +83,18 @@ export default function Dashboard() {
       }
       const ok = Object.values(r.results as Record<string, any>).filter((x: any) => x.ok).length;
       say(`${action}: ${ok}/${sel.size} succeeded`); setSel(new Set()); load(); loadWidgets();
-    } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); }
+      warn.notice(r);
+    } catch (e: any) { if (!warn.notice(e)) say(e.message, "err"); } finally { setBusy(false); }
   };
-  const quick = async (id: string, path: string, body?: any) => { try { await post(`/cases/${id}${path}`, body); say("Done"); load(); loadWidgets(); } catch (e: any) { say(e.message, "err"); } };
+  const quick = async (id: string, path: string, body?: any) => { try { const r = await post(`/cases/${id}${path}`, body); if (!warn.notice(r)) say("Done"); load(); loadWidgets(); } catch (e: any) { if (!warn.notice(e)) say(e.message, "err"); } };
 
   const fetchInbox = async () => {
     setFetching(true);
     try {
-      const r = await post<{ created: string[]; duplicates_skipped: number; connector: string }>("/connectors/poll?limit=10");
+      const r = await post<{ created: string[]; duplicates_skipped: number; connector: string; mailbox?: string }>("/connectors/poll?limit=10&source=auto");
       const n = r.created?.length || 0;
-      say(n ? `Fetched ${n} new case(s) from ${r.connector || "Gmail"} · skipped ${r.duplicates_skipped || 0} duplicate(s)` : `No new mail (${r.duplicates_skipped || 0} already ingested)`);
+      const where = r.mailbox && r.mailbox !== "shared" ? r.mailbox : `the shared ${r.connector || "Gmail"} mailbox`;
+      say(n ? `Fetched ${n} new case(s) from ${where} · skipped ${r.duplicates_skipped || 0} duplicate(s)` : `No new mail in ${where} (${r.duplicates_skipped || 0} already ingested)`);
       load();
       loadWidgets();
     } catch (e: any) { say(e.message, "err"); }
@@ -121,6 +127,7 @@ export default function Dashboard() {
   return (
     <div className="dashboard-type space-y-3">
       {toast && <Toast {...toast} />}
+      {warn.dialog}
       <div className="relative overflow-hidden pb-4 pt-2"><img src="/domain-logo.jpe" alt="" aria-hidden className="pointer-events-none absolute right-3 top-0 hidden h-44 w-44 rounded-[2.5rem] object-cover opacity-[0.08] mix-blend-multiply sm:block sm:right-12 sm:h-56 sm:w-56" /><div className="relative z-10 text-xs font-bold uppercase tracking-[.18em] text-accent-fg">Dashboard</div><h1 className="hero-dashboard-number relative z-10 mt-2 max-w-5xl text-4xl font-semibold leading-[.98] tracking-[-.055em] text-[#4b2818] sm:text-6xl lg:text-7xl">Shipping operations,<br /><span className="bg-gradient-to-r from-[#e85f0b] via-[#f5832d] to-[#c97532] bg-clip-text text-transparent">under human command.</span></h1><p className="relative z-10 mt-4 text-base text-[#927968] sm:mt-5 sm:text-lg">Your case control center is ready.</p></div>
 
       <section className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-[repeat(3,minmax(0,1fr))_minmax(0,1.3fr)]" aria-label="Key metrics">
@@ -202,12 +209,14 @@ export default function Dashboard() {
       )}
 
       {/* ---- case table --------------------------------------------------------- */}
+      {canIngest && <MailboxCard compact />}
       <div id="case-table" className="scroll-mt-16 overflow-hidden rounded-2xl border border-ink-200 bg-white shadow-card">
         <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-3 py-2">
           <span className="mr-1 text-sm font-semibold text-ink-800">All cases</span>
-          {canIngest && <Button kind="primary" disabled={fetching} onClick={fetchInbox}>{fetching ? "Fetching…" : "Fetch Inbox"}</Button>}
+          {canIngest && <Button kind="primary" disabled={fetching} onClick={fetchInbox} title={myMailbox ? `Polls ${myMailbox}` : "Polls the shared desk mailbox"}>{fetching ? "Fetching…" : myMailbox ? "Fetch my inbox" : "Fetch Inbox"}</Button>}
           <Button kind={f.attention === "yes" ? "primary" : "ghost"} onClick={() => applyPreset({ attention: "yes", sort: "priority" })}>Needs human</Button>
           {me?.id && <Button kind={f.assigned === me.id ? "primary" : "ghost"} onClick={() => applyPreset({ assigned: me.id, sort: "updated_desc" })}>Needs me</Button>}
+          {myMailbox && <Button kind={f.mailbox === "me" ? "primary" : "ghost"} onClick={() => applyPreset({ mailbox: "me", sort: "received_desc" })} title={myMailbox}>My mailbox</Button>}
           <input placeholder="Search case, subject, sender, summary" value={f.q} onChange={(e) => setFilter("q", e.target.value)} className="w-full rounded-md border border-ink-200 px-2 py-1.5 text-sm sm:w-60" aria-label="Search" />
           <Sel v={f.status} on={(v) => setFilter("status", v)} opts={STATUSES} ph="Status" />
           <Sel v={f.priority} on={(v) => setFilter("priority", v)} opts={["CRITICAL","HIGH","MEDIUM","LOW"]} ph="Priority" />
@@ -236,6 +245,7 @@ export default function Dashboard() {
             <Button disabled={busy} onClick={() => batch("request_review")}>Request review</Button>
             <Button disabled={busy} onClick={() => batch("export")}>Export CSV</Button>
             <Button disabled={busy} onClick={() => batch("export_xlsx")}>Export Excel</Button>
+            <Button disabled={busy} onClick={() => batch("report_xlsx")}>Report (selected)</Button>
             <Button disabled={busy} kind="danger" onClick={() => batch("archive")}>Archive</Button>
             <span className="text-ink-500">External sending is never batched.</span>
           </div>
@@ -259,7 +269,7 @@ export default function Dashboard() {
                   <td className="px-2 py-2 font-mono text-[11px]"><Link href={`/cases/${r.id}`} className="text-accent hover:underline">{r.id.replace("case_", "")}</Link></td>
                   <td className="max-w-[360px] px-2 py-2">
                     <Link href={`/cases/${r.id}`} className="line-clamp-1 font-medium text-ink-900 hover:text-accent">{r.subject || "(no subject)"}</Link>
-                    <div className="truncate text-[11px] text-ink-500">{r.sender}</div>
+                    <div className="truncate text-[11px] text-ink-500">{r.sender}{r.mailbox && <span className="ml-1.5 rounded-full bg-orange-50 px-1.5 py-px text-[10px] font-semibold text-accent-fg" title={`Fetched from ${r.mailbox}`}>{r.mailbox_user_id === me?.id ? "my mailbox" : r.mailbox}</span>}</div>
                   </td>
                   <td className="px-2 py-2"><Badge className="bg-ink-100 text-ink-700">{r.intent.replace(/_/g, " ")}</Badge></td>
                   <td className="px-2 py-2"><Badge className={r.security === "SAFE" ? "bg-match-bg text-match-fg" : "bg-mismatch-bg text-mismatch-fg"}>{r.security}</Badge></td>

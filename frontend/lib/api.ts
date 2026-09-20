@@ -17,10 +17,11 @@ export const FIELD_LABELS: Record<string, string> = {
 };
 
 // ------------------------------------------------------------------ session
-export type SessionUser = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; team_id?: string | null };
+export type Mailbox = { connected: boolean; provider?: string; address?: string; scopes?: string[]; status?: string; can_send?: boolean; connected_at?: string; last_polled_at?: string | null; last_error?: string | null };
+export type SessionUser = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; team_id?: string | null; mailbox?: Mailbox };
 export type Session = { token: string; expires_at: string; user: SessionUser };
 const SESSION_KEY = "novaship.session";
-export const AUTH_PATHS = ["/login", "/register"];
+export const AUTH_PATHS = ["/login", "/register", "/auth/callback"];
 
 export function getSession(): Session | null {
   if (typeof window === "undefined") return null;
@@ -51,6 +52,43 @@ export async function register(body: { email: string; password: string; display_
   const s = await api<Session>("/auth/register", { method: "POST", body: JSON.stringify(body) }, { auth: false });
   setSession(s); return s;
 }
+/** Sign in / sign up with Google (also connects that Gmail). With a session, the grant links Gmail to the current account. */
+export async function startGoogle(opts: { role?: string; next?: string } = {}): Promise<void> {
+  const q = new URLSearchParams();
+  if (opts.role) q.set("role", opts.role);
+  if (opts.next) q.set("next", opts.next);
+  const r = await api<{ url: string }>(`/auth/google/start?${q.toString()}`, {}, { redirectOn401: false });
+  window.location.assign(r.url);
+}
+/** Session handed back by GET /auth/google/callback in the URL fragment; completes it by loading /auth/session. */
+export async function adoptSessionFromFragment(fragment: string): Promise<{ session: Session; next: string; isNew: boolean; mailbox: string } | null> {
+  const p = new URLSearchParams(fragment.replace(/^#/, ""));
+  const token = p.get("token");
+  if (!token) return null;
+  const draft: Session = { token, expires_at: p.get("expires_at") || "", user: { id: "", email: "", display_name: "", roles: [], permissions: [] } };
+  setSession(draft);
+  const user = await api<SessionUser>("/auth/session", {}, { redirectOn401: false });
+  const session = { ...draft, user };
+  setSession(session);
+  return { session, next: p.get("next") || "/welcome", isNew: p.get("new") === "1", mailbox: p.get("mailbox") || "" };
+}
+export const getMailbox = () => api<Mailbox>("/me/mailbox");
+export const disconnectMailbox = () => api<{ ok: boolean; address: string; google_revoked: boolean }>("/me/mailbox", { method: "DELETE" });
+export const GOOGLE_ERRORS: Record<string, string> = {
+  google_denied: "Google sign-in was cancelled.",
+  bad_state: "The sign-in link expired or was already used. Try again.",
+  exchange_failed: "Google did not accept the sign-in. Check the OAuth client and redirect URI.",
+  no_refresh_token: "Google did not grant offline access. Remove NovaShip at myaccount.google.com/permissions and try again.",
+  userinfo_failed: "Could not read the Google account profile.",
+  email_unverified: "That Google account has no verified email address.",
+  registration_disabled: "Self-registration is disabled. Ask an Admin for an account.",
+  role_not_allowed: "That role cannot be self-assigned.",
+  registration_unavailable: "Registration is not available on this backend.",
+  unknown_user: "The account to connect no longer exists.",
+  google_disabled: "Google sign-in is disabled in this authentication mode.",
+  storage_failed: "Signed in with Google, but the mailbox could not be saved. Apply supabase/migrations/0007_user_mailboxes.sql and try again.",
+};
+
 export async function logout(): Promise<void> {
   try { await api("/auth/logout", { method: "POST" }, { redirectOn401: false }); } catch {}
   clearSession();
@@ -87,7 +125,7 @@ export type ComparisonField = {
 };
 export type Comparison = { comparison_status: string; mismatch_count: number; required_field_count: number; message: string; fields: ComparisonField[]; mismatch_fields: string[]; review_fields: string[]; review_reason: string | null; compared_at: string };
 export type Draft = { id: string; draft_type: string; to: string[]; cc: string[]; subject: string; body: string; status: string; version: number; requires_external_approval: boolean; generated_by: string; evidence_refs: string[] };
-export type Attachment = { id: string; file_name: string; file_type: string; size_bytes: number; checksum: string; detected_type: string; detection_confidence: number; extraction_status: string; extraction_confidence: number; raw_text: string | null; page_count: number | null; is_duplicate_of: string | null };
+export type Attachment = { id: string; file_name: string; file_type: string; size_bytes: number; checksum: string; detected_type: string; detection_confidence: number; extraction_status: string; extraction_confidence: number; raw_text: string | null; page_count: number | null; is_duplicate_of: string | null; reader_note?: string | null; ocr?: boolean };
 export type CaseView = {
   id: string; source_email_id: string; intent: string; hackathon_category: string; action_required: boolean; priority: string; status: string;
   security: { outcome: string; score: number; signals: { signal: string; severity: string; evidence: string; recommended_action: string }[]; rationale: string };
@@ -105,6 +143,7 @@ export type CaseRow = {
   id: string; email_id: string; subject: string; sender: string; received_at: string | null; intent: string; category: string; security: string; action_required: boolean; priority: string;
   si_available: boolean; bl_available: boolean; attachments: number; mismatch_count: number; comparison_status: string | null; review_reason: string | null; confidence: number;
   assigned_user_id: string | null; shared_with: string[]; status: string; updated_at: string; summary: string; errors: number; drafts: number;
+  mailbox_user_id?: string | null; mailbox?: string | null;
 };
 export type Metrics = Record<string, any>;
 export type NotificationItem = { case_id: string; subject: string; status: string; priority: string; reason: string; updated_at: string };

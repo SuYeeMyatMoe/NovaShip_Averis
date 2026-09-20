@@ -393,6 +393,8 @@ class AttachmentMeta(BaseModel):
     raw_text: Optional[str] = None
     page_count: Optional[int] = None
     is_duplicate_of: Optional[str] = None
+    reader_note: Optional[str] = None   # e.g. "Text recovered via OCR (lower confidence)."
+    ocr: bool = False                   # text came from Gemini vision / pytesseract, not a text layer
 
 
 class EmailMessage(BaseModel):
@@ -411,6 +413,8 @@ class EmailMessage(BaseModel):
     attachments: list[AttachmentMeta] = Field(default_factory=list)
     checksum: str = ""
     is_duplicate_of: Optional[str] = None
+    mailbox_user_id: Optional[str] = None   # set when the message was pulled from a user's connected mailbox
+    mailbox_address: Optional[str] = None
 
 
 class ProcessingError(BaseModel):
@@ -518,6 +522,32 @@ class PartyContact(BaseModel):
     tenant_id: str = "tenant_april"
 
 
+class UserMailbox(BaseModel):
+    """A user's own Gmail connected through Google sign-in. The refresh token is stored encrypted only."""
+    user_id: str
+    tenant_id: str = "tenant_april"
+    provider: str = "gmail"
+    address: str
+    google_sub: Optional[str] = None
+    refresh_token_enc: str
+    scopes: list[str] = Field(default_factory=list)
+    status: str = "active"  # active | error | revoked
+    connected_at: datetime
+    last_polled_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+
+    def can_send(self) -> bool:
+        return self.status == "active" and "https://www.googleapis.com/auth/gmail.send" in self.scopes
+
+    def public(self) -> dict[str, Any]:
+        """Safe summary for API responses (never includes the token)."""
+        return {
+            "connected": True, "provider": self.provider, "address": self.address, "scopes": list(self.scopes), "status": self.status,
+            "can_send": self.can_send(), "connected_at": self.connected_at.isoformat(),
+            "last_polled_at": self.last_polled_at.isoformat() if self.last_polled_at else None, "last_error": self.last_error,
+        }
+
+
 class PolicyRecord(BaseModel):
     id: str
     version: str
@@ -585,7 +615,7 @@ class DraftDecision(BaseModel):
 class BatchRequest(BaseModel):
     action: Literal[
         "classify", "mark_no_action", "assign", "compare", "draft",
-        "export", "export_xlsx", "archive", "request_review"
+        "export", "export_xlsx", "report_xlsx", "archive", "request_review"
     ]
     case_ids: list[str]
     params: dict[str, Any] = Field(default_factory=dict)

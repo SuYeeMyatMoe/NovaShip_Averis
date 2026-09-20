@@ -59,6 +59,9 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+OCR_CONFIDENCE_CAP = 0.9  # extraction confidence ceiling for text recovered by OCR
+
+
 class Pipeline:
     def __init__(self, repo: BaseRepository) -> None:
         self.repo = repo
@@ -110,15 +113,18 @@ class Pipeline:
                 id=f"att_{eid}_{name.rsplit('.',1)[0].split('_')[-1]}_{rr.checksum[:8]}", source_email_id=eid, file_name=name, file_type=rr.file_type,
                 size_bytes=rr.size_bytes, checksum=rr.checksum, storage_pointer=pointer, extraction_status=rr.status,
                 raw_text=rr.text or None, page_count=rr.page_count, is_duplicate_of=dup_att,
+                reader_note=rr.note, ocr=bool(rr.note and "OCR" in rr.note and rr.text),
             ))
         email = EmailMessage(
             id=eid, provider=provider, provider_message_id=raw.get("provider_message_id", eid), conversation_id=raw.get("conversation_id"),
             sender=raw.get("from", "") or "", sender_name=raw.get("from_name"), recipients=raw.get("to", []) or [], cc=raw.get("cc", []) or [],
             subject=subject, body=body, received_at=received_at or datetime.utcnow(), language=detect_language(body), attachments=atts,
             checksum=checksum, is_duplicate_of=(dup.id if dup and dup.id != eid else None),
+            mailbox_user_id=raw.get("mailbox_user_id"), mailbox_address=raw.get("mailbox_address"),
         )
         self.repo.save_email(email)
-        self.audit(None, ActorType.SYSTEM, "connector", "EMAIL_RECEIVED", after={"email_id": eid, "sender": email.sender, "subject": subject[:120], "attachments": len(atts)})
+        self.audit(None, ActorType.SYSTEM, "connector", "EMAIL_RECEIVED", after={"email_id": eid, "sender": email.sender, "subject": subject[:120], "attachments": len(atts),
+                                                                                  **({"mailbox": email.mailbox_address} if email.mailbox_address else {})})
         return email
 
     # ------------------------------------------------------------- pipeline
@@ -233,6 +239,9 @@ class Pipeline:
         si_x = extract_seven_fields(si_att.raw_text or "", si_att.id)
         bl_x = extract_seven_fields(bl_att.raw_text or "", bl_att.id)
         si_att.extraction_confidence, bl_att.extraction_confidence = si_x.overall_confidence(), bl_x.overall_confidence()
+        for att in (si_att, bl_att):  # OCR provenance is visible in the confidence: capped, never boosted
+            if att.ocr:
+                att.extraction_confidence = min(att.extraction_confidence, OCR_CONFIDENCE_CAP)
         case.si_extraction, case.bl_extraction = si_x, bl_x
         self.repo.save_email(email)
         self._trace(case, "document_extractor", ActorType.AI, t0, {"si_confidence": si_x.overall_confidence(), "bl_confidence": bl_x.overall_confidence()}, pv)
