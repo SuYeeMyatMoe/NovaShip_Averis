@@ -84,7 +84,14 @@ class SupabaseRepository(BaseRepository):
             }).execute()
 
     def get_email(self, email_id: str) -> Optional[EmailMessage]:
-        res = self._t("email_messages").select("payload").eq("id", email_id).limit(1).execute()
+        res = (
+            self._t("email_messages")
+            .select("payload")
+            .eq("id", email_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return EmailMessage(**res.data[0]["payload"]) if res.data else None
 
     def list_emails(self) -> list[EmailMessage]:
@@ -92,11 +99,26 @@ class SupabaseRepository(BaseRepository):
         return [EmailMessage(**r["payload"]) for r in res.data]
 
     def find_email_by_checksum(self, checksum: str) -> Optional[EmailMessage]:
-        res = self._t("email_messages").select("payload").eq("checksum", checksum).limit(1).execute()
+        res = (
+            self._t("email_messages")
+            .select("payload")
+            .eq("checksum", checksum)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return EmailMessage(**res.data[0]["payload"]) if res.data else None
 
     def find_attachment_by_checksum(self, checksum: str) -> Optional[str]:
-        res = self._t("attachments").select("id").eq("checksum", checksum).gt("size_bytes", 0).limit(1).execute()
+        res = (
+            self._t("attachments")
+            .select("id")
+            .eq("checksum", checksum)
+            .eq("tenant_id", self.tenant)
+            .gt("size_bytes", 0)
+            .limit(1)
+            .execute()
+        )
         return res.data[0]["id"] if res.data else None
 
     def save_blob(self, pointer: str, data: bytes) -> None:
@@ -175,11 +197,25 @@ class SupabaseRepository(BaseRepository):
                                             "assigned_team_id": case.assigned_team_id, "assigned_at": case.updated_at.isoformat()}).execute()
 
     def get_case(self, case_id: str) -> Optional[CaseRecord]:
-        res = self._t("cases").select("payload").eq("id", case_id).limit(1).execute()
+        res = (
+            self._t("cases")
+            .select("payload")
+            .eq("id", case_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return CaseRecord(**res.data[0]["payload"]) if res.data else None
 
     def get_case_by_email(self, email_id: str) -> Optional[CaseRecord]:
-        res = self._t("cases").select("payload").eq("source_email_id", email_id).limit(1).execute()
+        res = (
+            self._t("cases")
+            .select("payload")
+            .eq("source_email_id", email_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return CaseRecord(**res.data[0]["payload"]) if res.data else None
 
     def list_cases(self) -> list[CaseRecord]:
@@ -189,6 +225,18 @@ class SupabaseRepository(BaseRepository):
     # ---- audit / errors / shares -----------------------------------------
     def append_audit(self, event: AuditEvent) -> None:
         self._t("audit_events").insert({**_j(event), "tenant_id": self.tenant}).execute()
+
+    def append_audit_once(self, event: AuditEvent) -> bool:
+        res = (
+            self._t("audit_events")
+            .upsert(
+                {**_j(event), "tenant_id": self.tenant},
+                on_conflict="event_id",
+                ignore_duplicates=True,
+            )
+            .execute()
+        )
+        return bool(res.data)
 
     def list_audit(self, case_id: Optional[str] = None) -> list[AuditEvent]:
         q = self._t("audit_events").select("*").eq("tenant_id", self.tenant).order("timestamp")
@@ -202,6 +250,65 @@ class SupabaseRepository(BaseRepository):
     def save_share(self, share: ShareRecord) -> None:
         self._t("shares").upsert({**_j(share), "tenant_id": self.tenant}).execute()
 
+    def claim_share_confirmation(
+        self,
+        share_id: str,
+        expected_status: str,
+        target_status: str,
+        started_at: datetime,
+        delivery_provider: Optional[str] = None,
+    ) -> Optional[ShareRecord]:
+        """Claim a retryable confirmation before any provider call."""
+        if (
+            expected_status not in {"PENDING_CONFIRMATION", "DELIVERY_FAILED"}
+            or target_status not in {"CONFIRMING", "DELIVERING"}
+            or (target_status == "DELIVERING") != bool(delivery_provider)
+        ):
+            return None
+        res = (
+            self._t("shares")
+            .update(
+                {
+                    "status": target_status,
+                    "confirmation_started_at": started_at.isoformat(),
+                    "delivery_provider": delivery_provider,
+                }
+            )
+            .eq("id", share_id)
+            .eq("tenant_id", self.tenant)
+            .eq("status", expected_status)
+            .execute()
+        )
+        if not res.data:
+            return None
+        return ShareRecord(
+            **{key: value for key, value in res.data[0].items() if key != "tenant_id"}
+        )
+
+    def complete_share_confirmation(
+        self,
+        share_id: str,
+        actor_id: str,
+        final_status: str,
+        delivery_mode: str,
+    ) -> Optional[ShareRecord]:
+        """Finalize case, audit, and share state in one PostgreSQL transaction."""
+        res = self.client.rpc(
+            "complete_share_confirmation",
+            {
+                "p_share_id": share_id,
+                "p_tenant_id": self.tenant,
+                "p_actor_id": actor_id,
+                "p_final_status": final_status,
+                "p_delivery_mode": delivery_mode,
+            },
+        ).execute()
+        if not res.data:
+            return None
+        return ShareRecord(
+            **{key: value for key, value in res.data[0].items() if key != "tenant_id"}
+        )
+
     def list_shares(self, case_id: Optional[str] = None) -> list[ShareRecord]:
         q = self._t("shares").select("*").eq("tenant_id", self.tenant)
         if case_id:
@@ -209,7 +316,14 @@ class SupabaseRepository(BaseRepository):
         return [ShareRecord(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in q.execute().data]
 
     def get_share(self, share_id: str) -> Optional[ShareRecord]:
-        res = self._t("shares").select("*").eq("id", share_id).limit(1).execute()
+        res = (
+            self._t("shares")
+            .select("*")
+            .eq("id", share_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return ShareRecord(**{k: v for k, v in res.data[0].items() if k != "tenant_id"}) if res.data else None
 
     # ---- users / parties / policy ----------------------------------------
@@ -260,7 +374,14 @@ class SupabaseRepository(BaseRepository):
         return [PartyContact(**r) for r in res.data]
 
     def get_party(self, party_id: str) -> Optional[PartyContact]:
-        res = self._t("party_contacts").select("*").eq("id", party_id).limit(1).execute()
+        res = (
+            self._t("party_contacts")
+            .select("*")
+            .eq("id", party_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return PartyContact(**res.data[0]) if res.data else None
 
     def get_active_policy(self) -> PolicyRecord:

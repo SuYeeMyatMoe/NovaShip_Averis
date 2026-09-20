@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import base64
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -299,11 +301,18 @@ def test_gmail_outbound_success_failure_and_idempotency(monkeypatch):
     assert len(calls) == 1
 
     repo2, service2, case2, supervisor2 = _service_with_draft()
-    monkeypatch.setattr(GmailConnector, "send", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("gmail unavailable")))
+    monkeypatch.delenv("GMAIL_CLIENT_ID")
     with pytest.raises(Exception) as caught:
         service2.approve_draft(case2.id, DraftDecision(draft_id="draft_gmail"), supervisor2)
     assert getattr(caught.value, "status_code", None) == 502
     assert repo2.get_case(case2.id).drafts[0].status == DraftStatus.SEND_FAILED
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "test-client-id")
+    retried = service2.approve_draft(
+        case2.id,
+        DraftDecision(draft_id="draft_gmail"),
+        supervisor2,
+    )
+    assert retried.drafts[0].status == DraftStatus.SENT
 
 
 def test_gmail_share_confirmation_preserves_id_and_custom_message(monkeypatch):
@@ -324,3 +333,288 @@ def test_gmail_share_confirmation_preserves_id_and_custom_message(monkeypatch):
     assert sent["share"]["message"] == original["message"]
     assert sent["share"]["message"].startswith(custom)
     assert len(repo.list_shares(case.id)) == 1
+
+
+def test_gmail_share_retry_after_database_failure_does_not_resend(monkeypatch):
+    class FailOnceFinalizeRepository(MemoryRepository):
+        def __init__(self):
+            super().__init__()
+            self.fail_once = True
+
+        def complete_share_confirmation(self, *args, **kwargs):
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("transient database failure")
+            return super().complete_share_confirmation(*args, **kwargs)
+
+    _gmail_env(monkeypatch, send=True)
+    calls = []
+    monkeypatch.setattr(
+        GmailConnector,
+        "send",
+        lambda *_args, **_kwargs: calls.append(True) or {"status": 200, "id": "gmail-once"},
+    )
+    repo = FailOnceFinalizeRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+
+    with pytest.raises(RuntimeError, match="transient database failure"):
+        service.confirm_share("case_email_004", share_id, supervisor)
+
+    accepted = repo.get_share(share_id)
+    assert accepted is not None and accepted.status == "DELIVERY_ACCEPTED"
+    assert accepted.delivery_provider == "gmail"
+    assert accepted.provider_message_id == "gmail-once"
+    repo.parties["p_safqa"].approved = False
+
+    completed = service.confirm_share("case_email_004", share_id, supervisor)
+
+    assert completed["share"]["status"] == "SENT"
+    assert len(calls) == 1
+    assert sum(
+        event.action == "NOTIFY_PARTY_SENT"
+        and event.after
+        and event.after.get("provider_message_id") == "gmail-once"
+        for event in repo.list_audit("case_email_004")
+    ) == 1
+
+
+def test_gmail_draft_ambiguous_timeout_blocks_automatic_resend(monkeypatch):
+    _gmail_env(monkeypatch, send=True)
+    calls = []
+
+    def accepted_then_timed_out(*_args, **_kwargs):
+        calls.append("provider-accepted")
+        raise TimeoutError("response lost after acceptance")
+
+    monkeypatch.setattr(GmailConnector, "send", accepted_then_timed_out)
+    repo, service, case, supervisor = _service_with_draft()
+
+    with pytest.raises(Exception) as first:
+        service.approve_draft(
+            case.id,
+            DraftDecision(draft_id="draft_gmail"),
+            supervisor,
+        )
+
+    assert getattr(first.value, "status_code", None) == 502
+    assert getattr(first.value, "detail", {}).get("retryable") is False
+    persisted = repo.get_case(case.id)
+    assert persisted.drafts[0].status == DraftStatus.DELIVERY_UNKNOWN
+    assert any(
+        error.category.value == "NOTIFICATION_ERROR" and not error.retryable
+        for error in persisted.errors
+    )
+    assert any(
+        event.action == "NOTIFICATION_OUTCOME_UNKNOWN"
+        for event in repo.list_audit(case.id)
+    )
+
+    with pytest.raises(Exception) as repeated:
+        service.approve_draft(
+            case.id,
+            DraftDecision(draft_id="draft_gmail"),
+            supervisor,
+        )
+
+    assert getattr(repeated.value, "status_code", None) == 409
+    assert getattr(repeated.value, "detail", {}).get("retryable") is False
+    assert calls == ["provider-accepted"]
+
+
+def test_gmail_share_ambiguous_timeout_blocks_automatic_resend(monkeypatch):
+    _gmail_env(monkeypatch, send=True)
+    calls = []
+
+    def accepted_then_timed_out(*_args, **_kwargs):
+        calls.append("provider-accepted")
+        raise TimeoutError("response lost after acceptance")
+
+    monkeypatch.setattr(GmailConnector, "send", accepted_then_timed_out)
+    repo = MemoryRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+
+    with pytest.raises(Exception) as first:
+        service.confirm_share("case_email_004", share_id, supervisor)
+
+    assert getattr(first.value, "status_code", None) == 502
+    assert getattr(first.value, "detail", {}).get("retryable") is False
+    persisted = repo.get_share(share_id)
+    assert persisted is not None and persisted.status == "DELIVERY_UNKNOWN"
+    assert "p_safqa" not in repo.get_case("case_email_004").shared_with
+    assert not any(
+        event.action == "NOTIFY_PARTY_SENT"
+        and event.after
+        and event.after.get("share_id") == share_id
+        for event in repo.list_audit("case_email_004")
+    )
+
+    with pytest.raises(Exception) as repeated:
+        service.confirm_share("case_email_004", share_id, supervisor)
+
+    assert getattr(repeated.value, "status_code", None) == 409
+    assert getattr(repeated.value, "detail", {}).get("retryable") is False
+    assert calls == ["provider-accepted"]
+
+
+def test_gmail_share_definite_preflight_failure_can_retry(monkeypatch):
+    _gmail_env(monkeypatch, send=True)
+    calls = []
+    monkeypatch.setattr(
+        GmailConnector,
+        "send",
+        lambda *_args, **_kwargs: calls.append(True)
+        or {"status": 200, "id": "gmail-after-preflight-fix"},
+    )
+    repo = MemoryRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+    monkeypatch.delenv("GMAIL_CLIENT_ID")
+
+    with pytest.raises(Exception) as first:
+        service.confirm_share("case_email_004", share_id, supervisor)
+
+    assert getattr(first.value, "status_code", None) == 502
+    assert getattr(first.value, "detail", {}).get("retryable") is True
+    failed = repo.get_share(share_id)
+    assert failed is not None and failed.status == "DELIVERY_FAILED"
+    assert calls == []
+
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "test-client-id")
+    completed = service.confirm_share("case_email_004", share_id, supervisor)
+
+    assert completed["share"]["status"] == "SENT"
+    assert completed["share"]["provider_message_id"] == "gmail-after-preflight-fix"
+    assert calls == [True]
+
+
+def test_gmail_share_inflight_delivery_blocks_automatic_resend(monkeypatch):
+    _gmail_env(monkeypatch, send=True)
+    calls = []
+    monkeypatch.setattr(
+        GmailConnector,
+        "send",
+        lambda *_args, **_kwargs: calls.append(True) or {"status": 200, "id": "unexpected"},
+    )
+    repo = MemoryRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share = repo.get_share(preview["share"]["id"])
+    assert share is not None
+    share.status = "DELIVERING"
+    share.delivery_provider = "gmail"
+    repo.save_share(share)
+
+    with pytest.raises(Exception) as caught:
+        service.confirm_share("case_email_004", share.id, supervisor)
+
+    assert getattr(caught.value, "status_code", None) == 409
+    assert getattr(caught.value, "detail", {}).get("retryable") is False
+    assert calls == []
+
+
+def test_concurrent_gmail_share_confirmation_sends_once(monkeypatch):
+    class DetachedShareRepository(MemoryRepository):
+        def __init__(self):
+            super().__init__()
+            self.confirm_barrier: threading.Barrier | None = None
+            self.confirm_reads = 0
+
+        def get_share(self, share_id):
+            with self._lock:
+                share = self.shares.get(share_id)
+                detached = share.model_copy(deep=True) if share else None
+                barrier = self.confirm_barrier
+                if barrier is not None:
+                    self.confirm_reads += 1
+                    if self.confirm_reads == barrier.parties:
+                        self.confirm_barrier = None
+            if barrier is not None:
+                barrier.wait()
+            return detached
+
+    _gmail_env(monkeypatch, send=True)
+    calls = []
+    monkeypatch.setattr(
+        GmailConnector,
+        "send",
+        lambda *_args, **_kwargs: calls.append(True) or {"status": 200, "id": "gmail-concurrent"},
+    )
+    repo = DetachedShareRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+    repo.confirm_barrier = threading.Barrier(2)
+
+    def confirm_once():
+        try:
+            return service.confirm_share("case_email_004", share_id, supervisor)
+        except Exception as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: confirm_once(), range(2)))
+
+    persisted = repo.get_share(share_id)
+    assert persisted is not None and persisted.status == "SENT"
+    assert persisted.provider_message_id == "gmail-concurrent"
+    assert len(calls) == 1
+    assert any(isinstance(result, dict) for result in results)
+    assert all(
+        isinstance(result, dict) or getattr(result, "status_code", None) == 409
+        for result in results
+    )

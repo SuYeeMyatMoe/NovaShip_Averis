@@ -48,7 +48,7 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
   const doSend = async () => {
     if (!chosen) return; setBusy(true);
     try {
-      const r = chosen.external && preview?.share?.id ? await post(`/cases/${c.id}/share/${preview.share.id}/confirm`) : await post(`/cases/${c.id}/share`, body(false, true));
+      const r = preview?.share?.id ? await post(`/cases/${c.id}/share/${preview.share.id}/confirm`) : await post(`/cases/${c.id}/share`, body(false, true));
       say(r.share.is_external ? "External notification sent & audited" : "Shared internally & audited"); setPreview(null); setPick(""); onChange(); reload();
     } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); }
   };
@@ -123,13 +123,13 @@ export function CollaborationPanel({ c, onChange, say }: { c: CaseView; onChange
             <div className="mt-3 space-y-2">
               <div className="flex min-w-0 items-center gap-2 text-xs"><Badge className={`shrink-0 ${preview.share.is_external ? "bg-accent-soft text-accent-fg" : "bg-ink-100 text-ink-700"}`}>{preview.share.is_external ? "External" : "Internal"}</Badge><span className="min-w-0 truncate text-ink-500">to {preview.share.recipient_label}</span></div>
               <pre className="whitespace-pre-wrap rounded-md bg-ink-50 p-3 font-mono text-[11px] text-ink-900">{preview.preview}</pre>
-              <StepHeading n={4} title={preview.requires_confirmation ? "Confirm and send to the external party" : "Send / share"} done={false} />
-              {preview.requires_confirmation ? (
+              <StepHeading n={4} title={preview.share.is_external ? "Confirm and send to the external party" : "Send / share internally"} done={false} />
+              {preview.share.is_external ? (
                 <div className="rounded-md border border-review bg-review-bg p-3 text-xs text-review-fg">
                   <b>Human confirmation required for external sending.</b> Only the fields listed above are disclosed. The original email body is not included.
                   <div className="mt-2"><Button kind="success" disabled={busy} onClick={doSend}>Confirm & send to external party</Button></div>
                 </div>
-              ) : <Button kind="primary" disabled={busy} onClick={doSend}>Send / share</Button>}
+              ) : <Button kind="primary" disabled={busy} onClick={doSend}>Send / share internally</Button>}
             </div>
           ) : <p className="mt-2 text-xs text-ink-500">{chosen ? "Preview shows the exact fields and message the recipient will receive." : "Select a recipient first."}</p>}
         </section>

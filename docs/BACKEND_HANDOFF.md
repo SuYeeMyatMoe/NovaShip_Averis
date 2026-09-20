@@ -81,6 +81,7 @@ After Vercel import:
 7. controlled Gmail poll persists at most one case for one provider message;
 8. a paused graph still exists after instance replacement/redeploy and can resume;
 9. `EMAIL_SEND_MODE=simulate` results in no real email;
-10. no server secret appears in browser bundles or logs.
+10. an ambiguous live Gmail response becomes `DELIVERY_UNKNOWN` and does not resend automatically;
+11. no server secret appears in browser bundles or logs.
 
 No further backend feature work is required unless the deployed platform reveals a platform-specific defect.

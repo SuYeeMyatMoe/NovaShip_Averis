@@ -160,8 +160,8 @@ Temporarily leave a service out while iterating:
 ### A. Before Supabase, email and keys (offline, memory repo)
 ```bash
 cd backend
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 58 tests
-python scripts/run_bundle.py                                      # FINAL SCORE = 1.0000
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q            # 141 tests
+python scripts/run_bundle.py                                      # score requires the private ground-truth file
 python -m app.agents.create_index                                 # local RAG index
 uvicorn app.main:app --port 8000                                  # then in another terminal:
 curl -s -X POST localhost:8000/agent/run/case_email_004 -H "X-User-Id: u_sup_1"      # paused: true, next: ["human_review"]

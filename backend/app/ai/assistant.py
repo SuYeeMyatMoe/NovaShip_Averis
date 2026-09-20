@@ -32,9 +32,20 @@ from app.core.policy import explain_policy
 BLOCKED_PATTERNS = [
     (r"\b(send|email|forward|dispatch)\b.*\b(now|directly|immediately|without (approval|review))", "I can prepare a draft, but sending requires a human to approve it in the Draft Actions tab."),
     (r"\b(bypass|skip|ignore)\b.*\b(approval|review|policy|check)", "I can't bypass the approval or policy gates. A supervisor can review the policy in Settings > Policies."),
-    (r"\b(other|another|different)\s+case\b|\bcase[_\s-]?\d{2,}\b(?!.*this)", "I can only answer about the current case. Open the other case to ask about it."),
+    (r"\b(approve|authori[sz]e|confirm)\b.*\b(for me|on my behalf|instead of me|this|it)\b", "I can't approve or confirm on a person's behalf. An authorised user must perform that action in the case workflow."),
+    (r"\b(other|another|different)\s+case\b", "I can only answer about the current case. Open the other case to ask about it."),
     (r"\b(make up|invent|pretend|assume)\b.*\b(value|mismatch|field)", "I only report values that appear in the documents and the deterministic comparison; I won't invent values."),
 ]
+
+_CASE_ID_RE = re.compile(r"\bcase(?:[_\s-][a-z]+)*[_\s-]?\d+\b", re.I)
+
+
+def _normalise_case_id(value: str) -> str:
+    normalised = re.sub(r"[_\s-]+", "_", value.strip().lower())
+    numeric_suffix = re.search(r"(?:^|_)(\d+)$", normalised)
+    if numeric_suffix:
+        return str(int(numeric_suffix.group(1)))
+    return normalised
 
 
 def _cite(kind: str, ref: str, snippet: str = "") -> dict[str, Any]:
@@ -69,6 +80,16 @@ def build_context(case: CaseRecord, email: EmailMessage, audit: list[AuditEvent]
 def answer_question(question: str, case: CaseRecord, email: EmailMessage, audit: list[AuditEvent], policy: dict[str, Any], language: Optional[str] = None) -> AskResponse:
     q = question.strip()
     ql = q.lower()
+
+    current_case_id = _normalise_case_id(case.id)
+    mentioned_case_ids = {_normalise_case_id(match.group(0)) for match in _CASE_ID_RE.finditer(q)}
+    if any(case_id != current_case_id for case_id in mentioned_case_ids):
+        return AskResponse(
+            answer="I can only answer about the current case. Open the other case to ask about it.",
+            citations=[_cite("policy", "communication")],
+            grounded=True,
+            refused=True,
+        )
 
     for pat, msg in BLOCKED_PATTERNS:
         if re.search(pat, ql):
@@ -224,6 +245,123 @@ _LLM_SYSTEM = """You are the NovaShip case assistant. Answer ONLY from the JSON 
 Rules: never claim a mismatch unless comparison.fields shows result MISMATCH; never say you sent anything;
 the Notify Party value is NOT permission to contact anyone; if the answer is not in the context, say so. Be concise."""
 
+_LLM_ACTION_VERBS = (
+    r"sent|emailed|forwarded|dispatched|approved|authori[sz]ed|confirmed|granted"
+)
+_LLM_ACTION_MODIFIERS = r"(?:(?:already|just|now|successfully|recently)\s+)*"
+_LLM_COMPLETED_ACTION = re.compile(
+    rf"""
+    (?:
+        \b(?:i|we|the\s+assistant|novaship)
+        (?:['’]ve|\s+(?:have|has))?\s+
+        {_LLM_ACTION_MODIFIERS}(?:{_LLM_ACTION_VERBS})\b
+      |
+        \b(?:{_LLM_ACTION_VERBS})\b
+        [^.!?\n]{{0,40}}\bby\s+(?:me|us|the\s+assistant|novaship)\b
+      |
+        \b(?:email|message|draft|notification|share|request|correction|it|approval|permission|authori[sz]ation)\b
+        [^.!?\n]{{0,40}}\b
+        (?:
+            (?:
+                (?:is|are|was|were)\s+
+              |
+                (?:has|have)\s+{_LLM_ACTION_MODIFIERS}been\s+
+            )
+            {_LLM_ACTION_MODIFIERS}(?:{_LLM_ACTION_VERBS})\b
+          |
+            {_LLM_ACTION_MODIFIERS}(?:went|gone)\s+out\b
+        )
+    )
+    """,
+    re.I | re.X,
+)
+_LLM_MISMATCH_CLAIM = re.compile(
+    r"\b(?:mismatch(?:ed)?|differ(?:s|ed|ent)?|discrepanc(?:y|ies)|conflict(?:s|ing)?|"
+    r"wrong|incorrect|does\s+not\s+match|do\s+not\s+match|not\s+matching|"
+    r"requires?\s+correction|must\s+be\s+corrected)\b",
+    re.I,
+)
+_LLM_MATCH_CLAIM = re.compile(
+    r"\b(?:match(?:es|ed|ing)?|same|identical|consistent|align(?:s|ed)?)\b",
+    re.I,
+)
+
+_LLM_FIELD_ALIASES = {
+    "shipper": {"shipper", "exporter"},
+    "consignee": {"consignee"},
+    "notify_party": {"notify party", "notify"},
+    "port_of_loading": {"port of loading", "load port", "loading port", "pol"},
+    "port_of_discharge": {"port of discharge", "discharge port", "pod"},
+    "container_count": {"container count", "container", "containers"},
+    "gross_weight_kg": {"gross weight (kg)", "gross weight kg", "gross weight", "weight"},
+}
+
+
+def _normalise_claim_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _llm_output_is_grounded(text: str, ctx: dict[str, Any]) -> bool:
+    """Reject model claims that cross deterministic data/action boundaries."""
+    if _LLM_COMPLETED_ACTION.search(text):
+        return False
+
+    comparison = ctx.get("comparison") or {}
+    field_context = {
+        field["field"]: field
+        for field in comparison.get("fields", [])
+        if field.get("field") in SEVEN_FIELDS
+    }
+    flagged = {
+        field_name
+        for field_name, field in field_context.items()
+        if field.get("result") == "MISMATCH"
+    }
+    segments = [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?;])\s+|\n+", text)
+        if segment.strip()
+    ]
+
+    for field_name in SEVEN_FIELDS:
+        aliases = {
+            FIELD_LABELS[field_name],
+            field_name.replace("_", " "),
+            *_LLM_FIELD_ALIASES[field_name],
+        }
+        field_pattern = re.compile(
+            r"\b(?:" + "|".join(re.escape(alias) for alias in aliases) + r")\b",
+            re.I,
+        )
+        for segment in segments:
+            if not field_pattern.search(segment):
+                continue
+            mismatch_claim = bool(_LLM_MISMATCH_CLAIM.search(segment))
+            match_claim = not mismatch_claim and bool(_LLM_MATCH_CLAIM.search(segment))
+            result = field_context.get(field_name, {}).get("result")
+            if mismatch_claim and field_name not in flagged:
+                return False
+            if match_claim and result != "MATCH":
+                return False
+
+            known_values = {
+                _normalise_claim_text(value)
+                for value in (
+                    field_context.get(field_name, {}).get("si"),
+                    field_context.get(field_name, {}).get("bl"),
+                )
+                if value not in (None, "")
+            }
+            normalised_segment = _normalise_claim_text(segment)
+            has_known_value = any(
+                value in normalised_segment
+                for value in known_values
+            )
+            if not has_known_value and not mismatch_claim and not match_claim:
+                return False
+
+    return True
+
 
 def _llm_answer(question: str, ctx: dict[str, Any]) -> Optional[str]:
     llm = get_llm()
@@ -235,11 +373,8 @@ def _llm_answer(question: str, ctx: dict[str, Any]) -> Optional[str]:
     if not res or res.text.startswith("__LLM_ERROR__"):
         return None
     text = res.text.strip()
-    # post-check: the LLM must not name a MISMATCH field the comparator did not flag
-    flagged = {f["field"] for f in (ctx.get("comparison") or {}).get("fields", []) if f["result"] == "MISMATCH"}
-    for f in SEVEN_FIELDS:
-        if f not in flagged and re.search(rf"{FIELD_LABELS[f].lower()}[^.]*\bmismatch", text.lower()):
-            return None
+    if not _llm_output_is_grounded(text, ctx):
+        return None
     return text
 
 
@@ -248,8 +383,18 @@ def _llm_answer(question: str, ctx: dict[str, Any]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 LANG_NAMES = {"en": "English", "zh": "Chinese", "ms": "Malay", "id": "Indonesian", "vi": "Vietnamese", "ko": "Korean", "ar": "Arabic", "fr": "French", "es": "Spanish", "de": "German", "ja": "Japanese"}
 _PROTECT = re.compile(r"\b[A-Z]{3,}[A-Z0-9\-]*\d[A-Z0-9\-]*\b|\b\d[\d,\.]*\s?(KG|kg|MT|x\s?\d0'[A-Z]{2})\b|\b5[A-Z]{3}-\d{5}\b")
-
-
+_COMPANY_NAME = re.compile(
+    r"(?<!\w)(?:[A-Z0-9][A-Z0-9&.,'()/-]*\s+){1,10}"
+    r"(?:LTD|LIMITED|LLC|LLP|INC|CORP|CORPORATION|SDN\s+BHD|PTE\s+LTD|"
+    r"PTY\s+LTD|CO\.,?\s+LTD|FZE|FZ-LLC|GMBH|PLC|S\.?A\.?|S\.?P\.?A\.?|B\.?V\.?)\b",
+    re.I,
+)
+_LABELED_PROTECTED_VALUE = re.compile(
+    r"(?im)^((?:Shipper(?:/Exporter)?|Consignee|Notify Party|Notify|"
+    r"Port of Loading|Load Port|POL|Port of Discharge|Discharge Port|POD|"
+    r"No\. of Containers or Packages|Container Count|Gross Weight(?: \(KG\))?|"
+    r"Gross Wt(?: \(kgs\))?|Booking Ref|Bill of Lading No\.)\s*:\s*)(.+)$"
+)
 def _target_language(q: str) -> Optional[str]:
     for code, name in LANG_NAMES.items():
         if name.lower() in q or f" {code} " in f" {q} ":
@@ -276,12 +421,18 @@ def translate_text(text: str, target: str) -> str:
     llm = get_llm()
     protected: dict[str, str] = {}
 
-    def _mask(m: re.Match) -> str:
+    def _mask_value(value: str) -> str:
         key = f"__ID{len(protected)}__"
-        protected[key] = m.group(0)
+        protected[key] = value
         return key
 
-    masked = _PROTECT.sub(_mask, text)
+    masked = _LABELED_PROTECTED_VALUE.sub(
+        lambda match: match.group(1) + _mask_value(match.group(2)),
+        text,
+    )
+    masked = _COMPANY_NAME.sub(lambda match: _mask_value(match.group(0)), masked)
+    masked = _PROTECT.sub(lambda match: _mask_value(match.group(0)), masked)
+    expected_tokens = re.findall(r"__ID\d+__", masked)
     if not llm.enabled:
         note = f"[Translation to {LANG_NAMES.get(target, target)} requires LLM_PROVIDER; showing original]\n\n"
         return note + text
@@ -292,6 +443,9 @@ def translate_text(text: str, target: str) -> str:
     if not res or res.text.startswith("__LLM_ERROR__"):
         return text
     out = res.text
+    returned_tokens = re.findall(r"__ID\d+__", out)
+    if returned_tokens != expected_tokens:
+        return text
     for k, v in protected.items():
         out = out.replace(k, v)
     return out
@@ -300,26 +454,29 @@ def translate_text(text: str, target: str) -> str:
 # ---------------------------------------------------------------------------
 # Share / Notify Party message assistant (minimal-data sharing)
 # ---------------------------------------------------------------------------
-def build_share_message(case: CaseRecord, email: EmailMessage, recipient_label: str, is_external: bool, include_fields: list[str], due_date: Optional[str]) -> tuple[str, dict[str, Any]]:
+def build_share_message(case: CaseRecord, email: EmailMessage, recipient_label: str, is_external: bool, include_fields: Optional[list[str]], due_date: Optional[str]) -> tuple[str, dict[str, Any]]:
     cmp = case.comparison
     fields = []
     if cmp:
-        chosen = include_fields or cmp.mismatch_fields or []
+        chosen = cmp.mismatch_fields if include_fields is None else include_fields
         for f in cmp.fields:
             if f.field in chosen:
                 fields.append({"field": f.field, "label": f.label, "result": f.result.value, "si": f.si_original, "bl": f.bl_original})
+    subject = "" if is_external else email.subject
+    summary = "" if is_external else (case.summary.text if case.summary else "")
     payload = {
         "case_id": case.id,
-        "subject": email.subject,
-        "summary": case.summary.text if case.summary else "",
+        "subject": subject,
+        "summary": summary,
         "fields": fields,
         "required_action": case.recommendation.recommended_action if case.recommendation else "",
         "due_date": due_date,
         "recipient": recipient_label,
         "external": is_external,
     }
-    lines = [f"Case {case.id} - {email.subject}", ""]
-    lines.append(payload["summary"])
+    lines = [f"Case {case.id}" + (f" - {subject}" if subject else "")]
+    if summary:
+        lines += ["", summary]
     if fields:
         lines.append("")
         lines.append("Fields requiring attention:")

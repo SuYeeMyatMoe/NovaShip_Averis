@@ -168,7 +168,7 @@ def test_gmail_success_failure_and_sent_idempotency(monkeypatch):
     assert len(calls) == 1
 
     repo2, service2, case2, supervisor2 = _service_with_draft()
-    monkeypatch.setattr(GmailConnector, "send", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")))
+    monkeypatch.delenv("GMAIL_CLIENT_ID")
     with pytest.raises(Exception) as caught:
         service2.approve_draft(case2.id, DraftDecision(draft_id="draft_hardening"), supervisor2)
     assert getattr(caught.value, "status_code", None) == 502

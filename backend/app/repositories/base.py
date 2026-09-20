@@ -8,6 +8,7 @@ Selected by REPO_BACKEND=memory|supabase.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, Optional
 
 from app.contracts.schemas import (
@@ -65,11 +66,30 @@ class BaseRepository(ABC):
     @abstractmethod
     def append_audit(self, event: AuditEvent) -> None: ...
     @abstractmethod
+    def append_audit_once(self, event: AuditEvent) -> bool: ...
+    @abstractmethod
     def list_audit(self, case_id: Optional[str] = None) -> list[AuditEvent]: ...
     @abstractmethod
     def save_error(self, err: ProcessingError) -> None: ...
     @abstractmethod
     def save_share(self, share: ShareRecord) -> None: ...
+    @abstractmethod
+    def claim_share_confirmation(
+        self,
+        share_id: str,
+        expected_status: str,
+        target_status: str,
+        started_at: datetime,
+        delivery_provider: Optional[str] = None,
+    ) -> Optional[ShareRecord]: ...
+    @abstractmethod
+    def complete_share_confirmation(
+        self,
+        share_id: str,
+        actor_id: str,
+        final_status: str,
+        delivery_mode: str,
+    ) -> Optional[ShareRecord]: ...
     @abstractmethod
     def list_shares(self, case_id: Optional[str] = None) -> list[ShareRecord]: ...
     @abstractmethod

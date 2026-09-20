@@ -120,6 +120,8 @@ The live column is `vector(768)`. A replacement embedding provider must return 7
 
 Keep `EMAIL_SEND_MODE=simulate` until the deployed human-approval and recipient controls are verified. Only then intentionally set `EMAIL_SEND_MODE=gmail`.
 
+Outbound delivery is fail-closed. Drafts and shares are persisted as `DELIVERING` before Gmail is called. A confirmed provider response reaches `SENT`; an interrupted or ambiguous response becomes `DELIVERY_UNKNOWN`, blocks automatic resend, and must be reconciled against the Gmail Sent mailbox before an operator takes further action.
+
 ## Production gate
 
 Before claiming production readiness verify:

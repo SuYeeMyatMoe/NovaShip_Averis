@@ -130,6 +130,8 @@ EMAIL_SEND_MODE=simulate
 
 Inbound Gmail is real. Outbound remains non-delivery until the team intentionally enables it after validating human approval.
 
+When real outbound is enabled, `DELIVERY_UNKNOWN` is intentionally not retried. Reconcile the recipient, subject and approval timestamp against the Gmail Sent mailbox before any manual resend; a lost response may mean Gmail already accepted the message.
+
 Do not run the OAuth authorization helper in Vercel. Obtain/refresh OAuth credentials in a trusted local environment, then store them as Vercel secrets.
 
 ## 7. Troubleshooting
@@ -154,6 +156,10 @@ SUPABASE_VECTOR_DIMENSIONS=768
 ### Gmail 401/403
 
 Reauthorize locally and replace the refresh-token secret.
+
+### Outbound item is `DELIVERY_UNKNOWN`
+
+Do not retry automatically. Check the Gmail Sent mailbox using the audited recipient, subject and approval time. Escalate for an explicit operator decision if the outcome cannot be proven.
 
 ### Login page exposes demo users/password
 

@@ -1,7 +1,11 @@
 """Pipeline, extraction, security, Notify Party, RBAC and E2E API tests (spec section 27)."""
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import threading
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,9 +16,20 @@ os.environ["LLM_PROVIDER"] = "none"
 
 from app.ai.extractor import extract_seven_fields  # noqa: E402
 from app.ai.security_precheck import assess_security  # noqa: E402
-from app.contracts.schemas import CaseStatus, EmailMessage, SecurityOutcome  # noqa: E402
+from app.contracts.schemas import (  # noqa: E402
+    ActorType,
+    AuditEvent,
+    CaseStatus,
+    EmailMessage,
+    RecipientType,
+    SecurityOutcome,
+    ShareRequest,
+)
 from app.main import app  # noqa: E402
 from app.readers.document_reader import read_document  # noqa: E402
+from app.repositories.memory import MemoryRepository  # noqa: E402
+from app.repositories.supabase_repo import SupabaseRepository  # noqa: E402
+from app.services.case_service import CaseService  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = ROOT / "sdoc-hackathon-bundle"
@@ -134,12 +149,38 @@ def test_e2e_mismatch_flow_with_notify_party_and_audit():
     np = client.post(f"/cases/{cid}/notify-party", headers=SUP).json()
     assert np["notify_party"]["match"] is True and np["recipients"]
     assert client.get(f"/cases/{cid}", headers=OPS).json()["status"] == "NOTIFY_PARTY"
-    preview = client.post(f"/cases/{cid}/share", json={"recipient_type": "NOTIFY_PARTY_CONTACT", "recipient_party_id": "p_safqa", "preview_only": True}, headers=SUP).json()
+    preview = client.post(
+        f"/cases/{cid}/share",
+        json={
+            "recipient_type": "NOTIFY_PARTY_CONTACT",
+            "recipient_party_id": "p_safqa",
+            "message": "CUSTOM REVIEW NOTE",
+            "preview_only": True,
+        },
+        headers=SUP,
+    ).json()
     assert preview["requires_confirmation"] is True
     assert [f["field"] for f in preview["payload"]["fields"]] == ["container_count"]  # only the mismatch is shared
     assert "Attached are the SI" not in preview["preview"]  # original email body not leaked
     sent = client.post(f"/cases/{cid}/share/{preview['share']['id']}/confirm", headers=SUP).json()
     assert sent["requires_confirmation"] is False and sent["share"]["status"] == "SIMULATED"
+    assert sent["share"]["id"] == preview["share"]["id"]
+    assert sent["preview"] == preview["preview"]
+    assert sent["payload"] == preview["payload"]
+    assert "CUSTOM REVIEW NOTE" in sent["preview"]
+    shares = client.get(f"/cases/{cid}/audit", headers=SUP).json()["shares"]
+    assert [share["id"] for share in shares].count(preview["share"]["id"]) == 1
+    assert not any(share["status"] == "PENDING_CONFIRMATION" for share in shares)
+    repeated = client.post(
+        f"/cases/{cid}/share/{preview['share']['id']}/confirm",
+        headers=SUP,
+    ).json()
+    assert repeated["share"]["id"] == preview["share"]["id"]
+    audit_after_repeat = client.get(f"/cases/{cid}/audit", headers=SUP).json()
+    assert sum(
+        event["action"] == "NOTIFY_PARTY_SIMULATED"
+        for event in audit_after_repeat["events"]
+    ) == 1
     assert client.get(f"/cases/{cid}", headers=OPS).json()["status"] == "AWAITING_RESPONSE"
 
     # approve draft (supervisor) -> sent (simulated) ; complete
@@ -166,6 +207,605 @@ def test_all_match_gives_no_mismatch_message_and_confirmation_draft():
     assert case["comparison"]["message"] == "No mismatch detected."
     assert case["mismatch_count"] == 0 and case["status"] == "DRAFT_READY"
     assert case["drafts"][0]["draft_type"] == "CONFIRMATION"
+
+
+def test_explicit_empty_external_share_discloses_no_fields():
+    case = _ingest(
+        "share_empty_001",
+        "TO CONFIRM DOCS _ EMPTY DISCLOSURE",
+        "Attached documents are for the explicit-empty disclosure test.",
+        "docs@vitalsolutions.sg",
+        {"share_empty_SI.txt": SI_TXT, "share_empty_BL.txt": BL_TXT},
+    )
+    cid = case["id"]
+
+    preview = client.post(
+        f"/cases/{cid}/share",
+        json={
+            "recipient_type": "NOTIFY_PARTY_CONTACT",
+            "recipient_party_id": "p_safqa",
+            "include_fields": [],
+            "preview_only": True,
+        },
+        headers=SUP,
+    )
+
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["payload"]["fields"] == []
+    assert "Container Count:" not in body["preview"]
+    assert "3 x 40'HC" not in body["preview"]
+    assert "4 x 40'HC" not in body["preview"]
+
+
+def test_concurrent_share_confirmation_emits_one_send_event():
+    class DetachedShareRepository(MemoryRepository):
+        """Model database reads by returning separate record instances."""
+
+        def __init__(self):
+            super().__init__()
+            self.confirm_barrier: threading.Barrier | None = None
+            self.confirm_reads = 0
+
+        def get_share(self, share_id):
+            with self._lock:
+                share = self.shares.get(share_id)
+                detached = share.model_copy(deep=True) if share else None
+                barrier = self.confirm_barrier
+                if barrier is not None:
+                    self.confirm_reads += 1
+                    if self.confirm_reads == barrier.parties:
+                        self.confirm_barrier = None
+            if barrier is not None:
+                barrier.wait()
+            return detached
+
+    repo = DetachedShareRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+    before = sum(
+        event.action == "NOTIFY_PARTY_SIMULATED"
+        for event in repo.list_audit("case_email_004")
+    )
+
+    repo.confirm_barrier = threading.Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _: service.confirm_share(
+                    "case_email_004",
+                    share_id,
+                    supervisor,
+                ),
+                range(2),
+            )
+        )
+
+    after = sum(
+        event.action == "NOTIFY_PARTY_SIMULATED"
+        for event in repo.list_audit("case_email_004")
+    )
+    assert after - before == 1
+    assert {result["share"]["id"] for result in results} == {share_id}
+    assert {result["share"]["status"] for result in results} == {"SIMULATED"}
+
+
+def test_share_confirmation_retry_repairs_an_audit_failure():
+    class FailOnceAuditRepository(MemoryRepository):
+        def __init__(self):
+            super().__init__()
+            self.fail_send_audit_once = True
+
+        def get_case(self, case_id):
+            case = super().get_case(case_id)
+            return case.model_copy(deep=True) if case else None
+
+        def _raise_once_for_send(self, event):
+            if self.fail_send_audit_once and event.action == "NOTIFY_PARTY_SIMULATED":
+                self.fail_send_audit_once = False
+                raise RuntimeError("transient audit failure")
+
+        def append_audit(self, event):
+            self._raise_once_for_send(event)
+            super().append_audit(event)
+
+        def append_audit_once(self, event):
+            self._raise_once_for_send(event)
+            return super().append_audit_once(event)
+
+    repo = FailOnceAuditRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    repo.cases["case_email_004"].status = CaseStatus.HUMAN_REVIEW
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+    before = sum(
+        event.action == "NOTIFY_PARTY_SIMULATED"
+        for event in repo.list_audit("case_email_004")
+    )
+
+    with pytest.raises(RuntimeError, match="transient audit failure"):
+        service.confirm_share("case_email_004", share_id, supervisor)
+
+    interrupted = repo.get_share(share_id)
+    assert interrupted is not None and interrupted.status == "CONFIRMING"
+    assert repo.get_case("case_email_004").status == CaseStatus.HUMAN_REVIEW
+
+    result = service.confirm_share("case_email_004", share_id, supervisor)
+
+    after = sum(
+        event.action == "NOTIFY_PARTY_SIMULATED"
+        for event in repo.list_audit("case_email_004")
+    )
+    assert result["share"]["status"] == "SIMULATED"
+    assert after - before == 1
+    recovered_case = repo.get_case("case_email_004")
+    assert recovered_case.status == CaseStatus.AWAITING_RESPONSE
+    assert "p_safqa" in recovered_case.shared_with
+
+
+def test_share_confirmation_retry_repairs_a_case_save_failure_without_duplicate_audit():
+    class FailOnceCaseSaveRepository(MemoryRepository):
+        def __init__(self):
+            super().__init__()
+            self.fail_confirmation_save_once = False
+
+        def get_case(self, case_id):
+            case = super().get_case(case_id)
+            return case.model_copy(deep=True) if case else None
+
+        def save_case(self, case):
+            if (
+                self.fail_confirmation_save_once
+                and case.status == CaseStatus.AWAITING_RESPONSE
+            ):
+                self.fail_confirmation_save_once = False
+                raise RuntimeError("transient case save failure")
+            super().save_case(case)
+
+    repo = FailOnceCaseSaveRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    repo.cases["case_email_004"].status = CaseStatus.HUMAN_REVIEW
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share_id = preview["share"]["id"]
+    before_send = sum(
+        event.action == "NOTIFY_PARTY_SIMULATED"
+        for event in repo.list_audit("case_email_004")
+    )
+    before_status = sum(
+        event.action == "STATUS_CHANGED"
+        and (event.after or {}).get("status") == "AWAITING_RESPONSE"
+        for event in repo.list_audit("case_email_004")
+    )
+    repo.fail_confirmation_save_once = True
+
+    with pytest.raises(RuntimeError, match="transient case save failure"):
+        service.confirm_share("case_email_004", share_id, supervisor)
+
+    interrupted = repo.get_share(share_id)
+    assert interrupted is not None and interrupted.status == "CONFIRMING"
+    assert repo.get_case("case_email_004").status == CaseStatus.HUMAN_REVIEW
+
+    result = service.confirm_share("case_email_004", share_id, supervisor)
+    events = repo.list_audit("case_email_004")
+
+    assert result["share"]["status"] == "SIMULATED"
+    assert sum(event.action == "NOTIFY_PARTY_SIMULATED" for event in events) - before_send == 1
+    assert (
+        sum(
+            event.action == "STATUS_CHANGED"
+            and (event.after or {}).get("status") == "AWAITING_RESPONSE"
+            for event in events
+        )
+        - before_status
+        == 1
+    )
+    assert repo.get_case("case_email_004").status == CaseStatus.AWAITING_RESPONSE
+
+
+@pytest.mark.parametrize(
+    ("share_request", "send_action", "recipient_id"),
+    [
+        (
+            ShareRequest(
+                recipient_type=RecipientType.OPERATIONS_STAFF,
+                recipient_user_id="u_ops_2",
+            ),
+            "SHARE_SENT",
+            "u_ops_2",
+        ),
+        (
+            ShareRequest(
+                recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+                recipient_party_id="p_safqa",
+                confirm_external=True,
+            ),
+            "NOTIFY_PARTY_SIMULATED",
+            "p_safqa",
+        ),
+    ],
+)
+def test_direct_share_failure_never_exposes_sent(
+    share_request,
+    send_action,
+    recipient_id,
+):
+    class FailOnceSendAuditRepository(MemoryRepository):
+        def __init__(self):
+            super().__init__()
+            self.fail_once = True
+
+        def get_case(self, case_id):
+            case = super().get_case(case_id)
+            return case.model_copy(deep=True) if case else None
+
+        def _raise_once(self, event):
+            if self.fail_once and event.action == send_action:
+                self.fail_once = False
+                raise RuntimeError("transient direct-share audit failure")
+
+        def append_audit(self, event):
+            self._raise_once(event)
+            super().append_audit(event)
+
+        def append_audit_once(self, event):
+            self._raise_once(event)
+            return super().append_audit_once(event)
+
+    repo = FailOnceSendAuditRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    repo.cases["case_email_004"].status = CaseStatus.HUMAN_REVIEW
+    repo.cases["case_email_004"].shared_with = []
+    existing_share_ids = {share.id for share in repo.list_shares()}
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+
+    with pytest.raises(RuntimeError, match="transient direct-share audit failure"):
+        service.share("case_email_004", share_request, supervisor)
+
+    created = [
+        share for share in repo.list_shares() if share.id not in existing_share_ids
+    ]
+    assert len(created) == 1
+    assert created[0].status == "CONFIRMING"
+    interrupted_case = repo.get_case("case_email_004")
+    assert interrupted_case.status == CaseStatus.HUMAN_REVIEW
+    assert recipient_id not in interrupted_case.shared_with
+
+
+def test_concurrent_different_share_confirmations_preserve_both_recipients():
+    class DetachedCaseRepository(MemoryRepository):
+        def __init__(self):
+            super().__init__()
+            self.case_barrier: threading.Barrier | None = None
+
+        def get_case(self, case_id):
+            with self._lock:
+                case = self.cases.get(case_id)
+                detached = case.model_copy(deep=True) if case else None
+                barrier = self.case_barrier
+            if barrier is not None:
+                barrier.wait()
+            return detached
+
+    repo = DetachedCaseRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    repo.cases["case_email_004"].status = CaseStatus.HUMAN_REVIEW
+    repo.cases["case_email_004"].shared_with = []
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+    share_ids = [
+        service.share(
+            "case_email_004",
+            ShareRequest(
+                recipient_type=RecipientType.OPERATIONS_STAFF,
+                recipient_user_id=recipient_id,
+                preview_only=True,
+            ),
+            supervisor,
+        )["share"]["id"]
+        for recipient_id in ("u_ops_2", "u_ops_3")
+    ]
+
+    repo.case_barrier = threading.Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda share_id: service.confirm_share(
+                    "case_email_004", share_id, supervisor
+                ),
+                share_ids,
+            )
+        )
+    repo.case_barrier = None
+
+    persisted_case = repo.cases["case_email_004"]
+    assert {"u_ops_2", "u_ops_3"}.issubset(persisted_case.shared_with)
+    assert {result["share"]["status"] for result in results} == {"SENT"}
+    assert sum(
+        event.action == "SHARE_SENT" and event.case_id == "case_email_004"
+        for event in repo.list_audit()
+    ) >= 2
+
+
+def test_memory_finalizer_requires_provider_acceptance_before_sent():
+    repo = MemoryRepository()
+    repo.load_file(ROOT / "supabase" / "seed" / "snapshot.json")
+    service = CaseService(repo)
+    supervisor = repo.get_user("u_sup_1")
+    assert supervisor is not None
+    preview = service.share(
+        "case_email_004",
+        ShareRequest(
+            recipient_type=RecipientType.NOTIFY_PARTY_CONTACT,
+            recipient_party_id="p_safqa",
+            preview_only=True,
+        ),
+        supervisor,
+    )
+    share = repo.get_share(preview["share"]["id"])
+    assert share is not None
+    share.status = "CONFIRMING"
+    share.delivery_provider = "gmail"
+    repo.save_share(share)
+
+    finalized = repo.complete_share_confirmation(
+        share.id, supervisor.id, "SENT", "gmail"
+    )
+
+    assert finalized is None
+    assert repo.get_share(share.id).status == "CONFIRMING"
+    assert not any(
+        event.event_id == f"evt_{share.id}_sent" for event in repo.list_audit()
+    )
+
+
+def test_supabase_share_confirmation_uses_conditional_delivery_claim():
+    class FakeQuery:
+        def __init__(self):
+            self.payload = None
+            self.filters = []
+
+        def update(self, payload):
+            self.payload = payload
+            return self
+
+        def eq(self, field, value):
+            self.filters.append((field, value))
+            return self
+
+        def execute(self):
+            return SimpleNamespace(
+                data=[
+                    {
+                        "id": "share_atomic_1",
+                        "case_id": "case_email_004",
+                        "shared_by": "u_sup_1",
+                        "recipient_type": "NOTIFY_PARTY_CONTACT",
+                        "recipient_party_id": "p_safqa",
+                        "recipient_label": "SAFQA LIMITED",
+                        "is_external": True,
+                        "message": "Frozen preview",
+                        "payload_preview": {"fields": []},
+                        "status": "DELIVERING",
+                        "confirmation_started_at": self.payload[
+                            "confirmation_started_at"
+                        ],
+                        "tenant_id": "tenant_april",
+                    }
+                ]
+            )
+
+    class FakeClient:
+        def __init__(self):
+            self.query = FakeQuery()
+
+        def table(self, name):
+            assert name == "shares"
+            return self.query
+
+    repo = object.__new__(SupabaseRepository)
+    repo.client = FakeClient()
+    repo.tenant = "tenant_april"
+    transitioned_at = datetime(2026, 9, 20, 12, 0, 0)
+
+    share = repo.claim_share_confirmation(
+        "share_atomic_1",
+        "PENDING_CONFIRMATION",
+        "DELIVERING",
+        transitioned_at,
+        "gmail",
+    )
+
+    assert share is not None and share.status == "DELIVERING"
+    assert repo.client.query.payload == {
+        "status": "DELIVERING",
+        "confirmation_started_at": transitioned_at.isoformat(),
+        "delivery_provider": "gmail",
+    }
+    assert repo.client.query.filters == [
+        ("id", "share_atomic_1"),
+        ("tenant_id", "tenant_april"),
+        ("status", "PENDING_CONFIRMATION"),
+    ]
+
+
+def test_supabase_append_audit_once_uses_event_id_conflict_protection():
+    class FakeQuery:
+        def __init__(self):
+            self.payload = None
+            self.options = None
+
+        def upsert(self, payload, **options):
+            self.payload = payload
+            self.options = options
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[self.payload])
+
+    class FakeClient:
+        def __init__(self):
+            self.query = FakeQuery()
+
+        def table(self, name):
+            assert name == "audit_events"
+            return self.query
+
+    repo = object.__new__(SupabaseRepository)
+    repo.client = FakeClient()
+    repo.tenant = "tenant_april"
+    event = AuditEvent(
+        event_id="evt_share_atomic_1_sent",
+        case_id="case_email_004",
+        timestamp=datetime(2026, 9, 20, 12, 0, 0),
+        actor_type=ActorType.USER,
+        actor_id="u_sup_1",
+        action="NOTIFY_PARTY_SENT",
+    )
+
+    inserted = repo.append_audit_once(event)
+
+    assert inserted is True
+    assert repo.client.query.payload["event_id"] == event.event_id
+    assert repo.client.query.payload["tenant_id"] == "tenant_april"
+    assert repo.client.query.options == {
+        "on_conflict": "event_id",
+        "ignore_duplicates": True,
+    }
+
+
+def test_supabase_share_completion_uses_atomic_rpc():
+    class FakeClient:
+        def __init__(self):
+            self.name = None
+            self.params = None
+
+        def rpc(self, name, params):
+            self.name = name
+            self.params = params
+            return self
+
+        def execute(self):
+            return SimpleNamespace(
+                data=[
+                    {
+                        "id": "share_atomic_1",
+                        "case_id": "case_email_004",
+                        "shared_by": "u_sup_1",
+                        "recipient_type": "NOTIFY_PARTY_CONTACT",
+                        "recipient_party_id": "p_safqa",
+                        "recipient_label": "SAFQA LIMITED",
+                        "is_external": True,
+                        "message": "Frozen preview",
+                        "payload_preview": {"fields": []},
+                        "status": "SENT",
+                        "tenant_id": "tenant_april",
+                    }
+                ]
+            )
+
+    repo = object.__new__(SupabaseRepository)
+    repo.client = FakeClient()
+    repo.tenant = "tenant_april"
+
+    share = repo.complete_share_confirmation(
+        "share_atomic_1", "u_sup_1", "SENT", "gmail"
+    )
+
+    assert share is not None and share.status == "SENT"
+    assert repo.client.name == "complete_share_confirmation"
+    assert repo.client.params == {
+        "p_share_id": "share_atomic_1",
+        "p_tenant_id": "tenant_april",
+        "p_actor_id": "u_sup_1",
+        "p_final_status": "SENT",
+        "p_delivery_mode": "gmail",
+    }
+
+
+def test_supabase_point_lookups_include_tenant_filter():
+    class FakeQuery:
+        def __init__(self):
+            self.filters = []
+
+        def select(self, _fields):
+            return self
+
+        def eq(self, field, value):
+            self.filters.append((field, value))
+            return self
+
+        def gt(self, field, value):
+            self.filters.append((field, value))
+            return self
+
+        def limit(self, _count):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[])
+
+    class FakeClient:
+        def __init__(self):
+            self.queries = {}
+
+        def table(self, name):
+            query = self.queries.setdefault(name, FakeQuery())
+            return query
+
+    repo = object.__new__(SupabaseRepository)
+    repo.client = FakeClient()
+    repo.tenant = "tenant_april"
+
+    repo.get_email("email_1")
+    repo.find_email_by_checksum("checksum_1")
+    repo.find_attachment_by_checksum("checksum_2")
+    repo.get_case("case_1")
+    repo.get_case_by_email("email_1")
+    repo.get_share("share_1")
+    repo.get_party("party_1")
+
+    assert ("tenant_id", "tenant_april") in repo.client.queries["email_messages"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["attachments"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["cases"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["shares"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["party_contacts"].filters
 
 
 def test_missing_bl_waits_for_documents_then_upload_recovers():
