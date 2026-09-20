@@ -1,631 +1,1049 @@
-# NovaShip Averis — AI Shipping Inbox & SI ↔ Draft BL Verification Platform
+# NovaShip Averis
 
-> Turns a shared shipping-documentation inbox into a secure, traceable case-management workflow.
-> **AI classifies, extracts, summarises and drafts. Deterministic code decides the seven-field match. Humans approve every outward action. Everything is audited.**
+AI-assisted shipping inbox and deterministic Shipping Instruction (SI) to Draft Bill of Lading (BL) verification.
 
+> AI reads, classifies, extracts, summarises, and drafts. Deterministic code decides the seven-field comparison. A person approves every outward action. Every state change is audited.
 
-|                                        |                                                                                                                                                                         |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Live demo (local)**                  | UI `http://localhost:3000` · API `http://localhost:8000/docs`                                                                                                           |
-| **One-command run**                    | `.\scripts\dev.ps1 docker` or `docker compose up -d --build` (offline demo, no keys needed)                                                                             |
-| **Live reload in Docker**              | `.\scripts\dev.ps1 docker-dev` — host edits to `frontend/` and `backend/app/` apply without a rebuild                                                                   |
-| **Hackathon score on the SDOC bundle** | `FINAL SCORE = 1.0000` — stage-1 macro-F1 1.000 · defect-F1 1.000 · end-to-end 46/46 · escalation F1 1.000 (see [Impact Metrics](#10-user-feedback-and-impact-metrics)) |
-| **Sign in (test accounts)**            | Password `novaship123` for every seeded user, e.g. `faraz_ali@aprilasia.com` (Admin) · `hari_mardianto@aprilasia.com` (Supervisor) · `hanna_azhari@aprilasia.com` (Ops) · `sokyong_ooi@aprilasia.com` (Auditor) — full list in [§9.2](#92-sign-in-register-and-test-accounts) |
-| **Tests**                              | `186 passed` — comparator, normalization, extraction, security, RBAC, login/register/logout, trained intent classifier, Gmail, Notify Party, E2E, LangGraph interrupt/resume, RAG scoping, and P2 assistant safety |
-| **AI agent docs**                      | [AGENT.md](AGENT.md) — every AI file, LangGraph workflow, RAG, keys, Docker rebuild, test scenarios                                                                     |
-| **Team guides**                        | [P1.md](P1.md) AI & Verification · [P2.md](P2.md) Assistant & Safety · [P3.md](P3.md) Backend/Supabase/Cloud · [P4.md](P4.md) Frontend & E2E                            |
-| **Deploy / handoff**                   | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) · [docs/BACKEND_HANDOFF.md](docs/BACKEND_HANDOFF.md) · [docs/DEMO_AND_LIVE_MODES.md](docs/DEMO_AND_LIVE_MODES.md) |
-
-
----
-
-
+| Project status | Details |
+| --- | --- |
+| Web application | `http://localhost:3000` |
+| API and Swagger UI | `http://localhost:8000/docs` |
+| Default mode | Offline demo, in-memory repository, no API keys required |
+| Demo data | 520 emails and 250 attachments |
+| Verified test baseline | **187 backend tests passed**, frontend production build passed, Compose configuration valid (20 September 2026) |
+| Recorded SDOC score | `1.0000`; reproducing the score requires the private organiser `ground_truth.json` |
+| Demo password | `novaship123` for every seeded account |
 
 ## Table of contents
 
-1. [Problem Statement](#1-problem-statement)
-2. [The Problem in Numbers](#2-the-problem-in-numbers)
-3. [Solution](#3-solution)
-4. [Flowchart](#4-flowchart)
-5. [Tech Stack](#5-tech-stack)
-6. [System Architecture, AI and Cloud Integration](#6-system-architecture-ai-and-cloud-integration)
-7. [Benefits and Business](#7-benefits-and-business)
-8. [Comparison](#8-comparison)
-9. [Quick start](#9-quick-start)
-10. [User Feedback and Impact Metrics](#10-user-feedback-and-impact-metrics)
-11. [Conclusion](#11-conclusion)
-12. [Repository map](#12-repository-map)
+- [1. Overview](#1-overview)
+- [2. What the platform does](#2-what-the-platform-does)
+- [3. Verification contract](#3-verification-contract)
+- [4. Architecture and data flow](#4-architecture-and-data-flow)
+- [5. Technology stack](#5-technology-stack)
+- [6. Quick start with Docker](#6-quick-start-with-docker)
+- [7. Demo accounts and RBAC](#7-demo-accounts-and-rbac)
+- [8. Development run modes](#8-development-run-modes)
+- [9. Configuration reference](#9-configuration-reference)
+- [10. Using the application](#10-using-the-application)
+- [11. API reference](#11-api-reference)
+- [12. Persistence and Supabase](#12-persistence-and-supabase)
+- [13. AI, RAG, and LangGraph](#13-ai-rag-and-langgraph)
+- [14. Security and safety model](#14-security-and-safety-model)
+- [15. Tests, evaluation, and reproducibility](#15-tests-evaluation-and-reproducibility)
+- [16. Deployment notes](#16-deployment-notes)
+- [17. Troubleshooting](#17-troubleshooting)
+- [18. Repository map](#18-repository-map)
+- [19. Known limitations](#19-known-limitations)
+- [20. Additional documentation](#20-additional-documentation)
 
----
+## 1. Overview
 
+Shipping documentation teams receive comparison requests, SI submissions, invoices, operational updates, automated notices, and spam in one shared mailbox. A single BL comparison can require an operator to locate two documents, reconcile different labels and formats, verify seven contractual fields, explain every discrepancy, draft a response, and preserve an audit trail.
 
+NovaShip turns that inbox into a case-management workflow. It can:
 
-## 1. Problem Statement
+1. ingest an email and its attachments;
+2. perform deterministic security checks;
+3. classify the message and decide whether action is required;
+4. detect SI and Draft BL documents;
+5. extract the seven required fields with evidence;
+6. normalise only safe formatting differences;
+7. compare SI and BL values using deterministic code;
+8. recommend an action and create a draft;
+9. pause for a human decision;
+10. share or simulate notification after permission and confirmation checks;
+11. record the full decision trail.
 
-A shipping documentation desk (the dataset mirrors APRIL's Middle-East/Asia desks) receives hundreds of emails a week in one shared mailbox:
-requests to **confirm a draft Bill of Lading against the Shipping Instruction**, SI submissions, invoice and charge queries, vessel updates, bot notices, HR mail — and spam.
+The repository contains two related orchestration paths:
 
-Today an operator must, by hand:
+- `Pipeline` is the main ingestion and case-processing path used by the dashboard and REST API.
+- `CaseAgent` is the LangGraph state machine exposed by `/agent/*`; it supports pause/resume at the human-review node.
 
-1. read every message and decide whether it needs action;
-2. find the SI and the Draft BL attachments (`.txt`, `.pdf`, `.docx`, `.xlsx`, sometimes scanned images);
-3. line up the **seven contractual fields** — Shipper, Consignee, Notify Party, Port of Loading, Port of Discharge, Container Count, Gross Weight (kg) — even though the two documents label them differently (`Load Port` vs `Port of Loading (POL)`, `To the Order of` vs `Consignee`, `Gross Wt (kgs)` vs `Gross Weight (KG)`);
-4. spot a one-container or 1,000 kg difference in dense text;
-5. write a correction request, chase the right party, and keep an audit trail for compliance.
+Both paths use the same contracts, repository abstraction, comparator, policies, permissions, and case services.
 
-The failure modes are expensive and silent: a BL released with the wrong consignee or weight causes customs holds, amendment fees, demurrage, disputes over cargo release, and — for a paper exporter — delayed letters of credit. Generic email chatbots don't solve this: they hallucinate values, can't prove *why* they said "mismatch", can't be audited, and will happily send an email to the wrong party.
+### Demo dataset
 
-**What the desk needs is not a chatbot. It is a control room**: every email becomes a case, every decision shows its evidence, the seven-field verdict is deterministic and reproducible, and no external message leaves without a human clicking *Approve*.
+The bundled SDOC dataset contains 520 synthetic but realistic emails:
 
-## 2. The Problem in Numbers
+| Category | Count |
+| --- | ---: |
+| BL comparison | 220 |
+| SI request | 125 |
+| Invoice query | 75 |
+| General | 60 |
+| Spam | 40 |
 
-*Industry context (external, indicative)*
+There are 250 attachment files. They include TXT, PDF, DOCX, and XLSX SI/BL pairs, plus deliberate missing, wrong, blank, unreadable, and image-only cases. The data generator is deterministic and lives under `sdoc-hackathon-docker/data_v2/`.
 
+The inbox has 124 messages with two attachments, two with one attachment, and 394 with none. Of the attachment-bearing verification requests, 109 can be decided cleanly, 46 contain one or more planted field defects, and 20 edge cases are designed to require escalation rather than a guessed verdict.
 
-| Figure                                                                                                                                                                                                      | Source / note                                |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| ~45 million bills of lading are issued per year; ~99 % were still paper-based when DCSA started its eBL push                                                                                                | DCSA / McKinsey estimate (2022) — indicative |
-| Full eBL adoption is estimated to save the industry **≈ US$ 6.5 billion/year in direct costs** and unlock **≈ US$ 30–40 billion** in trade growth                                                           | DCSA / McKinsey (2022) — indicative          |
-| Document errors are one of the top three causes of shipment delay; BL amendment fees typically cost **US$ 50–150 per amendment** plus demurrage of **US$ 100–300 per container per day** once a hold begins | carrier tariff ranges — indicative           |
-| Documentation staff spend a large share of their day on inbox triage and manual document comparison                                                                                                         | operator interviews / desk observation       |
+## 2. What the platform does
 
+### Inbox and case operations
 
-*What we measured on the hackathon inbox (520 real-pattern emails, seeded into the app)*
+- Converts each unique email into an idempotent case.
+- Shows status, priority, intent, category, confidence, assignment, document availability, security outcome, mismatch count, and open errors.
+- Supports search, pagination, sorting, and filters for status, priority, intent, category, mismatch, assignee, recipient, sender, confidence, security outcome, and date.
+- Provides batch drafting and review actions; batch operations never send external email.
+- Exports cases as CSV and SDOC-compatible results as JSON.
 
+### Document verification
 
-| Metric                                                                                              | Value                                                                                               |
-| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Emails in the inbox                                                                                 | **520** (220 BL-comparison · 125 SI requests · 75 invoice queries · 60 general · 40 spam)           |
-| Comparison requests that actually carried both documents                                            | **109** pairs (`.txt` 78 % · `.pdf`/`.docx`/`.xlsx` 22 %)                                           |
-| Pairs with at least one planted defect                                                              | **46 of 109 = 42 %** — 20 with one wrong field, 26 with two                                         |
-| Most frequently wrong field                                                                         | Container Count (19) · Port of Discharge (13) · Gross Weight (12)                                   |
-| Requests that could **not** be decided (wrong document, missing file, unreadable scan, blank value) | **20** — every one of them must be escalated, not guessed                                           |
-| Manual seven-field check (assumption, conservative)                                                 | ≈ 4–6 minutes per pair → **≈ 9 hours** for this inbox, before writing a single reply                |
-| NovaShip pipeline, same inbox                                                                       | **4.5 seconds total (≈ 9 ms / email)**, 100 % of defects found with the exact field, 0 false alarms |
+- Reads `.txt`, text-layer `.pdf`, `.docx`, and `.xlsx` attachments.
+- Detects SI, Draft BL, Invoice, Supporting Document, and Unknown Document.
+- Extracts the required fields with the source document, page, line, literal snippet, and detected label.
+- Preserves original values alongside normalised values.
+- Routes missing, blank, unsupported, corrupt, scanned, or low-confidence data to review instead of guessing.
+- Produces a field-by-field discrepancy report and an exact summary message.
 
+### Human review and collaboration
 
-The point of the numbers: almost **half** of the "please confirm the draft BL" requests hide a real discrepancy, and one in ten cannot be decided from what was sent. A tool that only answers "looks fine" is worse than none.
+- Generates confirmation, correction, missing-document, and information-response drafts.
+- Allows a user to edit, approve, reject, reassign, retry, request review, mark no action, or complete a case.
+- Separates the extracted Notify Party value from permission to contact a recipient.
+- Requires an authorised recipient, a data preview, sufficient role permissions, and an extra confirmation for an external party.
+- Records sent, viewed, acknowledged, response, and status metadata for a share.
 
-## 3. Solution
+### Oversight
 
-NovaShip Averis is a production-style, AI-assisted operations platform with twelve concrete capabilities (spec §0):
+- Provides a seven-field analytics page, security queue, AI-agent console, global audit page, policy editor, and in-app guide.
+- Stores actor type (`USER`, `AI`, or `SYSTEM`), before/after state, evidence references, and policy version in audit events.
+- Uses role-based access control (RBAC) for every protected API operation.
+- Keeps policy changes versioned and audited.
 
+## 3. Verification contract
 
-| #   | Capability                                                                                                                                                                                                                                                                                                                                    | Where                                                               |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| 1   | **Ingest and secure** every email: immutable message id, sender, recipients, CC, subject, body, time, thread id, attachment metadata + checksums; spam / suspicious-sender / blocked-type / duplicate / flood / policy-bypass checks → `SAFE · SPAM · SUSPICIOUS · SECURITY_REVIEW`. Attachments are parsed to text, **never executed**.      | `backend/app/ai/security_precheck.py`, `readers/document_reader.py` |
-| 2   | **Classify intent + action need** (9 intents, priority, confidence, evidence-grounded rationale). High-confidence rules run first, a trained TF-IDF + logistic-regression model handles ambiguous mail, and the optional LLM is the final fallback. Informational mail is saved, summarised, marked **No Reply Needed** and stays searchable. | `ai/intent_classifier.py`, `ai/trained_intent_classifier.py`        |
-| 3   | **Detect and organise attachments** — SI / Draft BL / Invoice / Supporting / Unknown from content, with confidence. Wrong document type or unreadable scan ⇒ `WAITING_DOCUMENTS` / `HUMAN_REVIEW` with the exact reason, never a fabricated value.                                                                                            | `ai/attachment_classifier.py`                                       |
-| 4   | **Create a trackable case** with an 18-state status model and a visual timeline.                                                                                                                                                                                                                                                              | `pipeline/orchestrator.py`, UI timeline                             |
-| 5   | **Compare SI ↔ Draft BL on exactly seven fields**, SI as source of truth, each field independent, safe normalisation only (case, whitespace, `22,000 KG` = `22000 kg`, `3 x 40'HC` = 3, UN/LOCODE stripped; **no legal-name rewriting**). All seven match ⇒ the exact phrase `No mismatch detected.`                                          | `core/comparator.py`, `core/normalizer.py`                          |
-| 6   | **Evidence for every decision** — document id, page, line, the literal snippet and which label synonym was resolved (`Load Port` → Port of Loading). Original values are always shown next to normalised ones.                                                                                                                                | `ai/extractor.py`, Evidence tab                                     |
-| 7   | **Drafts instead of sends** — correction request, missing-document request, confirmation, info reply. LLM may polish wording but a guard rejects any draft that drops an SI/BL value.                                                                                                                                                         | `ai/summary_draft.py`                                               |
-| 8   | **Human approval gate** — Approve / Edit / Reject / Reassign / Share / Notify Party / Retry / Mark Complete; external sends require `approve_send` (Supervisor/Admin).                                                                                                                                                                        | `services/case_service.py`, Draft Actions tab                       |
-| 9   | **Selected-user / selected-party collaboration** — one stepped Notify Party card: show SI vs BL Notify Party → choose an *authorised* recipient (internal user, team, approved party contact) → preview of exactly the fields that will be disclosed → human confirmation for external → send → audit → status.                             | Collaboration tab (`components/collab.tsx`)                         |
-| 10  | **Append-only audit trail** — every node, field result, policy application, draft edit, approval, share, error and retry with actor type USER/AI/SYSTEM, before/after and policy version.                                                                                                                                                     | `audit_events` table + trigger                                      |
-| 11  | **Operations dashboard** plus dedicated pages: Seven fields (`/verification`, per-field mismatch statistics and every case per field), Security agent queue (`/security`), AI agent console (`/agent`), global Audit (`/audit`), Policies, Guide (`/welcome`).                                                                                | `frontend/app/`*                                                    |
-| 11b | **Operations dashboard** — 12 metrics, 15-column case table, 12 filters, batch actions (never batch external sends).                                                                                                                                                                                                                          | `frontend/app/page.tsx`                                             |
-| 12  | **Ask AI about this case** — grounded only in the email, SI, BL, deterministic comparison, audit history and policy; every answer cites evidence; refuses to invent values, bypass approval, send directly or leak other cases.                                                                                                               | `ai/assistant.py`                                                   |
+The Shipping Instruction is always the source of truth. The comparator evaluates exactly these seven independent fields:
 
+| Field | Safe normalisation | Deliberately not done |
+| --- | --- | --- |
+| Shipper | Case and whitespace | Legal-name rewriting |
+| Consignee | Case, whitespace, conservative punctuation | Inferring a different legal entity |
+| Notify Party | Case, whitespace, conservative punctuation | Treating the extracted value as permission to send |
+| Port of Loading | Case, whitespace, separators, trailing UN/LOCODE removal | Port substitution without evidence |
+| Port of Discharge | Case, whitespace, separators, trailing UN/LOCODE removal | Port substitution without evidence |
+| Container Count | Parses values such as `3 x 40'HC` as `3` | Guessing from unclear text |
+| Gross Weight (kg) | Parses commas/spaces and explicit metric-ton conversion | Silent imperial conversion or mixed alphanumeric values |
 
-Plus: versioned admin policies with a form-based editor (sliders, toggles, tag lists, per-field reset, change summary, mandatory audit note; raw JSON stays available under *Advanced*), login / register / logout with least-privilege self-registration, unusual-behaviour signals, language detection + translation views (original never replaced), recoverable error states with Retry / Upload / Reassign / Human review, RBAC with least privilege, Supabase schema with RLS, Docker deployment.
+Each field receives one result:
 
-## 4. Flowchart
+- `MATCH`
+- `MISMATCH`
+- `MISSING_IN_SI`
+- `MISSING_IN_BL`
+- `LOW_CONFIDENCE_REVIEW`
 
+The case-level result is `PASSED`, `ATTENTION_REQUIRED`, or `HUMAN_REVIEW`. If all seven fields match, the required message is exactly:
 
-
-### 4.1 Case pipeline (LangGraph-style nodes)
-
-```mermaid
-flowchart TD
-    A[📧 Email arrives<br/>Gmail API · Graph optional · webhook · bundle] --> B[1 · Security precheck<br/>spam · sender · attachment type · duplicates · flood · bypass]
-    B -->|SECURITY_REVIEW| SR[🛑 Quarantine → Supervisor]
-    B --> C[2 · Intent classifier<br/>rules → trained text model → optional LLM]
-    C -->|INFORMATION_ONLY / SPAM| NA[💤 No Reply Needed<br/>saved · summarised · searchable]
-    C -->|SI request / invoice query| OT[Case + info draft]
-    C -->|DOCUMENT_VERIFICATION| D[3 · Attachment classifier<br/>SI · Draft BL · Invoice · Supporting · Unknown]
-    D -->|SI or BL missing / wrong type| WD[⏳ WAITING_DOCUMENTS<br/>exact reason · Upload / Retry]
-    D -->|unreadable · empty · corrupt| HR1[👤 HUMAN_REVIEW<br/>OCR or readable copy]
-    D --> E[4 · Seven-field extractor<br/>label-synonym resolution + evidence]
-    E --> F[5 · Safe normalisation<br/>case · whitespace · kg · integer count]
-    F --> G{{6 · DETERMINISTIC comparator<br/>7 independent fields · SI = truth}}
-    G -->|all 7 MATCH| OK[✅ NO_MISMATCH_DETECTED<br/>“No mismatch detected.” · confirmation draft]
-    G -->|≥1 MISMATCH| MM[🔴 MISMATCH_DETECTED<br/>exact SI vs BL values · attention]
-    G -->|missing / low-confidence field| HR2[👤 HUMAN_REVIEW<br/>no verdict asserted]
-    OK & MM & HR2 & WD --> H[7 · Policy evaluator + recommendation]
-    H --> I[8 · Summary] --> J[9 · Draft generator<br/>never auto-sent]
-    J --> K{10 · Human approval gate}
-    K -->|Approve| L[11 · Notifier<br/>send / share] --> M[12 · Audit logger]
-    K -->|Edit / Reject / Reassign / Retry| M
-    K -->|Notify Party| NP[Select recipient → Preview → Confirm] --> L
+```text
+No mismatch detected.
 ```
 
+A missing or low-confidence value is not counted as a mismatch. It is routed to human review with one of four review reasons: `wrong_doc_type`, `missing_attachment`, `unreadable`, or `missing_value`.
 
-
-
-
-### 4.2 Notify Party / selected-user sharing
-
-```
-Mismatch Detected → Human Review → Action Required → Notify Party → Select Recipient → Preview → Send/Share → Audit → Status Update
-```
-
-The extracted **Notify Party is a comparison value only**. Sharing requires an explicit recipient from the authorised list (internal user · operations staff · supervisor · team · approved Notify Party contact · other collaborator), a preview limited to the chosen fields, and — for external recipients — a human confirmation. Every share records `shared_by, shared_with, recipient_type, sent_at, viewed_at, acknowledged_at, response, status`.
-
-## 5. Tech Stack
-
-
-| Layer                   | Choice                                                                                                             | Why                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| Frontend                | **Next.js 14 (App Router) · React 18 · TypeScript · Tailwind**                                                     | fast operator UI, static + dynamic routes, Vercel-native                                   |
-| Backend                 | **FastAPI · Pydantic v2**                                                                                          | typed contracts, OpenAPI docs for free, async-ready                                        |
-| AI orchestration        | LangGraph-style node pipeline; trained TF-IDF classifier; **OpenAI** optional via `LLM_PROVIDER`                   | deterministic business logic stays outside the LLM; classifier and rules run fully offline |
-| Document parsing        | `pypdf`, `python-docx`, `openpyxl`, optional `pytesseract` OCR                                                     | text-layer extraction; image-only PDFs flagged, not guessed                                |
-| Database                | **Supabase (PostgreSQL)** — 24 tables, RLS, append-only audit trigger, private `documents` bucket with signed URLs | tenant-aware persistence, auth, storage in one place                                       |
-| Persistence abstraction | `MemoryRepository` (fixtures/tests/offline) ↔ `SupabaseRepository` (prod) selected by `REPO_BACKEND`               | Person 1/2/4 never wait on the database                                                    |
-| Email connector         | Gmail API adapter and bundle adapter                                                                            | adapter-based; Gmail is the sole live mailbox provider                                      |
-| Auth / RBAC             | Built-in login / register / logout (PBKDF2 password hashes, HMAC-signed 12 h session tokens, audited) · Supabase JWT (HS256) · demo `X-User-Id` for tests/curl; 15 permissions × 4 roles | least privilege                                                                            |
-| Deployment              | Docker (multi-stage), `docker-compose.yml`, Vercel for the frontend, any container host for the API                | reproducible local ↔ cloud                                                                 |
-| Testing                 | `pytest` (186 tests) + official SDOC scorer + browser walkthrough                                                  | acceptance tests from the spec are executable                                              |
-
-
-
-
-## 6. System Architecture, AI and Cloud Integration
+## 4. Architecture and data flow
 
 ```mermaid
 flowchart LR
     subgraph Sources
-        G[Gmail API<br/>OAuth refresh token] ; W[Webhook<br/>POST /webhooks/email] ; BND[SDOC bundle<br/>fixtures]
+        Gmail[Gmail API mailbox]
+        Webhook[Email webhook]
+        Bundle[SDOC bundle]
     end
-    subgraph Vercel
-        FE[Next.js dashboard<br/>Inbox · Case · Policies]
+
+    subgraph API[FastAPI service]
+        Auth[Session or Supabase JWT auth]
+        Pipeline[Case pipeline]
+        Security[Security checks]
+        AI[Rules, local classifier, optional LLM]
+        Compare[Deterministic comparator]
+        Human[Human approval gate]
+        Repo[Repository interface]
+        Audit[Audit log]
     end
-    subgraph "API container (FastAPI)"
-        API[REST API<br/>RBAC · audit on every mutation]
-        PIPE[Pipeline nodes 1-12]
-        AI[AI adapters<br/>rules / trained classifier / OpenAI]
-        CMP[[Deterministic<br/>seven-field comparator]]
-        REPO[Repository layer<br/>memory ⇄ supabase]
+
+    subgraph Storage
+        Memory[MemoryRepository]
+        Postgres[Supabase PostgreSQL and RLS]
+        Objects[Private document storage]
+        Vector[Local index or pgvector]
     end
-    subgraph Supabase
-        PG[(PostgreSQL + RLS<br/>24 tables)]
-        ST[(Storage bucket<br/>documents · signed URLs)]
-        AU[Auth · JWT]
-    end
-    G & O & W & BND --> API --> PIPE --> AI & CMP --> REPO --> PG & ST
-    FE -->|Bearer session token / Supabase JWT| API
-    AU --> FE
+
+    UI[Next.js dashboard] --> Auth
+    Gmail & Webhook & Bundle --> Pipeline
+    Auth --> Pipeline
+    Pipeline --> Security --> AI --> Compare --> Human
+    Pipeline --> Repo
+    Human --> Repo
+    Pipeline --> Audit
+    Repo --> Memory & Postgres & Objects & Vector
 ```
 
+### Main pipeline
 
+```text
+Email
+  -> security precheck
+  -> intent classification
+  -> attachment classification
+  -> document extraction
+  -> safe normalisation
+  -> deterministic seven-field comparison
+  -> policy evaluation and recommendation
+  -> summary
+  -> draft
+  -> human approval
+  -> notification/share
+  -> audit
+```
 
-**AI integration (what the model does and does not do)**
+The security and intent stages can end the flow early. A security-review message is quarantined. Informational and spam messages are stored and summarised without document comparison. A verification request with missing documents becomes `WAITING_DOCUMENTS`; unreadable or uncertain content becomes `HUMAN_REVIEW`.
 
+### Responsibility boundary
 
-| Node                   | Deterministic rules                                                   | LLM (optional)                                              | Guard                                                                                            |
-| ---------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Security precheck      | ✔ phrases, domains, links, blocked types, duplicates, bypass requests | —                                                           | signals carry evidence; never accuses without it                                                 |
-| Intent                 | ✔ subject grammar plus local TF-IDF/logistic-regression classifier    | final tie-break when rules and local model remain uncertain | confidence margin prevents a weaker model from overriding a stronger rule; `decided_by` recorded |
-| Attachment type        | ✔ title lines, distinctive fields, filename hints                     | —                                                           | unreadable ⇒ type confidence capped 0.5                                                          |
-| Seven-field extraction | ✔ label-synonym regex, PDF two-line layout, table-header exclusion    | fallback only for fields rules missed                       | LLM value accepted **only if its quoted snippet literally exists** in the document               |
-| Normalisation          | ✔                                                                     | —                                                           | refuses letter/digit mixes, imperial units, ambiguous counts                                     |
-| **Comparison**         | ✔ **only**                                                            | —                                                           | pure function, 100 % unit-tested                                                                 |
-| Summary / draft        | ✔ templates from verified result                                      | may polish wording                                          | rejected if any SI/BL value goes missing                                                         |
-| Ask AI                 | ✔ 12 grounded intents                                                 | free-form questions over the same context                   | refuses send/bypass/other-case/invent; post-check that no un-flagged field is called a mismatch  |
-| Translation            | passthrough                                                           | LLM with identifier masking                                 | company names, ports, numbers, units, refs restored verbatim                                     |
+| Capability | Rules/local model | Optional LLM | Deterministic guard |
+| --- | --- | --- | --- |
+| Security precheck | Yes | Security explanation in the agent path | LLM can escalate, not clear a deterministic risk |
+| Intent | Rules then TF-IDF/logistic regression | Final fallback for ambiguity | Confidence and override margins are recorded |
+| Attachment type | Yes | No | Unreadable files are not guessed |
+| Field extraction | Label and layout rules | Fallback for missing fields | LLM value must be supported by a literal document snippet |
+| Comparison | Yes | **Never** | Pure seven-field comparator |
+| Summary and draft | Templates | Wording polish | Required SI/BL values must remain present |
+| Ask AI | Grounded intents and RAG | Free-form grounded answer | Refuses sending, bypassing policy, inventing values, or crossing case scope |
+| Translation | Identifier masking | Translation | Names, ports, numbers, units, and references are restored |
 
+## 5. Technology stack
 
-**LangGraph agent (human-in-the-loop automation)**: `backend/app/agents/` builds a `StateGraph` per case: `security_precheck -> security_agent -> classify -> detect_documents -> extract -> compare (deterministic tool) -> summarize_and_draft -> human_review (interrupt) -> notify`. The graph pauses at `human_review` and resumes only with a person's decision (`POST /agent/resume/{id}`), executed through the same RBAC-checked services as the UI. The security agent is an LLM that reasons over the deterministic signals and may only escalate. RAG for Ask AI: Gemini `text-embedding-004` or OpenAI embeddings over `backend/data/*.md` plus per-case chunks, stored in Supabase pgvector (`0003_vector.sql`) or a local index; questions on one case can never retrieve another. Details: [AGENT.md](AGENT.md).
+| Layer | Technology |
+| --- | --- |
+| Frontend | Next.js 16.3, React 19.2, TypeScript 5.5, Tailwind CSS 3.4 |
+| Backend | Python 3.11, FastAPI, Pydantic 2, Uvicorn |
+| Local intent model | scikit-learn TF-IDF + logistic regression, persisted with joblib |
+| Agent orchestration | LangGraph with memory or optional PostgreSQL checkpoints |
+| LLM integration | OpenAI chat models through `LLM_PROVIDER=openai` |
+| Embeddings | Local deterministic hashing, Gemini, or OpenAI |
+| Vector storage | Local JSON index or Supabase pgvector |
+| Document parsing | pypdf, python-docx, openpyxl; optional OCR hook |
+| Persistence | In-memory fixtures or Supabase PostgreSQL, Storage, RLS, and JWT |
+| Mail | SDOC bundle connector or Gmail API for inbound polling and approved outbound delivery |
+| Containers | Docker multi-stage images and Docker Compose |
+| Tests | pytest plus a production Next.js build |
 
-**Intent-model training and evaluation**: from `backend/`, run `python scripts/train_intent_classifier.py`. It keeps 25–30% of emails in a template-grouped holdout, fits only the development partition, and writes the model, split manifest, and rule/model/hybrid metrics under `backend/models/`. Missing or incompatible artifacts automatically fall back to rules.
+## 6. Quick start with Docker
 
-**Cloud integration**: `REPO_BACKEND=supabase` swaps persistence with no contract change; migrations in `[supabase/migrations](supabase/migrations)` (schema + RLS + storage policies); seed for every table in `[supabase/seed](supabase/seed)` generated from the bundle (`python -m app.seed.make_seed [--push]`); JWT verification with `SUPABASE_JWT_SECRET`; signed URLs (300 s) for document originals; Docker images for API and UI; Vercel for the frontend.
+Docker is the recommended first run. It uses the checked-in demo snapshot and does not require Supabase, OpenAI, Gemini, or Gmail credentials.
 
-## 7. Benefits and Business
+### Prerequisites
 
+- Docker Desktop, or Docker Engine with the Compose plugin.
+- Git.
+- Ports `3000` and `8000` available, unless you override them.
 
-| For                         | Benefit                                                                                                                                                                           |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Documentation operators** | inbox becomes a queue of cases with a verdict, evidence and a ready draft — the seven fields are never hidden; one click back to the source email                                 |
-| **Supervisors**             | approval gate for every external message; Notify Party recipients are pre-authorised; batch actions for triage without batch sending                                              |
-| **Compliance / audit**      | append-only trail with actor type, before/after, policy version; AUDITOR role is read-only; RLS blocks cross-tenant reads                                                         |
-| **The business**            | fewer BL amendments and customs holds (each avoided hold saves amendment fees + demurrage), faster LC/document turnaround, staff hours moved from re-keying to exception handling |
-| **IT / security**           | attachments are parsed, never executed; blocked types quarantined; signed, expiring document links; least-privilege RBAC; secrets server-side only                                |
+### Start the application
 
-
-Business model (illustrative): per-mailbox SaaS subscription for forwarders/exporters, tiered by monthly case volume; enterprise tier adds SSO (Supabase Auth providers), custom policy packs and carrier connectors. Payback is measured in avoided amendments: at ~US$ 100 per amendment and a 42 % defect rate in comparison requests, a desk handling 200 comparisons/month that catches even 20 extra defects early saves US$ 2,000/month before demurrage.
-
-## 8. Comparison
-
-
-| Capability                                            | Manual desk      | Generic email chatbot / copilot | Rule-only script (hackathon baseline)  | **NovaShip Averis**                          |
-| ----------------------------------------------------- | ---------------- | ------------------------------- | -------------------------------------- | -------------------------------------------- |
-| Seven-field verdict is reproducible                   | ✖ human variance | ✖ LLM judgement, varies per run | ✔                                      | ✔ **deterministic + unit-tested**            |
-| Shows evidence (page/line/snippet, label resolved)    | partial          | ✖                               | ✖                                      | ✔                                            |
-| Handles label synonyms across SI/BL                   | slow             | sometimes                       | if hard-coded                          | ✔ 40+ synonyms, PDF/DOCX/XLSX layouts        |
-| Says "I cannot decide" on blank / scanned / wrong doc | ✔                | ✖ tends to guess                | partial                                | ✔ `NEEDS_REVIEW` with reason, 0 false alarms |
-| Never auto-sends external email                       | ✔                | ✖                               | n/a                                    | ✔ approval gate + role check                 |
-| Notify Party = comparison value ≠ permission to send  | ✔                | ✖                               | n/a                                    | ✔ recipient picker + preview + confirm       |
-| Audit trail with actor type + policy version          | ✖                | ✖                               | ✖                                      | ✔ append-only                                |
-| Works offline / without an API key                    | ✔                | ✖                               | ✔                                      | ✔ (LLM optional)                             |
-| Dashboard, filters, batch triage                      | ✖                | ✖                               | ✖                                      | ✔                                            |
-| Score on SDOC bundle (final)                          | —                | —                               | typically < 0.9 on synonyms/edge cases | **1.000**                                    |
-
-
-
-
-## 9. Quick start
-
-The UI always uses **port 3000** and the API **port 8000**. Docker and local `npm`/`uvicorn` cannot share those ports. Pick **one** mode (or a mixed mode below) and use `.\scripts\dev.ps1 stop` (or `./scripts/dev.sh stop`) before switching.
-
-### 9.1 Run modes
-
-
-| Mode                      | When to use                                                      | Command                        |
-| ------------------------- | ---------------------------------------------------------------- | ------------------------------ |
-| **Docker demo**           | Same baked images for the whole team; demo / judging             | `.\scripts\dev.ps1 docker`     |
-| **Docker live reload**    | Iterate on UI + API **inside Docker** (bind-mounts + `--reload`) | `.\scripts\dev.ps1 docker-dev` |
-| **Local full stack**      | Python 3.11 + Node 20 on the host                                | `.\scripts\dev.ps1 local`      |
-| **Local UI + Docker API** | Fast Next.js HMR; API stays in Compose                           | `.\scripts\dev.ps1 frontend`   |
-| **Local API + Docker UI** | Fast uvicorn reload; UI stays in Compose                         | `.\scripts\dev.ps1 backend`    |
-| **Stop everything**       | Free 3000 and 8000                                               | `.\scripts\dev.ps1 stop`       |
-| **Status**                | What is listening / which containers are up                      | `.\scripts\dev.ps1 status`     |
-
-
-Git Bash / macOS / Linux: `./scripts/dev.sh <mode>` (same names). PowerShell: if scripts are blocked, `powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 docker`.
-
-URLs in every mode:
-
-- Web application: `http://localhost:3000`
-- AI agent console: `http://localhost:3000/agent`
-- FastAPI/Swagger: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/health` (`GET /` has no page — 404 is expected)
-
-If Hyper-V has reserved 8000 (`WinError 10013`) or 3000 is taken by another app, set `API_PORT` / `WEB_PORT` in `.env` (Compose) and keep `NEXT_PUBLIC_API_BASE` in sync, e.g. `NEXT_PUBLIC_API_BASE=http://localhost:8001`.
-
-### 9.2 Sign in, register and test accounts
-
-Opening `http://localhost:3000` sends you to **`/login`**. Every seeded user has the demo password **`novaship123`** (change it with `DEMO_PASSWORD` in `.env`). The login page also lists these accounts with a one-click *Use* button (demo mode only).
-
-
-| Role                 | Name             | Email                           | Password      | Can                                                                                 |
-| -------------------- | ---------------- | ------------------------------- | ------------- | ----------------------------------------------------------------------------------- |
-| **Admin**            | Syed Faraz Ali   | `faraz_ali@aprilasia.com`       | `novaship123` | everything, incl. **edit policy**, approve external sends, notify external parties  |
-| **Supervisor**       | Hari Mardianto   | `hari_mardianto@aprilasia.com`  | `novaship123` | approve / send drafts, notify external parties, batch actions, global audit, export |
-| **Supervisor**       | Teo Ei Leen      | `eileen_teo@aprilasia.com`      | `novaship123` | same as above (Asia desk)                                                           |
-| **Operations staff** | Najiha Nur Hanna | `hanna_azhari@aprilasia.com`    | `novaship123` | view, compare, edit drafts, share internally, assign, read Policies — **cannot** send externally or save policy |
-| **Operations staff** | Deswita Elvyani  | `deswita_elvyani@aprilasia.com` | `novaship123` | same as above                                                                       |
-| **Operations staff** | Willy Situmorang | `willy_ss@aprilasia.com`        | `novaship123` | same as above                                                                       |
-| **Operations staff** | Mitchelle Ting   | `mitchelle_ting@aprilasia.com`  | `novaship123` | same as above (Asia desk)                                                           |
-| **Auditor**          | Ooi Sok Yong     | `sokyong_ooi@aprilasia.com`     | `novaship123` | read-only cases + global audit log; no edits, no sends, no Policies page            |
-
-
-- **Register** (`/register`): creates an account on the **shared desk** (seeded cases stay visible). Default `REGISTER_ALLOWED_ROLES=OPERATIONS_STAFF`. The hackathon demo sets `ADMIN,SUPERVISOR,OPERATIONS_STAFF` so a visitor can register with their own email as Admin and manage the current project.
-- **Sign out**: button under your name in the sidebar. It revokes the session server-side and writes a `LOGOUT` audit event. `LOGIN`, `LOGIN_FAILED` and `REGISTER` are audited too (visible on `/audit` for Supervisor / Admin / Auditor).
-- Sessions are HMAC-signed tokens (`SESSION_SECRET`, 12 h by default). In the offline demo (`REPO_BACKEND=memory`) registered users live in memory until the API restarts; with Supabase run `supabase/migrations/0004_accounts.sql` so accounts persist.
-- Try RBAC: sign in as Najiha, open a mismatch case → *Collaboration* → pick an **External** recipient → *not permitted*; sign out, sign in as Hari → the same recipient is allowed and requires a confirmation click. Only Faraz (Admin) can save on */policies*.
-- API / curl: `POST /auth/login {"email","password"}` returns `{token, user, expires_at}`; send it as `Authorization: Bearer <token>`. In `AUTH_MODE=demo` the `X-User-Id: u_sup_1` header still works for scripts and tests.
-
-### 9.3 Run the full application with Docker (recommended)
-
-Docker is the easiest way for every teammate to run the same Python, Node and ML dependency versions. It starts the FastAPI backend and Next.js frontend; Supabase is optional and is not started locally by the default Compose file.
-
-**Baked images do not see later file edits.** After you change `backend/` or `frontend/`, either rebuild (`docker compose up -d --build`, and `docker compose build --no-cache web` if the UI layer is cached) **or** use [§9.4 Docker live reload](#94-docker-live-reload).
-
-Prerequisites: Docker Desktop (or Docker Engine with the Compose plugin) and the repository's `sdoc-hackathon-bundle/` fixture folder.
+From the repository root:
 
 ```bash
-# macOS/Linux: create a private environment file
 cp .env.example .env
-
-# Stops local npm/uvicorn on 3000/8000, then builds and starts api + web
-./scripts/dev.sh docker
-
-# Equivalent without the helper
-docker compose -f docker-compose.yml up -d --build
-
-# Check health and follow backend logs
+docker compose up -d --build
 docker compose ps
-docker compose logs -f api
+curl http://localhost:8000/health
 ```
 
 PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
-.\scripts\dev.ps1 docker
+docker compose up -d --build
+docker compose ps
+Invoke-RestMethod http://localhost:8000/health
 ```
 
-Common Docker commands:
+A healthy default response includes `"status": "ok"`, `"backend": "MemoryRepository"`, and `"cases": 520`.
+
+Open:
+
+- Application: `http://localhost:3000`
+- Login: `http://localhost:3000/login`
+- Swagger UI: `http://localhost:8000/docs`
+- API health: `http://localhost:8000/health`
+
+Sign in with `faraz_ali@aprilasia.com` and password `novaship123`, or use any account in [Demo accounts and RBAC](#7-demo-accounts-and-rbac).
+
+### Stop the application
 
 ```bash
-# Rebuild only after backend/model changes
-docker compose build api
-docker compose up -d api
-
-# Rebuild only after frontend or NEXT_PUBLIC_API_BASE changes
-docker compose build --no-cache web
-docker compose up -d web
-
-# Stop the stack; this does not delete source files or built images
 docker compose down
 ```
 
-The API image includes the trained classifier artifact, fixture bundle, seed snapshot and a local offline RAG index. Compose mounts the fixture paths at `/data/bundle` and `/data/seed/snapshot.json`, so host-relative `.env` paths cannot override their locations inside the container.
+This stops the containers. It does not delete the source tree, built images, or external Supabase data. Do not add `-v` unless you explicitly intend to remove Compose volumes.
 
-### 9.4 Docker live reload
+## 7. Demo accounts and RBAC
 
-Use this when you want Compose **and** host file edits without rebuilding:
+Every seeded account uses `DEMO_PASSWORD`, which defaults to `novaship123`.
 
-```powershell
-.\scripts\dev.ps1 docker-dev
-```
+| Role | Name | Email | Main access |
+| --- | --- | --- | --- |
+| Admin + Supervisor | Syed Faraz Ali | `faraz_ali@aprilasia.com` | All operations, policy editing, external approval, audit, export |
+| Supervisor | Hari Mardianto | `hari_mardianto@aprilasia.com` | Approval, external notification, batch actions, audit, export |
+| Supervisor | Teo Ei Leen | `eileen_teo@aprilasia.com` | Same supervisor access |
+| Operations | Najiha Nur Hanna | `hanna_azhari@aprilasia.com` | Case work, comparison, drafts, assignment, internal sharing |
+| Operations | Deswita Elvyani | `deswita_elvyani@aprilasia.com` | Same operations access |
+| Operations | Willy Situmorang | `willy_ss@aprilasia.com` | Same operations access |
+| Operations | Mitchelle Ting | `mitchelle_ting@aprilasia.com` | Same operations access |
+| Auditor | Ooi Sok Yong | `sokyong_ooi@aprilasia.com` | Read-only cases, global audit, and export |
+
+### Permission matrix
+
+| Permission | Operations | Supervisor | Admin | Auditor |
+| --- | :---: | :---: | :---: | :---: |
+| View cases and documents | Yes | Yes | Yes | Yes |
+| Compare and edit extraction | Yes | Yes | Yes | No |
+| Generate/edit drafts | Yes | Yes | Yes | No |
+| Approve an external draft | No | Yes | Yes | No |
+| Share internally | Yes | Yes | Yes | No |
+| Notify an external party | No | Yes | Yes | No |
+| Assign a case | Yes | Yes | Yes | No |
+| View policy | Yes | Yes | Yes | No |
+| Edit policy | No | No | Yes | No |
+| View global audit | No | Yes | Yes | Yes |
+| Export data | No | Yes | Yes | Yes |
+| Batch actions | No | Yes | Yes | No |
+| Ingest email | Yes | Yes | Yes | No |
+
+Self-registration at `/register` creates an account on the **shared desk** (seeded cases stay visible). Default `REGISTER_ALLOWED_ROLES=OPERATIONS_STAFF`. The hackathon demo can set `ADMIN,SUPERVISOR,OPERATIONS_STAFF` so a visitor can register with their own email as Admin and manage the current project. Registration is enabled in `demo` mode, disabled by default in `local` mode, and unavailable in `jwt` mode. The API accepts only roles listed in `REGISTER_ALLOWED_ROLES`.
+
+Sessions are HMAC-signed and expire after 12 hours by default. Logout revokes the session server-side. Login, failed login, registration, and logout outcomes are audited.
+
+## 8. Development run modes
+
+Docker and host processes cannot bind the same port at the same time. Stop the active mode before switching.
+
+### Docker live reload
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-`docker-compose.dev.yml` bind-mounts `backend/app` (uvicorn `--reload`) and `frontend/` (Next.js `npm run dev`). Do **not** also run host `npm run dev` or `uvicorn --port 8000` — they bind the same ports.
+The development overlay bind-mounts `backend/app`, `backend/scripts`, `backend/models`, and the full `frontend` directory. Uvicorn and Next.js reload when host files change.
 
-Switch back to baked demo images with `.\scripts\dev.ps1 docker` (that command rebuilds from `Dockerfile`, not `Dockerfile.dev`).
+### Windows helper
 
-### 9.5 OpenAI, Gemini and environment variables
+The PowerShell helper manages containers and local Node/Python listeners:
 
-The providers are independent and optional:
-
-
-| Component                                      | Provider           | Purpose                                                                                                          | Required variables                                                              |
-| ---------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Deterministic rules and seven-field comparison | local              | Core classification, extraction and every MATCH/MISMATCH verdict                                                 | none                                                                            |
-| Trained classifier                             | local scikit-learn | Resolves weak or ambiguous email categories                                                                      | `INTENT_MODEL_ENABLED=1`, `INTENT_MODEL_PATH=./models/intent_classifier.joblib` |
-| Chat/reasoning                                 | OpenAI             | Security explanation, final intent tie-break, verified extraction fallback, draft polish, Ask AI and translation | `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, `LLM_MODEL`                            |
-| RAG embeddings                                 | Gemini             | Embeds policy and case chunks for grounded retrieval                                                             | `EMBEDDING_PROVIDER=gemini`, `GOOGLE_API_KEY`, `GEMINI_EMBEDDING_MODEL`         |
-| RAG embeddings alternative                     | OpenAI             | Replaces Gemini for embeddings                                                                                   | `EMBEDDING_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL`         |
-
-
-The default `.env.example` is offline-safe:
-
-```dotenv
-LLM_PROVIDER=none
-EMBEDDING_PROVIDER=local
-VECTOR_STORE=local
-LANGGRAPH_CHECKPOINT=memory
+```powershell
+.\scripts\dev.ps1 docker
+.\scripts\dev.ps1 docker-dev
+.\scripts\dev.ps1 local
+.\scripts\dev.ps1 frontend
+.\scripts\dev.ps1 backend
+.\scripts\dev.ps1 status
+.\scripts\dev.ps1 stop
 ```
 
-To enable OpenAI chat/reasoning:
+If execution is blocked:
 
-```dotenv
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-proj-your-private-key
-LLM_MODEL=gpt-4.1-mini
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 docker
 ```
 
-To additionally use Gemini for RAG embeddings:
+`scripts/dev.sh` currently uses `netstat -ano`, `tasklist`, and `taskkill`; it is intended for Git Bash or similar Windows environments. On macOS and Linux, use the direct Docker and local commands in this README.
 
-```dotenv
-EMBEDDING_PROVIDER=gemini
-GOOGLE_API_KEY=your-private-google-key
-GEMINI_EMBEDDING_MODEL=models/text-embedding-004
-VECTOR_STORE=local
-RAG_DATA_DIR=./data
-```
+### Local backend and frontend
 
-After editing `.env`, recreate the API so it receives the new values. Rebuild the RAG index whenever the embedding provider/model changes because local, Gemini and OpenAI vectors have different dimensions:
+Prerequisites:
+
+- Python 3.11+
+- Node.js 20+
+- npm
+
+Terminal 1:
 
 ```bash
-docker compose up -d --force-recreate api
-curl -X POST http://localhost:8000/rag/reindex \
-  -H "Content-Type: application/json" \
-  -H "X-User-Id: u_admin_1" \
-  -d '{}'
-curl http://localhost:8000/rag/info -H "X-User-Id: u_admin_1"
-```
-
-OpenAI is not allowed to decide the seven-field verdict. The LLM may read, explain and draft; `app/core/comparator.py` alone decides MATCH/MISMATCH. The Google key is used only for embeddings in the current implementation, not Gemini chat.
-
-Never commit `.env` or place service-role/API keys in `NEXT_PUBLIC_*` variables. For production, also configure the variables relevant to the deployment:
-
-- Supabase persistence: `REPO_BACKEND=supabase`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`.
-- Durable paused agents: `LANGGRAPH_CHECKPOINT=postgres`, `LANGGRAPH_PG_URL`.
-- Production authentication: `AUTH_MODE=jwt`.
-- Gmail ingestion/sending (recommended): set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_ADDRESS`, run `python backend/scripts/gmail_authorize.py` once to save a refresh token locally, then use `EMAIL_PROVIDER=gmail`; keep `EMAIL_SEND_MODE=simulate` until the human-approval flow is verified, and switch it to `gmail` only for the real run.
-- Public URLs: `CORS_ORIGINS` for the API and `NEXT_PUBLIC_API_BASE` when building the frontend.
-
-
-
-### 9.6 Intent-classifier model
-
-The application does not fine-tune OpenAI or Gemini. It trains a small local text classifier:
-
-```text
-high-confidence rules -> TF-IDF + logistic regression -> optional OpenAI tie-break
-```
-
-Training uses a deterministic template-grouped split: 370 development emails and an untouched 150-email test set (28.85%). It writes:
-
-- `backend/models/intent_classifier.joblib` — deployable inference artifact;
-- `backend/models/intent_metrics.json` — rule/model/hybrid reports and confusion matrices;
-- `backend/models/intent_split.json` — reproducible train/test IDs and template groups.
-
-Train locally with Python 3.11:
-
-```bash
+python3.11 -m venv ../novaship-venv
+source ../novaship-venv/bin/activate
+python -m pip install -r backend/requirements.txt
 cd backend
-pip install -r requirements.txt
-python scripts/train_intent_classifier.py
-```
-
-Or train inside the same Docker environment used by the application:
-
-```bash
-docker compose build api
-docker compose run --rm --no-deps \
-  -v "${PWD}:/workspace" \
-  -w /workspace/backend \
-  -e LLM_PROVIDER=none \
-  api python scripts/train_intent_classifier.py
-```
-
-Training explicitly disables the LLM, so it does not require or spend OpenAI/Google API credits. Do not tune rules, synonyms or hyperparameters against the test IDs in `intent_split.json`; add newly labelled messages to a new development set and keep a separate future/out-of-time test set. Other people can deploy the existing `.joblib` artifact without the organiser ground truth. If the artifact is missing or incompatible, runtime safely falls back to deterministic rules.
-
-### 9.7 Local frontend and backend (no Docker)
-
-Prerequisites: Python 3.11+ and Node 20+. Stop Compose first so ports 3000 and 8000 are free (`.\scripts\dev.ps1 stop` or `.\scripts\dev.ps1 local`, which also opens the two terminals on Windows).
-
-```bash
-# From the repo root — Compose must not be bound to 8000/3000
-./scripts/dev.sh stopcd
-
-# Terminal 1 — API (run from backend/; seed paths in .env resolve to the repo root)
-cd backend
-pip install -r requirements.txt
-python -m app.seed.make_seed
 python -m uvicorn app.main:app --reload --port 8000
+```
 
-# Terminal 2 — UI (run from frontend/, not from backend/)
+Terminal 2:
+
+```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-`GET /` on the API returns 404; open `/docs` or `/health`. A healthy memory demo reports `"cases": 520`. If you see `cases=0`, the seed file was not found — use the commands above (do not start uvicorn from a nested folder with a broken relative `SEED_SNAPSHOT`).
+The backend loads the repository-root `.env` even when Uvicorn starts inside `backend/`. Relative bundle and seed paths are resolved against the repository root.
 
-### 9.8 Mixed: Docker + local
+### Mixed modes
 
-The browser calls `NEXT_PUBLIC_API_BASE` (default `http://localhost:8000`), so the UI container and a host Next.js app both talk to whatever is on port 8000.
+Local UI with Docker API:
 
-**Local UI, Docker API** (iterate on React without rebuilding the web image):
-
-```powershell
-.\scripts\dev.ps1 frontend
-# or: docker compose stop web
-#      cd frontend; npm run dev
+```bash
+docker compose stop web
+docker compose up -d api
+cd frontend
+npm ci
+npm run dev
 ```
 
-**Local API, Docker UI** (iterate on FastAPI without rebuilding the API image):
+Local API with Docker UI:
 
-```powershell
-.\scripts\dev.ps1 backend
-# or: docker compose stop api
-#      cd backend; python -m uvicorn app.main:app --reload --port 8000
+```bash
+docker compose stop api
+cd backend
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-Leave the unused Compose service **stopped**. Running `docker compose up -d --build` while `npm run dev` still holds 3000 fails with `bind: Only one usage of each socket address`. Running host uvicorn on 8000 while the API container is up fails with `WinError 10013` or `EADDRINUSE`.
+Keep the unused Compose service stopped. The browser uses `NEXT_PUBLIC_API_BASE`, which defaults to `http://localhost:8000`.
 
-### 9.9 Tests, scoreboard and acceptance checks
+## 9. Configuration reference
 
-Local Python:
+Copy `.env.example` to `.env`. Never commit `.env`. Variables with public frontend visibility must be safe for a browser; never put an API key or Supabase service-role key in `NEXT_PUBLIC_*`.
+
+### Core and persistence
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REPO_BACKEND` | `memory` | `memory` or `supabase` |
+| `TENANT_ID` | `tenant_april` | Tenant used for repository and vector scoping |
+| `BUNDLE_DIR` | `./sdoc-hackathon-bundle` | Email fixture root |
+| `SEED_SNAPSHOT` | `./supabase/seed/snapshot.json` | Snapshot loaded by `MemoryRepository` |
+| `AUTO_SEED` | `1` | Load the snapshot at API startup |
+| `SUPABASE_URL` | placeholder | Supabase project URL |
+| `SUPABASE_SECRET_KEY` | empty | Preferred modern `sb_secret_*` server credential |
+| `SUPABASE_SERVICE_ROLE_KEY` | placeholder | Supported legacy server-only credential used when the modern secret is absent |
+| `SUPABASE_JWT_ALGORITHM` | `JWKS` | JWT verification mode; use `HS256` only for an explicitly configured legacy shared secret |
+| `SUPABASE_JWT_SECRET` | placeholder | Legacy HS256 secret; not used by the default JWKS mode |
+| `SUPABASE_STORAGE_BUCKET` | `documents` | Private attachment bucket |
+
+### Authentication
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `AUTH_MODE` | `demo` | `demo` accepts local sessions and `X-User-Id`; `local` accepts hardened local sessions; `jwt` accepts Supabase JWTs only |
+| `SESSION_SECRET` | insecure development fallback | HMAC secret for built-in session tokens; mandatory to replace in production |
+| `SESSION_TTL_HOURS` | `12` | Session lifetime |
+| `DEMO_PASSWORD` | `novaship123` | Password assigned to seeded users without a credential |
+| `REGISTER_ALLOWED_ROLES` | `OPERATIONS_STAFF` | Roles the register form and API accept. Least privilege by default. Hackathon demo: `ADMIN,SUPERVISOR,OPERATIONS_STAFF` (Admin first) |
+| `SELF_REGISTRATION_ENABLED` | `0` | Enables registration in `local` mode; demo mode keeps hackathon registration enabled |
+
+### Classification and LLM
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `INTENT_MODEL_ENABLED` | `1` | Enable the local trained intent classifier |
+| `INTENT_MODEL_PATH` | auto-detected `backend/models/intent_classifier.joblib` | Classifier artifact path |
+| `LLM_PROVIDER` | `none` | `none` or `openai` |
+| `OPENAI_API_KEY` | empty | Used only when OpenAI chat or embeddings are enabled |
+| `LLM_MODEL` | `gpt-4o-mini` in code when unset | Optional chat-model override; `.env.example` suggests `gpt-4.1-mini` |
+
+If the model artifact or API call fails, the application falls back to deterministic rules. The comparator never falls back to an LLM.
+
+### RAG and agent checkpoints
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `EMBEDDING_PROVIDER` | `local` | `local`, `gemini`, or `openai` |
+| `GOOGLE_API_KEY` | empty | Gemini embedding key |
+| `GEMINI_EMBEDDING_MODEL` | `models/text-embedding-004` | Gemini embedding model |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `EMBEDDING_DIMENSIONS` | `768` in `.env.example` | Output dimension; must match the selected provider and vector schema |
+| `VECTOR_STORE` | `local` | `local` JSON index or `supabase` pgvector |
+| `SUPABASE_VECTOR_DIMENSIONS` | `768` | Expected live pgvector column dimension; startup rejects mismatches |
+| `RAG_DATA_DIR` | `backend/data` | Markdown knowledge and local index directory |
+| `LANGGRAPH_CHECKPOINT` | `memory` | `memory` or `postgres` |
+| `LANGGRAPH_PG_URL` | empty | PostgreSQL connection string for durable agent checkpoints |
+| `LANGGRAPH_STRICT_MSGPACK` | `true` in `.env.example` | Restricts persisted checkpoint deserialisation to known-safe types |
+
+The local, Gemini, and OpenAI embeddings use different dimensions. Rebuild the index after changing provider or model. The pgvector migration defaults to 768 dimensions and must be adjusted before using a provider with another dimension.
+
+The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requirements.txt`. For replaceable serverless instances, use a durable PostgreSQL checkpoint store rather than process memory.
+
+### Email, OCR, and networking
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `EMAIL_PROVIDER` | `none` | `none`, `bundle`, or `gmail` for inbound polling |
+| `EMAIL_SEND_MODE` | `simulate` | `simulate` or `gmail`; real delivery still requires the normal human approval path |
+| `GMAIL_CLIENT_ID` | empty | Google OAuth client ID |
+| `GMAIL_CLIENT_SECRET` | empty | Google OAuth client secret |
+| `GMAIL_REFRESH_TOKEN` | empty | Refresh token created by the local authorisation helper |
+| `GMAIL_ADDRESS` | empty | Monitored and sending mailbox |
+| `OCR_ENABLED` | `0` | Set to `1` to try the optional OCR hook for image-only PDFs |
+| `MAX_UPLOAD_BYTES` | `10485760` | Maximum bytes accepted for one attachment |
+| `MAX_ATTACHMENT_COUNT` | `10` | Maximum attachments accepted in one inbound message |
+| `CORS_ORIGINS` | local UI origins | Comma-separated API origins |
+| `APP_ENV` | `development` | Requires an explicit non-wildcard CORS allowlist outside development, test, and demo |
+| `API_PREFIX` | empty locally; `/api` on Vercel | Optional prefix applied to the API, docs, and OpenAPI routes |
+| `LOG_LEVEL` | `INFO` | Backend log level |
+| `PORT` | `8000` | API container listen port used by the Docker image command |
+| `NEXT_PUBLIC_API_BASE` | `http://localhost:8000` | API base embedded in the frontend production build |
+| `WEB_PORT` | `3000` | Host port used by Compose for the frontend |
+| `API_PORT` | `8000` | Host port used by Compose for the API |
+
+OCR additionally requires `pytesseract`, `pdf2image`, Tesseract, and Poppler. They are not installed by the default Docker image or Python requirements.
+
+After setting the Gmail client ID and secret in a local `.env`, create or rotate the refresh token without printing it:
+
+```bash
+python backend/scripts/gmail_authorize.py
+```
+
+## 10. Using the application
+
+### Pages
+
+| Route | Purpose |
+| --- | --- |
+| `/` | Inbox dashboard, metrics, filters, case table, and batch actions |
+| `/cases/{id}` | Email, documents, comparison, evidence, drafts, actions, collaboration, errors, and timeline |
+| `/verification` | Per-field match, mismatch, and review statistics |
+| `/security` | Security-review, suspicious, spam, and anomaly queue |
+| `/agent` | LangGraph diagram and run/state/resume controls |
+| `/audit` | Global audit log for Supervisor, Admin, and Auditor |
+| `/policies` | Effective policy for permitted roles; editing for Admin only |
+| `/welcome` | Product guide |
+| `/login` | Sign in and demo account picker |
+| `/register` | Self-registration onto the shared desk; roles come from `REGISTER_ALLOWED_ROLES` |
+
+### Recommended operator workflow
+
+1. Sign in and open the Inbox.
+2. Filter for `HUMAN_REVIEW`, mismatches, or high priority.
+3. Open a case and review the source email and document status.
+4. Inspect all seven field results and the literal evidence snippets.
+5. If a document is missing or unreadable, upload a replacement and retry.
+6. Review or edit the generated draft.
+7. Approve, reject, assign, request review, or mark the case complete.
+8. For Notify Party, select an authorised recipient and inspect the disclosure preview.
+9. Confirm an external share if your role permits it.
+10. Use the case timeline or Audit page to verify the recorded action.
+
+### Case states
+
+The API contract defines 18 states:
+
+```text
+RECEIVED
+SECURITY_CHECK
+SECURITY_REVIEW
+CLASSIFIED
+NO_ACTION_INFO
+DOCUMENTS_DETECTED
+WAITING_DOCUMENTS
+EXTRACTING
+COMPARING
+NO_MISMATCH_DETECTED
+MISMATCH_DETECTED
+HUMAN_REVIEW
+DRAFT_READY
+NOTIFY_PARTY
+AWAITING_RESPONSE
+ASSIGNED
+COMPLETED
+ERROR
+```
+
+Not every case visits every state. The pipeline may finish early for spam, information-only mail, security review, missing documents, or extraction uncertainty.
+
+## 11. API reference
+
+Swagger UI at `/docs` is the source of truth for request and response schemas. The service currently exposes 56 routes.
+
+### Authentication
+
+Use one of these mechanisms:
+
+1. Built-in session token: `Authorization: Bearer nsa.<token>`.
+2. Supabase JWT: `Authorization: Bearer <jwt>` with `SUPABASE_JWT_SECRET` configured.
+3. Demo-only header: `X-User-Id: u_admin_1` when `AUTH_MODE=demo`.
+
+Unauthenticated routes are `/health`, `/auth/config`, `/auth/login`, `/auth/register`, and `/contracts/fields`. Other routes require a valid identity and, where applicable, a permission.
+
+Login example:
+
+```bash
+curl -X POST http://localhost:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"faraz_ali@aprilasia.com","password":"novaship123"}'
+```
+
+For quick demo calls:
+
+```bash
+curl 'http://localhost:8000/cases?mismatch=yes&limit=5' \
+  -H 'X-User-Id: u_admin_1'
+```
+
+### Route catalogue
+
+#### Health, identity, and contracts
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/health` | Repository type, case/email counts, timestamp |
+| GET | `/me` | Current user and permissions |
+| GET | `/users` | Users, teams, and approved parties |
+| GET | `/contracts/fields` | Seven field names and exact no-mismatch message |
+
+#### Authentication
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/auth/config` | Auth mode, registration roles, and demo account metadata |
+| POST | `/auth/login` | Issue a session token |
+| POST | `/auth/register` | Create an account (role from `REGISTER_ALLOWED_ROLES`) and session |
+| POST | `/auth/logout` | Revoke the current session |
+| GET | `/auth/session` | Validate the current session and return permissions |
+
+#### Ingestion and connectors
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/webhooks/email` | Ingest an email with base64 attachments or fixture paths |
+| POST | `/connectors/poll?limit=25` | Poll the configured bundle or Gmail connector |
+| POST | `/ingest/bundle?limit=0` | Import the local SDOC fixture bundle |
+
+The webhook is idempotent on message content. A duplicate returns the existing case instead of creating another one.
+
+#### Dashboard and cases
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/dashboard/metrics` | Operational metrics grouped by status, intent, and priority |
+| GET | `/dashboard/fields` | Aggregate results for each verification field |
+| GET | `/dashboard/field/{field}` | Cases for one field and optional result filter |
+| GET | `/cases` | Search, filter, sort, and paginate cases |
+| GET | `/cases/{case_id}` | Complete case view with source email |
+| GET | `/cases/{case_id}/comparison` | Seven-field comparison |
+| GET | `/cases/{case_id}/report` | Compact and structured discrepancy report |
+| GET | `/cases/{case_id}/audit` | Case audit events and shares |
+| GET | `/cases/{case_id}/documents/{attachment_id}` | Attachment metadata and optional signed URL |
+| GET | `/cases/{case_id}/documents/{attachment_id}/raw` | Raw attachment bytes with `nosniff` |
+
+`GET /cases` supports `status`, `priority`, `intent`, `category`, `mismatch=yes|no`, `assigned`, `shared`, `sender`, `q`, `min_confidence`, `security`, `date_from`, `date_to`, `limit`, `offset`, and `sort`.
+
+#### Pipeline and recovery
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/cases/{case_id}/classify` | Force case reprocessing from classification |
+| POST | `/cases/{case_id}/extract` | Force reprocessing for extraction |
+| POST | `/cases/{case_id}/compare` | Force reprocessing for comparison |
+| POST | `/cases/{case_id}/retry` | Retry the case pipeline |
+| POST | `/cases/{case_id}/upload` | Upload/re-link a missing SI or BL, then rerun |
+
+The current service re-runs the complete pipeline for the classify/extract/compare/retry endpoints; the step name is recorded in the audit event.
+
+#### Human decisions and collaboration
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/cases/{case_id}/draft` | Generate another draft, optionally translated |
+| POST | `/cases/{case_id}/draft/edit` | Edit and version a draft |
+| POST | `/cases/{case_id}/approve` | Approve a draft, then simulate or deliver it through Gmail according to `EMAIL_SEND_MODE` |
+| POST | `/cases/{case_id}/reject` | Reject a draft and return the case to review |
+| POST | `/cases/{case_id}/assign` | Assign a user or team |
+| POST | `/cases/{case_id}/no-action` | Mark the case as no action required |
+| POST | `/cases/{case_id}/complete` | Complete the case |
+| POST | `/cases/{case_id}/request-review` | Send the case to human review |
+| POST | `/cases/{case_id}/notify-party` | Begin the Notify Party flow |
+| GET | `/cases/{case_id}/recipients` | List recipient choices and whether they are allowed |
+| POST | `/cases/{case_id}/share` | Preview or create an internal/external share |
+| POST | `/cases/{case_id}/share/{share_id}/confirm` | Confirm a pending external share |
+| POST | `/shares/{share_id}/acknowledge` | Record view, acknowledgement, and response |
+| POST | `/cases/batch` | Confirmed batch draft/review operations |
+
+#### Ask AI, translation, export, and policy
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/cases/{case_id}/ask` | Grounded question about one case |
+| POST | `/cases/{case_id}/translate` | Translate supplied text or the source email |
+| GET | `/export/cases.csv` | Export cases as CSV |
+| GET | `/export/submission.json` | Export SDOC submission JSON |
+| GET | `/policies` | Active, effective, explained, and versioned policy |
+| PUT | `/policies` | Update policy with an audit note; Admin only |
+
+#### LangGraph, RAG, security, and global audit
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/agent/graph` | Mermaid graph and node list |
+| POST | `/agent/run/{case_id}` | Run the agent until completion or interrupt |
+| GET | `/agent/state/{case_id}` | Read checkpoint and interrupt state |
+| POST | `/agent/resume/{case_id}` | Resume with a human decision |
+| GET | `/rag/info` | Embedding provider, dimensions, store, and chunk count |
+| POST | `/rag/search` | Search knowledge and optional case-scoped chunks |
+| POST | `/rag/reindex` | Rebuild knowledge and case vectors; Admin only |
+| GET | `/security/queue` | Security and anomaly cases |
+| GET | `/audit` | Filtered global audit log |
+
+## 12. Persistence and Supabase
+
+### Memory mode
+
+`REPO_BACKEND=memory` loads `supabase/seed/snapshot.json` at startup. This mode is fast, deterministic, and suitable for demos and tests. Changes, registered users, and revoked sessions are lost when the API process restarts.
+
+### Supabase mode
+
+Apply migrations in order:
+
+1. `supabase/migrations/0001_schema.sql`: 24 operational tables, indexes, audit trigger, and private storage bucket.
+2. `supabase/migrations/0002_rls.sql`: tenant-aware row-level security and role-gated policies.
+3. `supabase/migrations/0003_vector.sql`: pgvector `case_embeddings` table and scoped similarity RPC.
+4. `supabase/migrations/0004_accounts.sql`: `user_credentials` and `revoked_sessions`.
+5. `supabase/migrations/0005_rag_scoped_search.sql`: tenant/case/source filtering before vector ranking.
+6. `supabase/migrations/0006_recoverable_share_confirmation.sql`: recoverable, idempotent external-delivery finalisation.
+
+Then load `supabase/seed/seed.sql`, or push a generated seed:
+
+```bash
+cd backend
+python -m app.seed.make_seed --push
+```
+
+The server-side repository uses `SUPABASE_SERVICE_ROLE_KEY` and enforces permissions in FastAPI. RLS is still configured to protect direct authenticated access. Attachments use a private `documents` bucket and five-minute signed URLs.
+
+Regenerate the snapshot and SQL after changing the pipeline:
+
+```bash
+cd backend
+python -m app.seed.make_seed
+```
+
+See [supabase/README.md](supabase/README.md) for schema verification queries and the full table list.
+
+## 13. AI, RAG, and LangGraph
+
+### Intent classifier
+
+The intent cascade is:
+
+```text
+high-confidence rules -> local TF-IDF/logistic regression -> optional OpenAI fallback
+```
+
+The checked-in model uses a deterministic template-grouped split of 370 development emails and 150 untouched test emails. Its artifact and reports are:
+
+- `backend/models/intent_classifier.joblib`
+- `backend/models/intent_metrics.json`
+- `backend/models/intent_split.json`
+
+Retrain it without network calls:
+
+```bash
+cd backend
+LLM_PROVIDER=none python scripts/train_intent_classifier.py
+```
+
+### RAG
+
+Retrieval-augmented generation (RAG) indexes:
+
+- policy, glossary, and port-alias Markdown files under `backend/data/`;
+- source email text;
+- case summary and comparison;
+- extracted document text.
+
+Case chunks carry `case_id`. Search for one case accepts global knowledge plus that case's chunks and rejects chunks from other cases.
+
+Rebuild the index through the API:
+
+```bash
+curl -X POST http://localhost:8000/rag/reindex \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Id: u_admin_1' \
+  -d '{}'
+
+curl http://localhost:8000/rag/info \
+  -H 'X-User-Id: u_admin_1'
+```
+
+### LangGraph human-in-the-loop flow
+
+```text
+security_precheck
+  -> security_agent
+  -> classify
+  -> detect_documents
+  -> extract
+  -> compare
+  -> summarize_and_draft
+  -> human_review (interrupt)
+  -> notify
+```
+
+The graph pauses only when a human decision is required. Resume actions include `approve`, `edit`, `reject`, `reassign`, `notify_party`, `retry`, `mark_no_action`, and `complete`. The resume path invokes the same permission-checked case services used by the standard UI.
+
+## 14. Security and safety model
+
+- Attachment content is parsed as data and never executed.
+- Executable/script extensions are blocked, including `.exe`, `.bat`, `.cmd`, `.js`, `.vbs`, `.scr`, `.msi`, `.ps1`, `.jar`, `.com`, and `.dll`.
+- Suspicious sender domains, links, spam phrases, attachment floods, duplicate messages, duplicate documents, and policy-bypass requests produce evidence-grounded signals.
+- A critical attachment signal or policy-bypass request routes the case to `SECURITY_REVIEW`.
+- Unknown, missing, blank, unreadable, or low-confidence values are not converted into a false mismatch.
+- Every protected route resolves an authenticated user and checks a named permission.
+- External recipients require a Supervisor or Admin, an approved party record, a preview, and human confirmation.
+- Supabase rows are tenant-scoped and documents are private.
+- Raw attachment responses include `X-Content-Type-Options: nosniff`.
+- Ask AI is case-scoped and refuses actions that bypass the human approval path.
+
+Production operators must replace `SESSION_SECRET`, use `AUTH_MODE=jwt` or another production identity layer, rotate provider secrets, restrict CORS, review trusted domains, and test restore/backup procedures.
+
+## 15. Tests, evaluation, and reproducibility
+
+### Current verification
+
+The following checks were run on 20 September 2026:
+
+| Check | Result |
+| --- | --- |
+| Backend tests in the API container | **187 passed in 13.52s** |
+| Frontend `npm run build` | Passed, including TypeScript and Next.js page generation |
+| `docker compose config --quiet` | Passed |
+| Offline 520-email replay | Completed in 2.8s on the verification machine; timing is machine-dependent |
+
+Backend coverage includes comparator and normalisation edge cases, extraction evidence, document readers, upload hardening, Gmail polling and delivery, duplicate handling, recoverable external delivery, RBAC, login/register/logout, policy permissions, batch confirmation, trained-classifier fallback, LangGraph persistence and interrupt/resume, RAG case scoping, field analytics, and security queue endpoints.
+
+### Run backend tests locally
 
 ```bash
 cd backend
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
-python scripts/run_bundle.py
-python -m pytest -q -k container_3_vs_4
-python -m pytest -q -k all_seven_match
 ```
 
-Docker (also works on a machine without local Python):
+### Run backend tests with Docker
+
+The API image does not contain the test directory, so mount the repository and set the working directory:
 
 ```bash
 docker compose run --rm --no-deps \
-  -v "${PWD}:/workspace" -w /workspace/backend \
-  -e LLM_PROVIDER=none api pytest -q
+  -v "${PWD}:/workspace" \
+  -w /workspace/backend \
+  -e LLM_PROVIDER=none \
+  api pytest -q
+```
 
+PowerShell:
+
+```powershell
+docker compose run --rm --no-deps `
+  -v "${PWD}:/workspace" `
+  -w /workspace/backend `
+  -e LLM_PROVIDER=none `
+  api pytest -q
+```
+
+### Build the frontend
+
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
+### Replay the SDOC bundle
+
+```bash
+cd backend
+LLM_PROVIDER=none python scripts/run_bundle.py
+```
+
+Or with Docker:
+
+```bash
 docker compose run --rm --no-deps \
-  -v "${PWD}:/workspace" -w /workspace/backend \
-  -e LLM_PROVIDER=none api python scripts/run_bundle.py --out /workspace/submission.json
+  -v "${PWD}:/workspace" \
+  -w /workspace/backend \
+  -e LLM_PROVIDER=none \
+  api python scripts/run_bundle.py --out /workspace/submission.json
 ```
 
-Expected test baseline: `186 passed`. The repository records an organiser score of `FINAL SCORE = 1.0000`; reproducing that score requires the private ground-truth file. Keep `LLM_PROVIDER=none` for deterministic, fast, network-free bundle execution.
+The runner always writes a submission. It prints the official score only when both `sdoc-hackathon-docker/data_v2/ground_truth.json` and `sdoc-hackathon-docker/server/scoring.py` are available. The ground-truth file is intentionally gitignored, so a normal clone prints `no ground truth available - submission written only`.
 
-Troubleshooting:
+The project records a prior official result of `FINAL SCORE = 1.0000`, including stage-1 macro-F1 `1.000`, defect-F1 `1.000`, end-to-end `46/46`, and escalation F1 `1.000`. Treat those values as a recorded benchmark unless you have the private ground truth and rerun the scorer yourself.
 
-- Port 3000 or 8000 already in use / `WinError 10013` / Compose `ports are not available`: `.\scripts\dev.ps1 stop` then start **one** mode from [§9.1](#91-run-modes). Do not run Docker web and `npm run dev` together, or Docker api and host uvicorn on 8000 together.
-- Docker UI looks unchanged after a rebuild: `docker compose build --no-cache web && docker compose up -d web`, or use [§9.4](#94-docker-live-reload).
-- Cases suddenly show unreadable/missing attachments in Docker: confirm the Compose service uses `/data/bundle` and `/data/seed/snapshot.json`, then recreate the API.
-- RAG reports chunks but returns no hits after switching providers: run `/rag/reindex`; the stored vector dimensions do not match the new provider.
-- The model cannot load: install the pinned `scikit-learn` and `joblib` versions from `backend/requirements.txt`, or rebuild the API image.
-- `.env` changed but behaviour did not: `docker compose up -d --force-recreate api`.
-- Frontend API URL changed: rebuild `web`; `NEXT_PUBLIC_API_BASE` is embedded during the Next.js **production** build (not in `docker-dev` / `npm run dev`).
+Keep `LLM_PROVIDER=none` during regression scoring to make the run deterministic, offline, and free of provider cost.
 
-Sign in as different test accounts ([§9.2](#92-sign-in-register-and-test-accounts): Operations · Supervisor · Admin · Auditor) to see RBAC in action. The full AI-agent architecture and provider-specific test scenarios are documented in [AGENT.md](AGENT.md).
+## 16. Deployment notes
 
-## 10. User Feedback and Impact Metrics
+### Container deployment
 
+- The API image is self-contained with application code, model artifact, knowledge files, fixture bundle, and seed snapshot.
+- The web image uses Next.js standalone output.
+- `NEXT_PUBLIC_API_BASE` is embedded at frontend build time. Rebuild `web` after changing it.
+- The default Compose file starts only `api` and `web`; it does not start a local Supabase stack.
+- The optional `scoring` profile also expects the organiser server and private ground truth to be present.
 
+### Vercel Services deployment
 
-### Measured (reproducible with `python scripts/run_bundle.py`)
+The repository also supports a single Vercel project: the root `vercel.json` builds `frontend/` as Next.js, exposes `backend/` as FastAPI under `/api`, and lets the browser use the same-origin API by default. Start with `.env.vercel.example`, keep server credentials out of `NEXT_PUBLIC_*`, and follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the exact handoff and smoke tests.
 
+### Production checklist
 
-| Metric                                                                                                                     | Result                                                                                                                                                                                     |
-| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Stage 1 — intent/category accuracy · macro-F1                                                                              | **1.000 · 1.000** (520/520; confusion matrix diagonal)                                                                                                                                     |
-| Stage 3 — defect precision · recall · F1 · field-F1 · exact-field match rate                                               | **1.000 · 1.000 · 1.000 · 1.000 · 1.000** (200 comparable cases)                                                                                                                           |
-| End-to-end (defect routed **and** exact fields flagged)                                                                    | **46 / 46 = 1.000**                                                                                                                                                                        |
-| Reliability — escalation recall · precision · F1 (20 NEEDS_REVIEW cases: wrong doc, missing file, unreadable, blank value) | **1.000 · 1.000 · 1.000**                                                                                                                                                                  |
-| **Official final score** (0.3·stage1 + 0.2·stage3 + 0.5·e2e)                                                               | **1.0000**                                                                                                                                                                                 |
-| Throughput                                                                                                                 | 520 emails in 4.5 s ≈ **9 ms/email** on a laptop, single worker                                                                                                                            |
-| Required acceptance test (SI 3 × 40'HC / 22,000 kg vs BL 4 × 40'HC / 22,000 kg)                                            | `mismatch_count = 1`, `container_count = MISMATCH`, `gross_weight_kg = MATCH`, no other field flagged ✔                                                                                    |
-| All-seven-match message                                                                                                    | exactly `No mismatch detected.` ✔                                                                                                                                                          |
-| Notify Party acceptance test                                                                                               | mismatch → HUMAN_REVIEW → NOTIFY_PARTY → recipient picker → external requires confirmation → preview contains only intended fields → `NOTIFY_PARTY_SIMULATED` in demo or `NOTIFY_PARTY_SENT` after Gmail acceptance → AWAITING_RESPONSE ✔ |
-| Security tests                                                                                                             | ops role cannot notify external party (403 + `SHARE_DENIED` audit) · unapproved party blocked · `.exe` attachment ⇒ SECURITY_REVIEW, never executed · duplicate message ⇒ no second case ✔ |
-| Automated tests                                                                                                            | 186 passed (incl. login/register/logout + session RBAC, fail-closed Gmail delivery state handling, trained-classifier holdout/runtime tests, LangGraph pause/resume, security agent routing, RAG case scoping, and P2 assistant safety) |
+- Set `REPO_BACKEND=supabase` and apply all migrations.
+- Replace `SESSION_SECRET`; use `AUTH_MODE=local` for hardened application sessions or complete the frontend identity wiring before selecting JWT-only mode.
+- Set exact production `CORS_ORIGINS`.
+- Store secrets in the deployment platform, not in the repository or frontend variables.
+- Put the API behind TLS and a reverse proxy/load balancer.
+- Use external object storage and database backups.
+- Decide and test a durable LangGraph checkpoint store if paused graphs must survive restarts.
+- Review pgvector dimensions before building a Supabase index.
+- Keep `EMAIL_SEND_MODE=simulate` until the deployed approval, recipient, idempotency, and recovery controls are acceptance-tested. Enable `gmail` deliberately.
+- Add observability, rate limiting, secret rotation, retention rules, and incident procedures before real production use.
 
+## 17. Troubleshooting
 
+### Port 3000 or 8000 is already in use
 
+Stop the conflicting host process or Compose service. Do not run Docker web and local Next.js on the same port, or Docker API and local Uvicorn on the same port.
 
-### Estimated operational impact (assumptions stated)
+Override Compose host ports in `.env`:
 
-- Manual seven-field check ≈ 5 min/pair → automated < 0.05 s: **≈ 9 operator-hours saved per 109 comparisons**, redirected to the 46 real exceptions.
-- Every mismatch ships with a ready correction draft: reply latency drops from "next pass through the inbox" to "review and approve".
-- 100 informational messages auto-filed as *No Reply Needed*: ~20 % of the inbox removed from the action queue without losing searchability.
-
-
-
-### User feedback (pilot protocol — fill in after Day 21 testing with real operators)
-
-We deliberately do not publish invented testimonials. The pilot script asks each tester (documentation staff, supervisor, auditor) to complete five tasks and rate 1–5:
-
-
-| Task                                     | Question                                       | Ops | Sup | Aud |
-| ---------------------------------------- | ---------------------------------------------- | --- | --- | --- |
-| Find the newest mismatch case            | "Could you tell *what* was wrong within 10 s?" |     |     |     |
-| Open evidence for a mismatched field     | "Did the snippet/label prove the value?"       |     |     |     |
-| Approve or edit the correction draft     | "Would you send this text as-is?"              |     |     |     |
-| Notify the customer's documentation desk | "Was it clear what data would be disclosed?"   |     |     |     |
-| Read the audit history                   | "Could you reconstruct who did what and why?"  |     |     |     |
-
-
-Internal dry-run observations (the build team, not end users): the seven-field card was readable at a glance; the *"Notify Party ≠ permission to send"* note prevented one accidental external share during testing; the biggest request was keyboard shortcuts for Approve/Reject — logged for Day 21.
-
-## 11. Conclusion
-
-NovaShip Averis shows that the right split of responsibilities makes AI trustworthy in a compliance-heavy workflow: **let the model read, sort, summarise and draft; let deterministic code decide; let humans approve; log everything.** On the hackathon inbox the system routes every email correctly, finds every planted defect with the exact field, raises zero false alarms, escalates every undecidable case with a reason, and does so in seconds — while the operator keeps full control of what leaves the mailbox. The same contracts run against in-memory fixtures, Supabase and Docker, so the four-person team can build in parallel and swap the persistence layer on Day 20 without touching the AI or the UI.
-
-## 12. Repository map
-
+```dotenv
+WEB_PORT=3001
+API_PORT=8001
+NEXT_PUBLIC_API_BASE=http://localhost:8001
 ```
+
+Rebuild the web image after changing `NEXT_PUBLIC_API_BASE`.
+
+### Docker cannot find `.env`
+
+```bash
+cp .env.example .env
+```
+
+Compose declares the root `.env` as the API `env_file`, so a fresh clone needs this copy even when all defaults are acceptable.
+
+### API reports zero cases
+
+Check `/health`. In memory mode, confirm that `SEED_SNAPSHOT` points to `supabase/seed/snapshot.json` and `AUTO_SEED=1`. In Docker, recreate the API after checking the snapshot mount:
+
+```bash
+docker compose up -d --force-recreate api
+```
+
+### The UI still shows old code
+
+Production images do not bind-mount source files:
+
+```bash
+docker compose build --no-cache web
+docker compose up -d web
+```
+
+For active development, use the Compose live-reload overlay.
+
+### `.env` changes have no effect
+
+Environment variables are read when the API process starts:
+
+```bash
+docker compose up -d --force-recreate api
+```
+
+### The local classifier does not load
+
+Install the pinned scikit-learn and joblib versions from `backend/requirements.txt`, verify `INTENT_MODEL_PATH`, or rebuild the API image. Runtime safely falls back to rules.
+
+### RAG has chunks but returns no hits after a provider change
+
+The vector dimensions no longer match. Rebuild the index. For Supabase, also update the vector column dimension and recreate/truncate the index as described in `0003_vector.sql`.
+
+### Image-only PDF remains unreadable
+
+Default images do not include OCR system packages. Either request a text-readable document or install Tesseract, Poppler, `pytesseract`, and `pdf2image`, then set `OCR_ENABLED=1`.
+
+### An approved draft did not send real email
+
+Check `EMAIL_SEND_MODE`. In the safe default `simulate` mode, the item is recorded as simulated and no provider call occurs. For live delivery, set `EMAIL_SEND_MODE=gmail` and configure all four Gmail OAuth variables. If an item reaches `DELIVERY_UNKNOWN`, do not retry automatically: reconcile the audited recipient, subject, and approval time against Gmail Sent first.
+
+### `GET /` on port 8000 returns 404
+
+This is expected. Use `/health` for health checks or `/docs` for Swagger UI.
+
+## 18. Repository map
+
+```text
 NovaShip_Averis/
-├── README.md · AGENT.md · P1.md · P2.md · P3.md · P4.md   ← this file, agent docs, per-person guides
-├── docker-compose.yml · docker-compose.dev.yml · .env.example
-├── scripts/dev.ps1 · scripts/dev.sh                 run-mode helpers (docker / docker-dev / local / mixed)
-├── backend/                                       FastAPI service
-│   ├── app/contracts/schemas.py                   FROZEN contracts (enums, evidence, comparison, case, audit)
-│   ├── app/core/{normalizer,comparator,policy,recommendation}.py   deterministic logic
-│   ├── app/ai/{security_precheck,intent_classifier,attachment_classifier,extractor,summary_draft,assistant,anomaly,llm}.py
-│   ├── app/pipeline/orchestrator.py               12-node classic pipeline, idempotent, audited
-│   ├── app/agents/{state,prompts,tools,nodes,graph,rag,create_index}.py   LangGraph agent + RAG
-│   ├── data/                                      RAG knowledge folder (policy, glossary, ports)
-│   ├── app/repositories/{base,memory,supabase_repo}.py
-│   ├── app/services/{case_service,submission}.py   actions, Notify Party, batch, policy versioning
-│   ├── app/api/routes.py · app/main.py · app/auth/rbac.py · app/connectors/email_connectors.py
-│   ├── app/seed/make_seed.py                      Supabase seed generator (all 24 tables)
-│   ├── scripts/run_bundle.py                      official scoreboard runner
-│   └── tests/                                     49 tests
-├── frontend/                                      Next.js dashboard (app/, components/, lib/api.ts)
-├── supabase/migrations/{0001_schema,0002_rls,0003_vector}.sql · supabase/seed/{seed.sql,snapshot.json,tables/*.json}
-├── docs/CONTRACTS.md · docs/DEMO_SCRIPT.md
-├── sdoc-hackathon-bundle/                         inbox fixtures (520 emails, 250 attachments)
-└── sdoc-hackathon-docker/                         organisers' scorer (optional, profile "scoring")
+├── README.md                         Main project guide
+├── AGENT.md                          AI, agent, RAG, and provider guide
+├── P1.md ... P4.md                   Team workstream guides
+├── .env.example                      Configuration template
+├── docker-compose.yml                Baked demo stack
+├── docker-compose.dev.yml            Live-reload overlay
+├── scripts/
+│   ├── dev.ps1                       Windows run-mode helper
+│   └── dev.sh                        Git Bash/Windows shell helper
+├── backend/
+│   ├── app/main.py                   FastAPI entry point
+│   ├── app/api/                      Auth, case, agent, RAG, audit routes
+│   ├── app/contracts/schemas.py      Shared enums and data contracts
+│   ├── app/pipeline/orchestrator.py  Main audited pipeline
+│   ├── app/agents/                   LangGraph state, nodes, tools, RAG
+│   ├── app/ai/                       Classifiers, extraction, drafts, assistant
+│   ├── app/core/                     Normaliser, comparator, policy, recommendation
+│   ├── app/readers/                  Safe attachment readers
+│   ├── app/repositories/             Memory and Supabase implementations
+│   ├── app/services/                 Case actions and submission conversion
+│   ├── app/auth/                     Accounts, sessions, JWT, RBAC
+│   ├── app/connectors/               Bundle and Gmail inbound/outbound adapters
+│   ├── app/seed/                      Snapshot and SQL seed generator
+│   ├── data/                          RAG knowledge files and local index target
+│   ├── models/                        Trained classifier and evaluation artifacts
+│   ├── scripts/                       Bundle replay and model training
+│   └── tests/                         187 passing backend tests at the documented baseline
+├── frontend/
+│   ├── app/                           10 App Router pages
+│   ├── components/                    Shell, comparison, policy, collaboration UI
+│   ├── lib/api.ts                     Authenticated API client and mirrored types
+│   └── public/                        Product assets
+├── supabase/
+│   ├── migrations/                    Schema, RLS, vector, and account migrations
+│   └── seed/                          SQL, snapshot, and per-table JSON data
+├── docs/                               Contracts, deployment, demo/live-mode, AI, and handoff guides
+├── sdoc-hackathon-bundle/              520-email runtime fixture bundle
+└── sdoc-hackathon-docker/              Dataset generator and optional scorer service
 ```
+
+## 19. Known limitations
+
+- Gmail is the live email provider, but the safe default keeps outbound delivery simulated until an operator explicitly enables it.
+- A `DELIVERY_UNKNOWN` outcome requires manual reconciliation against Gmail Sent; automatic resend is intentionally blocked.
+- OCR is optional and its packages are not included in the default environment.
+- The default local RAG embedding is deterministic keyword-level hashing, not a semantic production embedding.
+- Supabase pgvector is fixed at 768 dimensions; every deployed embedding provider must be configured for 768 dimensions or the schema must be migrated and the index rebuilt.
+- Memory mode loses runtime mutations on restart.
+- The Bash run-mode helper is Windows-oriented; use direct commands on macOS/Linux.
+- The private scorer ground truth is not included in Git.
+- There is no repository `LICENSE` file. Do not assume redistribution or commercial-use rights until the maintainers add one.
+- The project is a production-style prototype. It still needs deployment-specific Gmail acceptance testing, load testing, observability, rate limiting, operational backups, and a formal security review before production use.
+
+## 20. Additional documentation
+
+| Document | Purpose |
+| --- | --- |
+| [AGENT.md](AGENT.md) | AI components, LangGraph, RAG, keys, rebuilds, and test scenarios |
+| [docs/CONTRACTS.md](docs/CONTRACTS.md) | Frozen fields, enums, API contracts, and submission shape |
+| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Five-minute demonstration flow |
+| [docs/AI_REPORT_SECTION.md](docs/AI_REPORT_SECTION.md) | AI architecture and recorded evaluation |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | One-project Vercel Services deployment and smoke-test checklist |
+| [docs/DEMO_AND_LIVE_MODES.md](docs/DEMO_AND_LIVE_MODES.md) | Exact boundaries between demo-safe, hackathon-live, and production modes |
+| [docs/BACKEND_HANDOFF.md](docs/BACKEND_HANDOFF.md) | Backend deployment contract and acceptance checks |
+| [docs/P2_VERIFICATION.md](docs/P2_VERIFICATION.md) | Assistant, safety, RBAC, RAG, translation, and sharing evidence |
+| [docs/P4_EVIDENCE_HANDOFF.md](docs/P4_EVIDENCE_HANDOFF.md) | Frontend evidence semantics |
+| [supabase/README.md](supabase/README.md) | Supabase schema, seed, verification, and auth model |
+| [P1.md](P1.md) | AI extraction and verification workstream |
+| [P2.md](P2.md) | Assistant and safety workstream |
+| [P3.md](P3.md) | Backend, Supabase, and cloud workstream |
+| [P4.md](P4.md) | Frontend and end-to-end workstream |
+
+---
+
+NovaShip's operating rule is simple: **AI proposes, deterministic code compares, humans approve, and the audit log remembers.**
