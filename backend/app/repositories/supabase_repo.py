@@ -84,7 +84,14 @@ class SupabaseRepository(BaseRepository):
             }).execute()
 
     def get_email(self, email_id: str) -> Optional[EmailMessage]:
-        res = self._t("email_messages").select("payload").eq("id", email_id).limit(1).execute()
+        res = (
+            self._t("email_messages")
+            .select("payload")
+            .eq("id", email_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return EmailMessage(**res.data[0]["payload"]) if res.data else None
 
     def list_emails(self) -> list[EmailMessage]:
@@ -92,11 +99,26 @@ class SupabaseRepository(BaseRepository):
         return [EmailMessage(**r["payload"]) for r in res.data]
 
     def find_email_by_checksum(self, checksum: str) -> Optional[EmailMessage]:
-        res = self._t("email_messages").select("payload").eq("checksum", checksum).limit(1).execute()
+        res = (
+            self._t("email_messages")
+            .select("payload")
+            .eq("checksum", checksum)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return EmailMessage(**res.data[0]["payload"]) if res.data else None
 
     def find_attachment_by_checksum(self, checksum: str) -> Optional[str]:
-        res = self._t("attachments").select("id").eq("checksum", checksum).gt("size_bytes", 0).limit(1).execute()
+        res = (
+            self._t("attachments")
+            .select("id")
+            .eq("checksum", checksum)
+            .eq("tenant_id", self.tenant)
+            .gt("size_bytes", 0)
+            .limit(1)
+            .execute()
+        )
         return res.data[0]["id"] if res.data else None
 
     def save_blob(self, pointer: str, data: bytes) -> None:
@@ -175,11 +197,25 @@ class SupabaseRepository(BaseRepository):
                                             "assigned_team_id": case.assigned_team_id, "assigned_at": case.updated_at.isoformat()}).execute()
 
     def get_case(self, case_id: str) -> Optional[CaseRecord]:
-        res = self._t("cases").select("payload").eq("id", case_id).limit(1).execute()
+        res = (
+            self._t("cases")
+            .select("payload")
+            .eq("id", case_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return CaseRecord(**res.data[0]["payload"]) if res.data else None
 
     def get_case_by_email(self, email_id: str) -> Optional[CaseRecord]:
-        res = self._t("cases").select("payload").eq("source_email_id", email_id).limit(1).execute()
+        res = (
+            self._t("cases")
+            .select("payload")
+            .eq("source_email_id", email_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return CaseRecord(**res.data[0]["payload"]) if res.data else None
 
     def list_cases(self) -> list[CaseRecord]:
@@ -280,7 +316,14 @@ class SupabaseRepository(BaseRepository):
         return [ShareRecord(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in q.execute().data]
 
     def get_share(self, share_id: str) -> Optional[ShareRecord]:
-        res = self._t("shares").select("*").eq("id", share_id).limit(1).execute()
+        res = (
+            self._t("shares")
+            .select("*")
+            .eq("id", share_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return ShareRecord(**{k: v for k, v in res.data[0].items() if k != "tenant_id"}) if res.data else None
 
     # ---- users / parties / policy ----------------------------------------
@@ -331,7 +374,14 @@ class SupabaseRepository(BaseRepository):
         return [PartyContact(**r) for r in res.data]
 
     def get_party(self, party_id: str) -> Optional[PartyContact]:
-        res = self._t("party_contacts").select("*").eq("id", party_id).limit(1).execute()
+        res = (
+            self._t("party_contacts")
+            .select("*")
+            .eq("id", party_id)
+            .eq("tenant_id", self.tenant)
+            .limit(1)
+            .execute()
+        )
         return PartyContact(**res.data[0]) if res.data else None
 
     def get_active_policy(self) -> PolicyRecord:

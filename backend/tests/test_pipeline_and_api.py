@@ -759,6 +759,55 @@ def test_supabase_share_completion_uses_atomic_rpc():
     }
 
 
+def test_supabase_point_lookups_include_tenant_filter():
+    class FakeQuery:
+        def __init__(self):
+            self.filters = []
+
+        def select(self, _fields):
+            return self
+
+        def eq(self, field, value):
+            self.filters.append((field, value))
+            return self
+
+        def gt(self, field, value):
+            self.filters.append((field, value))
+            return self
+
+        def limit(self, _count):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[])
+
+    class FakeClient:
+        def __init__(self):
+            self.queries = {}
+
+        def table(self, name):
+            query = self.queries.setdefault(name, FakeQuery())
+            return query
+
+    repo = object.__new__(SupabaseRepository)
+    repo.client = FakeClient()
+    repo.tenant = "tenant_april"
+
+    repo.get_email("email_1")
+    repo.find_email_by_checksum("checksum_1")
+    repo.find_attachment_by_checksum("checksum_2")
+    repo.get_case("case_1")
+    repo.get_case_by_email("email_1")
+    repo.get_share("share_1")
+    repo.get_party("party_1")
+
+    assert ("tenant_id", "tenant_april") in repo.client.queries["email_messages"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["attachments"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["cases"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["shares"].filters
+    assert ("tenant_id", "tenant_april") in repo.client.queries["party_contacts"].filters
+
+
 def test_missing_bl_waits_for_documents_then_upload_recovers():
     case = _ingest("e2e_003", "TO CONFIRM DOCS _ 5AKR-00230 _ KOPER_SLOVENIA", "Please compare the SI and draft BL and confirm (the draft BL is still missing).", "docs@vitalsolutions.sg",
                    {"e2e_003_SI.txt": SI_TXT})
