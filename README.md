@@ -1018,7 +1018,7 @@ NovaShip_Averis/
 - A `DELIVERY_UNKNOWN` outcome requires manual reconciliation against Gmail Sent; automatic resend is intentionally blocked.
 - OCR is optional and its packages are not included in the default environment.
 - The default local RAG embedding is deterministic keyword-level hashing, not a semantic production embedding.
-- Supabase pgvector migration is created at 768 dimensions and must be changed for local 256-dimensional or OpenAI 1536-dimensional vectors.
+- Supabase pgvector is fixed at 768 dimensions; every deployed embedding provider must be configured for 768 dimensions or the schema must be migrated and the index rebuilt.
 - Memory mode loses runtime mutations on restart.
 - The Bash run-mode helper is Windows-oriented; use direct commands on macOS/Linux.
 - The private scorer ground truth is not included in Git.
