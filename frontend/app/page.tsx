@@ -7,7 +7,7 @@ import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate
 
 const STATUSES = ["RECEIVED","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","WAITING_DOCUMENTS","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const INTENTS = ["DOCUMENT_VERIFICATION","DOCUMENT_CORRECTION","PREPARE_SHIPPING_INSTRUCTION","INVOICE_QUERY","OPERATIONAL_UPDATE","GENERAL_ENQUIRY","INFORMATION_ONLY","NO_ACTION_REQUIRED","UNKNOWN_REVIEW"];
-const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "" };
+const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "" };
 const STATUS_ORDER = ["RECEIVED","SECURITY_CHECK","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","DOCUMENTS_DETECTED","WAITING_DOCUMENTS","EXTRACTING","COMPARING","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const STATUS_TONE: Record<string, string> = { HUMAN_REVIEW: "bg-review", MISMATCH_DETECTED: "bg-mismatch", SECURITY_REVIEW: "bg-mismatch", ERROR: "bg-mismatch", WAITING_DOCUMENTS: "bg-review", NO_MISMATCH_DETECTED: "bg-match", COMPLETED: "bg-match", NO_ACTION_INFO: "bg-ink-300" };
 
@@ -27,7 +27,10 @@ export default function Dashboard() {
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const [busy, setBusy] = useState(false);
   const [apiDown, setApiDown] = useState(false);
+  const [fetching, setFetching] = useState(false);
   const limit = 5;
+  const me = getSession()?.user;
+  const canIngest = me?.permissions.includes("ingest") ?? false;
 
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 3500); };
 
@@ -67,6 +70,17 @@ export default function Dashboard() {
     } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); }
   };
   const quick = async (id: string, path: string, body?: any) => { try { await post(`/cases/${id}${path}`, body); say("Done"); load(); } catch (e: any) { say(e.message, "err"); } };
+
+  const fetchInbox = async () => {
+    setFetching(true);
+    try {
+      const r = await post<{ created: string[]; duplicates_skipped: number; connector: string }>("/connectors/poll?limit=10");
+      const n = r.created?.length || 0;
+      say(n ? `Fetched ${n} new case(s) from ${r.connector || "Gmail"} · skipped ${r.duplicates_skipped || 0} duplicate(s)` : `No new mail (${r.duplicates_skipped || 0} already ingested)`);
+      load();
+    } catch (e: any) { say(e.message, "err"); }
+    finally { setFetching(false); }
+  };
 
   const m = metrics;
   const verified = m ? (m.mismatches_detected || 0) + (m.no_mismatch_cases || 0) : 0;
@@ -178,6 +192,9 @@ export default function Dashboard() {
       <div id="case-table" className="scroll-mt-16 overflow-hidden rounded-2xl border border-ink-200 bg-white shadow-card">
         <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-3 py-2">
           <span className="mr-1 text-sm font-semibold text-ink-800">All cases</span>
+          {canIngest && <Button kind="primary" disabled={fetching} onClick={fetchInbox}>{fetching ? "Fetching…" : "Fetch Inbox"}</Button>}
+          <Button kind={f.attention === "yes" ? "primary" : "ghost"} onClick={() => applyPreset({ attention: "yes", sort: "priority" })}>Needs human</Button>
+          {me?.id && <Button kind={f.assigned === me.id ? "primary" : "ghost"} onClick={() => applyPreset({ assigned: me.id, sort: "updated_desc" })}>Needs me</Button>}
           <input placeholder="Search case, subject, sender, summary" value={f.q} onChange={(e) => setFilter("q", e.target.value)} className="w-full rounded-md border border-ink-200 px-2 py-1.5 text-sm sm:w-60" aria-label="Search" />
           <Sel v={f.status} on={(v) => setFilter("status", v)} opts={STATUSES} ph="Status" />
           <Sel v={f.priority} on={(v) => setFilter("priority", v)} opts={["CRITICAL","HIGH","MEDIUM","LOW"]} ph="Priority" />

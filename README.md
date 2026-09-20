@@ -301,7 +301,7 @@ Opening `http://localhost:3000` sends you to **`/login`**. Every seeded user has
 | **Auditor**          | Ooi Sok Yong     | `sokyong_ooi@aprilasia.com`     | `novaship123` | read-only cases + global audit log; no edits, no sends, no Policies page            |
 
 
-- **Register** (`/register`): creates an **Operations staff** account (least privilege). `REGISTER_ALLOWED_ROLES` in `.env` can widen the choice (never `ADMIN`); Supervisor / Auditor roles are granted by an Admin.
+- **Register** (`/register`): creates an account on the **shared desk** (seeded cases stay visible). Default `REGISTER_ALLOWED_ROLES=OPERATIONS_STAFF`. The hackathon demo sets `ADMIN,SUPERVISOR,OPERATIONS_STAFF` so a visitor can register with their own email as Admin and manage the current project.
 - **Sign out**: button under your name in the sidebar. It revokes the session server-side and writes a `LOGOUT` audit event. `LOGIN`, `LOGIN_FAILED` and `REGISTER` are audited too (visible on `/audit` for Supervisor / Admin / Auditor).
 - Sessions are HMAC-signed tokens (`SESSION_SECRET`, 12 h by default). In the offline demo (`REPO_BACKEND=memory`) registered users live in memory until the API restarts; with Supabase run `supabase/migrations/0004_accounts.sql` so accounts persist.
 - Try RBAC: sign in as Najiha, open a mismatch case → *Collaboration* → pick an **External** recipient → *not permitted*; sign out, sign in as Hari → the same recipient is allowed and requires a confirmation click. Only Faraz (Admin) can save on */policies*.

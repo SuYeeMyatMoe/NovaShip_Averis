@@ -75,7 +75,8 @@ def test_logout_revokes_the_session():
     assert client.get("/me", headers=_bearer("nsa.tampered.token")).status_code == 401
 
 
-def test_register_creates_least_privilege_account():
+def test_register_creates_least_privilege_account(monkeypatch):
+    monkeypatch.setenv("REGISTER_ALLOWED_ROLES", "OPERATIONS_STAFF")
     cfg = client.get("/auth/config").json()
     assert cfg["register_roles"] == ["OPERATIONS_STAFF"]
     assert client.post("/auth/register", json={"email": "not-an-email", "password": "Secret123!", "display_name": "Nope"}).status_code == 400
@@ -89,3 +90,18 @@ def test_register_creates_least_privilege_account():
     again = _login("new.user@aprilasia.com", "Secret123!")
     assert again.status_code == 200 and again.json()["user"]["id"] == u["id"]
     assert client.get("/cases", headers=_bearer(again.json()["token"])).status_code == 200
+
+
+def test_register_admin_when_env_allows_joins_shared_desk(monkeypatch):
+    monkeypatch.setenv("REGISTER_ALLOWED_ROLES", "ADMIN,SUPERVISOR,OPERATIONS_STAFF")
+    cfg = client.get("/auth/config").json()
+    assert cfg["register_roles"][0] == "ADMIN" and "SUPERVISOR" in cfg["register_roles"]
+    r = client.post("/auth/register", json={"email": "judge.demo@gmail.com", "password": "Secret123!", "display_name": "Judge Demo", "role": "ADMIN"})
+    assert r.status_code == 201
+    u = r.json()["user"]
+    assert u["email"] == "judge.demo@gmail.com" and u["roles"] == ["ADMIN"]
+    assert "edit_policy" in u["permissions"] and "approve_send" in u["permissions"]
+    mine = client.get("/cases", headers=_bearer(r.json()["token"]))
+    shared = client.get("/cases", headers={"X-User-Id": "u_admin_1"})
+    assert mine.status_code == 200 and shared.status_code == 200
+    assert mine.json()["total"] == shared.json()["total"]

@@ -20,10 +20,20 @@ import secrets
 import time
 from typing import Any, Optional
 
+from app.contracts.schemas import Role
+
 SESSION_TTL_S = int(os.environ.get("SESSION_TTL_HOURS", "12")) * 3600
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "novaship123")
-REGISTER_ALLOWED_ROLES = [r.strip().upper() for r in os.environ.get("REGISTER_ALLOWED_ROLES", "OPERATIONS_STAFF").split(",") if r.strip()]
 MIN_PASSWORD_LENGTH = 8
+
+
+def allowed_register_roles() -> list[str]:
+    """Roles the register form may offer. Re-reads env so tests and demo .env stay in sync."""
+    valid = {r.value for r in Role}
+    return [r.strip().upper() for r in os.environ.get("REGISTER_ALLOWED_ROLES", "OPERATIONS_STAFF").split(",") if r.strip().upper() in valid]
+
+
+REGISTER_ALLOWED_ROLES = allowed_register_roles()
 
 _PBKDF2_ROUNDS = 120_000
 _DEMO_SESSION_SECRET = "novaship-dev-session-secret-change-me"

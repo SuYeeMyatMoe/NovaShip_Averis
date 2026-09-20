@@ -15,9 +15,15 @@ const ROLE_HINTS: Record<string, string> = {
 };
 
 function roleHint(role: string, roles: string[]) {
+  if (role === "ADMIN") return "Demo: you join the live shipping desk with full access. The current test cases stay here — this is not a blank workspace.";
   if (role && ROLE_HINTS[role]) return ROLE_HINTS[role];
-  if (roles.length > 1) return "Pick the desk role this account should start with. Approving external sends and editing policy stay with Supervisors and Admins.";
+  if (roles.length > 1) return "Pick the desk role this account should start with. Admin can manage the shared inbox, approve sends and edit policy.";
   return ROLE_HINTS.OPERATIONS_STAFF;
+}
+
+function subtitle(roles: string[]) {
+  if (roles.includes("ADMIN")) return "You join the live shipping desk. The current cases stay here. Admin self-register is for this shared demo only.";
+  return "Self-registered accounts start with least privilege. An Admin can widen the role later.";
 }
 
 export default function RegisterPage() {
@@ -47,7 +53,7 @@ export default function RegisterPage() {
   };
 
   return (
-    <AuthLayout title="Create an account" subtitle="Self-registered accounts start with least privilege. An Admin can widen the role later."
+    <AuthLayout title="Create an account" subtitle={subtitle(cfg.register_roles)}
       footer={<span>Already have an account? <Link href="/login" className="font-semibold text-accent-fg hover:underline">Sign in</Link></span>}>
       <form onSubmit={submit} className="space-y-4">
         <AuthError msg={err} />

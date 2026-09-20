@@ -17,7 +17,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth.accounts import DEMO_PASSWORD, REGISTER_ALLOWED_ROLES, decode_token, hash_password, issue_token, password_problem, verify_password
+from app.auth.accounts import DEMO_PASSWORD, allowed_register_roles, decode_token, hash_password, issue_token, password_problem, verify_password
 from app.auth.rbac import PERMISSIONS, current_user, has_permission
 from app.config import auth_mode, env_bool, get_repo
 from app.contracts.schemas import ActorType, AuditEvent, Role, UserRecord
@@ -72,7 +72,7 @@ def auth_config():
     """Register-form options. In demo mode also lists the seeded accounts so the login page can offer one-click fills."""
     mode = auth_mode()
     enabled = mode == "demo" or (mode == "local" and env_bool("SELF_REGISTRATION_ENABLED"))
-    out: dict[str, Any] = {"register_roles": [r for r in REGISTER_ALLOWED_ROLES if r == Role.OPERATIONS_STAFF.value] if enabled else [], "min_password_length": 8, "auth_mode": mode, "registration_enabled": enabled}
+    out: dict[str, Any] = {"register_roles": allowed_register_roles() if enabled else [], "min_password_length": 8, "auth_mode": mode, "registration_enabled": enabled}
     if mode == "demo":
         out["demo_password"] = DEMO_PASSWORD
         out["demo_accounts"] = [{"email": u.email, "display_name": u.display_name, "roles": [r.value for r in u.roles]}
@@ -109,7 +109,7 @@ def register(req: RegisterRequest):
         raise HTTPException(400, detail={"error": problem, "category": "AUTH_ERROR"})
     if repo.get_user_by_email(email):
         raise HTTPException(409, detail={"error": "an account with this email already exists - log in instead", "category": "AUTH_ERROR"})
-    allowed = [r for r in REGISTER_ALLOWED_ROLES if r == Role.OPERATIONS_STAFF.value]
+    allowed = allowed_register_roles()
     role_name = (req.role or (allowed[0] if allowed else "OPERATIONS_STAFF")).upper()
     if role_name not in allowed:
         raise HTTPException(403, detail={"error": f"self-registration may only pick {', '.join(allowed) or 'no role'}; ask an ADMIN for other roles", "category": "AUTH_ERROR"})

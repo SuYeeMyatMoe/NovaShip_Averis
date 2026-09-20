@@ -107,3 +107,4 @@ export type CaseRow = {
   assigned_user_id: string | null; shared_with: string[]; status: string; updated_at: string; summary: string; errors: number; drafts: number;
 };
 export type Metrics = Record<string, any>;
+export type NotificationItem = { case_id: string; subject: string; status: string; priority: string; reason: string; updated_at: string };

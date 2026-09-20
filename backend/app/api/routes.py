@@ -21,6 +21,7 @@ from app.contracts.schemas import (
     CaseStatus,
     DraftDecision,
     DraftRequest,
+    Role,
     ShareRequest,
     UserRecord,
 )
@@ -32,8 +33,39 @@ from app.services.submission import case_to_submission_row
 router = APIRouter()
 
 
+_ATTENTION_STATUSES = {
+    CaseStatus.HUMAN_REVIEW,
+    CaseStatus.WAITING_DOCUMENTS,
+    CaseStatus.SECURITY_REVIEW,
+    CaseStatus.DRAFT_READY,
+    CaseStatus.MISMATCH_DETECTED,
+}
+_IDLE_STATUSES = {CaseStatus.COMPLETED, CaseStatus.NO_ACTION_INFO}
+_STATUS_REASONS = {
+    CaseStatus.HUMAN_REVIEW: "Human review",
+    CaseStatus.WAITING_DOCUMENTS: "Waiting for documents",
+    CaseStatus.SECURITY_REVIEW: "Security review",
+    CaseStatus.DRAFT_READY: "Draft ready to approve",
+    CaseStatus.MISMATCH_DETECTED: "Mismatch detected",
+}
+
+
 def svc() -> CaseService:
     return CaseService(get_repo())
+
+
+def _needs_human(case) -> bool:
+    if case.status in _ATTENTION_STATUSES:
+        return True
+    return bool(case.action_required and case.status not in _IDLE_STATUSES)
+
+
+def _notification_reason(case, user_id: str) -> str:
+    parts = []
+    if case.assigned_user_id == user_id:
+        parts.append("Assigned to you")
+    parts.append(_STATUS_REASONS.get(case.status) or ("Action required" if case.action_required else "Update"))
+    return " · ".join(parts)
 
 
 def _case_view(case, email) -> dict[str, Any]:
@@ -54,6 +86,33 @@ def me(user: UserRecord = Depends(current_user)):
     from app.auth.rbac import PERMISSIONS
 
     return {**user.model_dump(mode="json"), "permissions": [p for p in PERMISSIONS if has_permission(user, p)]}
+
+
+@router.get("/me/notifications")
+def my_notifications(user: UserRecord = Depends(require("view_case")), limit: int = 20):
+    """In-app queue of cases that need a person. Admin/Supervisor see the shared desk; everyone also sees work assigned to them."""
+    repo = get_repo()
+    desk_wide = any(r in {Role.ADMIN, Role.SUPERVISOR} for r in user.roles)
+    candidates = []
+    for case in repo.list_cases():
+        mine = case.assigned_user_id == user.id
+        if not (mine or (desk_wide and _needs_human(case))):
+            continue
+        if mine and case.status in _IDLE_STATUSES and not _needs_human(case):
+            continue
+        candidates.append(case)
+    candidates.sort(key=lambda c: c.updated_at, reverse=True)
+    total = len(candidates)
+    cap = max(1, min(limit, 50))
+    items = [{
+        "case_id": case.id,
+        "subject": (case.summary.text if case.summary and case.summary.text else case.id),
+        "status": case.status.value,
+        "priority": case.priority.value,
+        "reason": _notification_reason(case, user.id),
+        "updated_at": case.updated_at.isoformat(),
+    } for case in candidates[:cap]]
+    return {"items": items, "total": total}
 
 
 @router.get("/users")
@@ -201,7 +260,8 @@ def list_cases(
     status: Optional[str] = None, priority: Optional[str] = None, intent: Optional[str] = None, category: Optional[str] = None,
     mismatch: Optional[str] = Query(default=None, description="yes|no"), assigned: Optional[str] = None, shared: Optional[str] = None,
     sender: Optional[str] = None, q: Optional[str] = None, min_confidence: Optional[float] = None, security: Optional[str] = None,
-    date_from: Optional[str] = None, date_to: Optional[str] = None, limit: int = 100, offset: int = 0, sort: str = "updated_desc",
+    date_from: Optional[str] = None, date_to: Optional[str] = None, attention: Optional[str] = Query(default=None, description="yes to restrict to human-needed cases"),
+    limit: int = 100, offset: int = 0, sort: str = "updated_desc",
     user: UserRecord = Depends(require("view_case")),
 ):
     repo = get_repo()
@@ -223,6 +283,8 @@ def list_cases(
         if mismatch == "no" and (c.mismatch_count > 0 or not c.comparison):
             continue
         if assigned and c.assigned_user_id != assigned:
+            continue
+        if attention and attention.lower() in {"yes", "1", "true"} and not _needs_human(c):
             continue
         if shared and shared not in c.shared_with:
             continue

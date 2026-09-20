@@ -914,3 +914,24 @@ def test_bundle_sample_email_004_two_mismatches():
     r = client.post("/webhooks/email", json={**raw, "email_id": "bundle_004"}, headers=SUP).json()
     r = r.get("case", r)  # duplicate-detection envelope if another test already ingested this email
     assert sorted(r["comparison"]["mismatch_fields"]) == ["consignee", "notify_party"]
+
+
+def test_supervisor_notifications_include_human_needed_cases():
+    case = _ingest(
+        "notify_queue_001",
+        "TO CONFIRM DOCS _ 5RSG-00999 _ CALLAO_PERU _ MOORIM SP CO., LTD _ MEDUUD104332",
+        "Hi,\n\nAttached are the SI and draft BL. Please check the details and confirm.",
+        "aziztz@safqa.co.ke",
+        {"notify_001_SI.txt": SI_TXT, "notify_001_BL.txt": BL_TXT},
+    )
+    cid = case["id"]
+    assert case["status"] == "HUMAN_REVIEW"
+    notes = client.get("/me/notifications", headers=SUP)
+    assert notes.status_code == 200, notes.text
+    items = notes.json()["items"]
+    match = next((n for n in items if n["case_id"] == cid), None)
+    assert match and match["status"] == "HUMAN_REVIEW" and "Human review" in match["reason"]
+    desk = client.get("/cases?attention=yes", headers=SUP)
+    assert desk.status_code == 200 and any(r["id"] == cid for r in desk.json()["items"])
+    ops_notes = client.get("/me/notifications", headers=OPS).json()["items"]
+    assert cid not in {n["case_id"] for n in ops_notes}

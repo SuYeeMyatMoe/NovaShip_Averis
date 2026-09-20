@@ -8,7 +8,8 @@ import Link from "next/link";
 export const metadata = { title: "Guide, NovaShip Averis" };
 
 const STEPS = [
-  { title: "Open the Inbox", body: "Every email is already a case. Filter Mismatch = yes to see what needs a decision today.", href: "/", cta: "Open inbox" },
+  { title: "Using your own email", body: "Register with your address as Admin. You join this shared desk — the 520 test cases stay in the Inbox. The bell shows work that needs a person. Fetch Inbox pulls live Gmail next to the seeded cases.", href: "/register", cta: "Create an account" },
+  { title: "Open the Inbox", body: "Every email is already a case. Filter Needs human or Mismatch = yes to see what needs a decision today.", href: "/", cta: "Open inbox" },
   { title: "Read the seven fields", body: "On a case, the comparison card shows Shipper, Consignee, Notify Party, Port of Loading, Port of Discharge, Container Count and Gross Weight side by side with the Shipping Instruction as truth.", href: "/cases/case_email_004", cta: "See a mismatch case" },
   { title: "Check the evidence", body: "Each value links to the exact line in the document and shows which label was resolved, for example Load Port to Port of Loading.", href: "/cases/case_email_004?tab=evidence", cta: "View evidence" },
   { title: "Approve, edit or reject the draft", body: "The correction request is written for you but never sent. A Supervisor approves; Operations staff can edit and share internally.", href: "/cases/case_email_004?tab=drafts", cta: "Open drafts" },
@@ -19,7 +20,7 @@ const STEPS = [
 const ROLES = [
   ["Operations staff", "Najiha (hanna_azhari@aprilasia.com), Deswita, Willy, Mitchelle", "view, compare, edit drafts, share internally, assign"],
   ["Supervisor", "Hari (hari_mardianto@aprilasia.com), Teo Ei Leen", "everything above plus approve external sends and notify external parties"],
-  ["Admin", "Syed Faraz Ali (faraz_ali@aprilasia.com)", "everything plus edit policy and rebuild the knowledge index"],
+  ["Admin", "Syed Faraz Ali (faraz_ali@aprilasia.com), or your own email via /register", "everything plus edit policy and rebuild the knowledge index"],
   ["Auditor", "Ooi Sok Yong (sokyong_ooi@aprilasia.com)", "read-only, including the global audit log"],
 ];
 
@@ -50,7 +51,7 @@ export default function WelcomePage() {
       </section>
 
       <section>
-        <h2 className="text-xl font-semibold text-ink-900">Six steps for an operator</h2>
+        <h2 className="text-xl font-semibold text-ink-900">How to use the desk</h2>
         <ol className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {STEPS.map((s, i) => (
             <li key={s.title} className={`flex min-h-[190px] flex-col rounded-2xl border border-orange-100 p-4 shadow-card transition duration-200 hover:-translate-y-1 hover:scale-[1.015] hover:border-orange-200 hover:shadow-glow ${i % 3 === 0 ? "bg-[radial-gradient(circle_at_85%_85%,rgba(230,104,19,.28),transparent_46%),linear-gradient(135deg,#fffdfb_15%,#f9eee6)]" : i % 3 === 1 ? "bg-[radial-gradient(circle_at_82%_16%,rgba(247,139,54,.25),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff2e5)]" : "bg-[radial-gradient(circle_at_80%_85%,rgba(255,154,58,.34),transparent_47%),linear-gradient(135deg,#fffdfb_15%,#fff4e7)]"}`}>
@@ -74,7 +75,7 @@ export default function WelcomePage() {
 
       <section>
         <h2 className="text-2xl font-bold text-accent">Who can do what</h2>
-        <p className="mt-1 max-w-[65ch] text-sm text-ink-600">Sign out (button under your name) and sign in as another demo account to try each role — every demo account uses the password <span className="font-mono">novaship123</span>. Permissions are enforced by the API, not just hidden in the UI.</p>
+        <p className="mt-1 max-w-[65ch] text-sm text-ink-600">Register with your own email as Admin to manage this shared project, or sign in as a demo account (password <span className="font-mono">novaship123</span>). Permissions are enforced by the API, not just hidden in the UI.</p>
         <div className="mt-4 overflow-x-auto rounded-2xl border border-orange-100 bg-white shadow-sm">
           <table className="w-full min-w-[640px] text-sm">
             <thead className="bg-ink-50 text-left text-xs uppercase tracking-wide text-ink-500"><tr><th className="px-4 py-2">Role</th><th className="px-4 py-2">Demo users</th><th className="px-4 py-2">Can</th></tr></thead>
