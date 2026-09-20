@@ -2,11 +2,11 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import { GOOGLE_ERRORS, api, getSession, login, startGoogle } from "@/lib/api";
-import { AuthError, AuthLayout, Field, GoogleButton, OrDivider, PasswordInput, ROLE_LABELS, SubmitButton, inputClass } from "@/components/auth";
+import { GOOGLE_ERRORS, api, getSession, login, startGoogle, startMicrosoft } from "@/lib/api";
+import { AuthError, AuthLayout, Field, GoogleButton, MicrosoftButton, OrDivider, PasswordInput, ROLE_LABELS, SubmitButton, inputClass } from "@/components/auth";
 
 type DemoAccount = { email: string; display_name: string; roles: string[] };
-type AuthConfig = { auth_mode: string; demo_password?: string; demo_accounts?: DemoAccount[]; google_enabled?: boolean };
+type AuthConfig = { auth_mode: string; demo_password?: string; demo_accounts?: DemoAccount[]; google_enabled?: boolean; microsoft_enabled?: boolean };
 
 export default function LoginPage() {
   return <Suspense fallback={null}><LoginForm /></Suspense>;
@@ -23,11 +23,12 @@ function LoginForm() {
   const [cfg, setCfg] = useState<AuthConfig | null>(null);
   const [showDemo, setShowDemo] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
+  const [msBusy, setMsBusy] = useState(false);
 
   useEffect(() => {
     if (getSession()) { router.replace(next); return; }
     const code = sp.get("error");
-    if (code) setErr(GOOGLE_ERRORS[code] || `Google sign-in failed (${code}).`);
+    if (code) setErr(GOOGLE_ERRORS[code] || `Sign-in failed (${code}).`);
     api<AuthConfig>("/auth/config", {}, { auth: false }).then(setCfg).catch(() => setCfg(null));
   }, [router, next, sp]);
 
@@ -35,6 +36,12 @@ function LoginForm() {
     setErr(null); setGoogleBusy(true);
     try { await startGoogle({ next: next.startsWith("/") ? next : "/" }); }
     catch (x: any) { setErr(x.message || "Google sign-in is not configured."); setGoogleBusy(false); }
+  };
+
+  const microsoft = async () => {
+    setErr(null); setMsBusy(true);
+    try { await startMicrosoft({ next: next.startsWith("/") ? next : "/" }); }
+    catch (x: any) { setErr(x.message || "Microsoft sign-in is not configured."); setMsBusy(false); }
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -49,10 +56,14 @@ function LoginForm() {
     <AuthLayout title="Sign in" subtitle="" heroMessage={<p className="mt-5 text-3xl font-bold tracking-[-.02em] text-accent sm:text-4xl">Welcome</p>}
       footer={<span>New to the desk? <Link href="/register" className="font-semibold text-accent-fg hover:underline">Create an account</Link></span>}>
       <AuthError msg={err} />
-      {cfg?.google_enabled && (
-        <div className="mt-3">
-          <GoogleButton onClick={google} busy={googleBusy} />
-          <p className="mt-1.5 text-[11px] text-ink-500">Signs you in and connects that Gmail so the desk can read and answer your mail.</p>
+      {(cfg?.microsoft_enabled || cfg?.google_enabled) && (
+        <div className="mt-3 space-y-2">
+          {cfg?.microsoft_enabled && <MicrosoftButton onClick={microsoft} busy={msBusy} />}
+          {cfg?.google_enabled && <GoogleButton onClick={google} busy={googleBusy} />}
+          <p className="text-[11px] text-ink-500">
+            {cfg?.microsoft_enabled ? "Microsoft signs you in; you connect your Outlook mailbox afterwards. " : ""}
+            {cfg?.google_enabled ? "Google signs you in and connects that Gmail in one step." : ""}
+          </p>
           <OrDivider text="or with a password" />
         </div>
       )}

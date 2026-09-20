@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -528,7 +528,7 @@ class UserMailbox(BaseModel):
     tenant_id: str = "tenant_april"
     provider: str = "gmail"
     address: str
-    google_sub: Optional[str] = None
+    google_sub: Optional[str] = None   # provider subject id (Google `sub` or Microsoft Graph user id)
     refresh_token_enc: str
     scopes: list[str] = Field(default_factory=list)
     status: str = "active"  # active | error | revoked
@@ -536,14 +536,23 @@ class UserMailbox(BaseModel):
     last_polled_at: Optional[datetime] = None
     last_error: Optional[str] = None
 
+    SEND_SCOPES: ClassVar[dict[str, str]] = {"gmail": "https://www.googleapis.com/auth/gmail.send", "outlook": "Mail.Send"}
+    READ_SCOPES: ClassVar[dict[str, str]] = {"gmail": "https://www.googleapis.com/auth/gmail.readonly", "outlook": "Mail.Read"}
+
     def can_send(self) -> bool:
-        return self.status == "active" and "https://www.googleapis.com/auth/gmail.send" in self.scopes
+        needed = self.SEND_SCOPES.get(self.provider, "")
+        return self.status == "active" and any(s == needed or s.endswith("/" + needed) for s in self.scopes)
+
+    def can_read(self) -> bool:
+        needed = self.READ_SCOPES.get(self.provider, "")
+        accepted = {needed, "Mail.ReadWrite"} if self.provider == "outlook" else {needed}   # ReadWrite is a superset of Read
+        return any(s in accepted or any(s.endswith("/" + a) for a in accepted) for s in self.scopes)
 
     def public(self) -> dict[str, Any]:
         """Safe summary for API responses (never includes the token)."""
         return {
             "connected": True, "provider": self.provider, "address": self.address, "scopes": list(self.scopes), "status": self.status,
-            "can_send": self.can_send(), "connected_at": self.connected_at.isoformat(),
+            "can_send": self.can_send(), "can_read": self.can_read(), "connected_at": self.connected_at.isoformat(),
             "last_polled_at": self.last_polled_at.isoformat() if self.last_polled_at else None, "last_error": self.last_error,
         }
 

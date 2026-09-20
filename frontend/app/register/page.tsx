@@ -2,10 +2,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, getSession, register, startGoogle } from "@/lib/api";
-import { AuthError, AuthLayout, Field, GoogleButton, OrDivider, PasswordInput, ROLE_LABELS, SubmitButton, inputClass } from "@/components/auth";
+import { api, getSession, register, startGoogle, startMicrosoft } from "@/lib/api";
+import { AuthError, AuthLayout, Field, GoogleButton, MicrosoftButton, OrDivider, PasswordInput, ROLE_LABELS, SubmitButton, inputClass } from "@/components/auth";
 
-type AuthConfig = { register_roles: string[]; min_password_length: number; google_enabled?: boolean };
+type AuthConfig = { register_roles: string[]; min_password_length: number; google_enabled?: boolean; microsoft_enabled?: boolean };
 
 const ROLE_HINTS: Record<string, string> = {
   OPERATIONS_STAFF: "View, compare, edit drafts, share internally and assign. Supervisor, Admin and Auditor roles are granted by an Admin.",
@@ -51,6 +51,7 @@ export default function RegisterPage() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
+  const [msBusy, setMsBusy] = useState(false);
 
   useEffect(() => {
     if (getSession()) { router.replace("/"); return; }
@@ -62,6 +63,12 @@ export default function RegisterPage() {
     try { await startGoogle({ role: role || undefined, next: "/welcome" }); }
     catch (x: any) { setErr(x.message || "Google sign-up is not configured."); setGoogleBusy(false); }
   };
+  const microsoft = async () => {
+    setErr(null); setMsBusy(true);
+    try { await startMicrosoft({ role: role || undefined, next: "/welcome", intent: "login" }); }
+    catch (x: any) { setErr(x.message || "Microsoft sign-up is not configured."); setMsBusy(false); }
+  };
+  const social = !!(cfg.google_enabled || cfg.microsoft_enabled);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setErr(null);
@@ -77,14 +84,20 @@ export default function RegisterPage() {
     <AuthLayout title="Create an account" subtitle={subtitle(cfg.register_roles)}
       footer={<span>Already have an account? <Link href="/login" className="font-semibold text-accent-fg hover:underline">Sign in</Link></span>}>
       <AuthError msg={err} />
-      {cfg.google_enabled && (
+      {social && (
         <div className="mt-3">
           <Field label="Role" hint={roleHint(role, cfg.register_roles)}>
             <RoleSelect role={role} roles={cfg.register_roles} onChange={setRole} />
           </Field>
-          <div className="mt-3"><GoogleButton onClick={google} busy={googleBusy} label="Sign up with Google" /></div>
-          <p className="mt-1.5 text-[11px] text-ink-500">One consent creates your desk account and connects that Gmail: the desk fetches your mail, and approved replies leave from your address.</p>
-          <OrDivider text="or with a password (no mailbox)" />
+          <div className="mt-3 space-y-2">
+            {cfg.microsoft_enabled && <MicrosoftButton onClick={microsoft} busy={msBusy} label="Sign up with Microsoft" />}
+            {cfg.google_enabled && <GoogleButton onClick={google} busy={googleBusy} label="Sign up with Google" />}
+          </div>
+          <p className="mt-1.5 text-[11px] text-ink-500">
+            {cfg.microsoft_enabled ? "Microsoft creates your desk account; on the next page you connect your Outlook mailbox so the desk reads it and replies from your address. " : ""}
+            {cfg.google_enabled ? "Google does both in one consent." : ""}
+          </p>
+          <OrDivider text="or with a password (connect a mailbox later)" />
         </div>
       )}
       <form onSubmit={submit} className="space-y-4">
@@ -102,7 +115,7 @@ export default function RegisterPage() {
             <PasswordInput value={confirm} onChange={setConfirm} autoComplete="new-password" minLength={cfg.min_password_length} />
           </Field>
         </div>
-        {!cfg.google_enabled && (
+        {!social && (
           <Field label="Role" hint={roleHint(role, cfg.register_roles)}>
             <RoleSelect role={role} roles={cfg.register_roles} onChange={setRole} />
           </Field>

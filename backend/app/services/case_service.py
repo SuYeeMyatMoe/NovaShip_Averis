@@ -60,6 +60,24 @@ def _id(prefix: str) -> str:
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+def send_mode() -> str:
+    """EMAIL_SEND_MODE normalised: 'simulate' or 'gmail' (the live mode; 'live' is an accepted alias)."""
+    mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+    return "gmail" if mode == "live" else mode
+
+
+class NoMailboxCanSend(RuntimeError):
+    """The case did not arrive through a connected mailbox and no shared mailbox is configured: nothing can send the reply."""
+
+    def http(self) -> HTTPException:
+        return HTTPException(502, detail={
+            "error": "no mailbox can send this reply: the case did not arrive through a connected Gmail/Outlook and no shared mailbox is configured",
+            "category": "NOTIFICATION_ERROR",
+            "recovery": "Connect your mailbox on the Guide page and fetch the case through it, configure a shared mailbox, or set EMAIL_SEND_MODE=simulate",
+            "retryable": True, "safe_details": str(self)[:160],
+        })
+
+
 class DeliveryOutcomeUnknown(RuntimeError):
     """The provider call started, but its acceptance result is not trustworthy."""
 
@@ -161,15 +179,21 @@ class CaseService:
         copies = [address.strip() for address in (cc or [])]
         if not recipients or any(not _EMAIL_RE.fullmatch(address) for address in recipients + copies):
             raise ValueError("outbound email contains an invalid recipient")
-        mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+        mode = send_mode()
         if mode == "simulate":
             return "simulate", ({"from": mailbox.address} if mailbox else None)
-        from app.connectors.email_connectors import GmailConnector, get_outbound_connector
+        from app.config import ConfigurationError
+        from app.connectors.email_connectors import connector_for_mailbox, get_outbound_connector
 
-        if mailbox is not None and mode == "gmail":
-            connector = GmailConnector.from_mailbox(mailbox)
-        else:
-            connector = get_outbound_connector(mode)
+        try:
+            if mailbox is not None:
+                from app.services.mailbox_service import rotate_token_callback
+
+                connector = connector_for_mailbox(mailbox, on_refresh_token=rotate_token_callback(self, mailbox))
+            else:
+                connector = get_outbound_connector(mode)
+        except ConfigurationError as exc:  # no shared mailbox and the case did not arrive through a connected mailbox
+            raise NoMailboxCanSend(str(exc))
         if connector is None:  # pragma: no cover - simulate returned above
             raise RuntimeError("configured outbound connector is unavailable")
         try:
@@ -299,12 +323,17 @@ class CaseService:
         before = {"status": d.status.value}
         d.status = DraftStatus.APPROVED
         self.pipe.audit(case.id, ActorType.USER, user.id, "DRAFT_APPROVED", before, {"status": d.status.value, "to": d.to, "subject": d.subject, "note": dec.note})
-        configured_mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+        configured_mode = send_mode()
         if configured_mode != "simulate":
             d.status = DraftStatus.DELIVERING
             self.repo.save_case(case)
         try:
             mode, provider_result = self._deliver_email(d.to, d.subject, d.body, d.cc, mailbox=self._outbound_mailbox(case))
+        except NoMailboxCanSend as exc:
+            d.status = DraftStatus.SEND_FAILED   # nothing left the desk; retry once a mailbox is connected
+            self._delivery_failure(case, user, d.id or dec.draft_id, exc)
+            self.repo.save_case(case)
+            raise exc.http()
         except DeliveryOutcomeUnknown as exc:
             d.status = DraftStatus.DELIVERY_UNKNOWN
             self._delivery_unknown(case, d.id or dec.draft_id, exc)
@@ -447,7 +476,7 @@ class CaseService:
             self.repo.save_share(share)
             self.pipe.audit(case.id, ActorType.USER, user.id, "SHARE_CREATED", after={"share_id": share.id, "recipient_label": label, "external": is_external, "status": share.status})
             return {"share": share.model_dump(mode="json"), "requires_confirmation": True, "preview": message, "payload": payload}
-        configured_mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+        configured_mode = send_mode()
         live_external = is_external and configured_mode != "simulate"
         share.status = "DELIVERING" if live_external else "CONFIRMING"
         share.confirmation_started_at = datetime.utcnow()
@@ -473,7 +502,7 @@ class CaseService:
                 share.delivery_provider
                 if share.status in {"DELIVERING", "DELIVERY_ACCEPTED"}
                 and share.delivery_provider
-                else os.environ.get("EMAIL_SEND_MODE", "simulate")
+                else send_mode()
             ).strip().lower()
             if share.status == "DELIVERING" and not owns_claim:
                 raise HTTPException(
@@ -520,6 +549,12 @@ class CaseService:
                             share.message,
                             mailbox=self._outbound_mailbox(case),
                         )
+                    except NoMailboxCanSend as exc:
+                        share.status = "DELIVERY_FAILED"
+                        self.repo.save_share(share)
+                        self._delivery_failure(case, user, share.id, exc)
+                        self.repo.save_case(case)
+                        raise exc.http()
                     except DeliveryOutcomeUnknown as exc:
                         share.status = "DELIVERY_UNKNOWN"
                         self.repo.save_share(share)
@@ -612,7 +647,7 @@ class CaseService:
 
         owns_claim = False
         if share.status in {"PENDING_CONFIRMATION", "DELIVERY_FAILED"}:
-            configured_mode = os.environ.get("EMAIL_SEND_MODE", "simulate").strip().lower()
+            configured_mode = send_mode()
             live_external = share.is_external and configured_mode != "simulate"
             target_status = "DELIVERING" if live_external else "CONFIRMING"
             claimed_share = self.repo.claim_share_confirmation(

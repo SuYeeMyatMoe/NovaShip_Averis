@@ -248,7 +248,7 @@ def test_poll_route_prefers_connected_mailbox_and_lists_by_mailbox(monkeypatch):
 
     r = client.delete("/me/mailbox", headers={"X-User-Id": "u_ops_2"})
     assert r.status_code == 200 and repo.get_mailbox("u_ops_2") is None
-    assert client.get("/me/mailbox", headers={"X-User-Id": "u_ops_2"}).json() == {"connected": False}
+    assert client.get("/me/mailbox", headers={"X-User-Id": "u_ops_2"}).json()["connected"] is False
     assert client.delete("/me/mailbox", headers={"X-User-Id": "u_ops_2"}).status_code == 404
 
 
@@ -339,3 +339,37 @@ def test_memory_snapshot_round_trips_mailboxes():
     clone = MemoryRepository()
     clone.load(repo.dump())
     assert clone.get_mailbox("u_ops_1").address == "najiha.box@gmail.com" and decrypt_token(clone.get_mailbox("u_ops_1").refresh_token_enc) == "rt-u_ops_1"
+
+
+def test_individual_mailboxes_only_no_shared_mailbox_configured(monkeypatch):
+    """EMAIL_PROVIDER=none and no GMAIL_*: fetch and send work through the user's own Gmail; other cases fail clearly, not with a 500."""
+    for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EMAIL_PROVIDER", "none")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "web-client-id")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "web-client-secret")
+    repo = get_repo()
+    repo.save_mailbox(_mailbox(user_id="u_ops_4", address="solo@gmail.com"))
+    conn = _Conn([_inbound("solo-1")], address="solo@gmail.com")
+    monkeypatch.setattr(GmailConnector, "from_mailbox", classmethod(lambda cls, mb: conn))
+    fetched = client.post("/connectors/poll?limit=5", headers={"X-User-Id": "u_ops_4"}).json()
+    assert fetched["mailbox"] == "solo@gmail.com" and len(fetched["created"]) == 1
+    assert client.post("/connectors/poll?source=shared", headers={"X-User-Id": "u_ops_4"}).status_code == 400
+
+    monkeypatch.setenv("EMAIL_SEND_MODE", "gmail")
+    service = CaseService(repo)
+    case = repo.get_case(fetched["created"][0])
+    assert service._outbound_mailbox(case).address == "solo@gmail.com", "reply would leave from the user's own Gmail"
+    # a case that did not arrive through any connected mailbox (plain webhook) cannot be answered: clear 400, draft left retryable
+    plain = client.post("/webhooks/email", json={"email_id": "solo-plain-1", "from": "customer@example.com", "subject": "REQUEST BL DRAFT solo-plain",
+                                                 "body": "Attached are the SI and draft BL. Please check the details and confirm.", "attachments": []}, headers={"X-User-Id": "u_sup_1"}).json()
+    seeded = repo.get_case(plain["id"])
+    assert seeded.drafts, "a missing-document request draft is generated"
+    r = client.post(f"/cases/{seeded.id}/approve", json={"draft_id": seeded.drafts[0].id}, headers={"X-User-Id": "u_sup_1"})
+    assert r.status_code == 502 and "no mailbox can send" in r.json()["detail"]["error"] and r.json()["detail"]["retryable"] is True
+    assert repo.get_case(seeded.id).drafts[0].status == DraftStatus.SEND_FAILED
+    cfg = client.get("/auth/config").json()
+    assert cfg["shared_mailbox_configured"] is False and cfg["google_enabled"] is True and cfg["microsoft_enabled"] is False
+    assert client.get("/me", headers={"X-User-Id": "u_ops_4"}).json()["mailbox"]["providers"]["shared_mailbox_configured"] is False
+    repo.delete_mailbox("u_ops_4")
+    assert client.post("/connectors/poll", headers={"X-User-Id": "u_ops_4"}).json()["detail"]["code"] == "NO_MAILBOX_CONNECTED"

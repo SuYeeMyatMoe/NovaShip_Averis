@@ -168,3 +168,18 @@ Before claiming production readiness verify:
 **Hackathon live:** import to Vercel, enter env values, keep demo auth + simulated outbound, and run smoke tests.
 
 **Production live:** replace demo authentication, rotate credentials, apply production origin/security settings, and deliberately enable any real outbound/model providers.
+
+
+## Individual mailboxes only (no shared desk mailbox)
+
+The deployment mode where every person signs in with Microsoft or Google and works their own mailbox:
+
+```
+EMAIL_PROVIDER=none
+EMAIL_SEND_MODE=live              # or simulate while rehearsing
+MICROSOFT_CLIENT_ID=… MICROSOFT_CLIENT_SECRET=… MICROSOFT_TENANT=common
+GOOGLE_OAUTH_CLIENT_ID=… GOOGLE_OAUTH_CLIENT_SECRET=…      # optional second provider
+GMAIL_POLL_INTERVAL_SECONDS=120
+```
+
+No `GMAIL_*` lines. `GET /auth/config` reports `shared_mailbox_configured: false`; the Inbox shows *Connect a mailbox* until one is connected; approving a draft on a case that did not arrive through a connected mailbox returns a retryable `502` (`no mailbox can send this reply`) and the draft goes to `SEND_FAILED`. See `docs/MICROSOFT_SETUP.md`.

@@ -17,7 +17,8 @@ export const FIELD_LABELS: Record<string, string> = {
 };
 
 // ------------------------------------------------------------------ session
-export type Mailbox = { connected: boolean; provider?: string; address?: string; scopes?: string[]; status?: string; can_send?: boolean; connected_at?: string; last_polled_at?: string | null; last_error?: string | null };
+export type MailboxProviders = { google: boolean; microsoft: boolean; shared_mailbox_configured: boolean };
+export type Mailbox = { connected: boolean; provider?: string; address?: string; scopes?: string[]; status?: string; can_send?: boolean; can_read?: boolean; connected_at?: string; last_polled_at?: string | null; last_error?: string | null; providers?: MailboxProviders };
 export type SessionUser = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; team_id?: string | null; mailbox?: Mailbox };
 export type Session = { token: string; expires_at: string; user: SessionUser };
 const SESSION_KEY = "novaship.session";
@@ -60,20 +61,43 @@ export async function startGoogle(opts: { role?: string; next?: string } = {}): 
   const r = await api<{ url: string }>(`/auth/google/start?${q.toString()}`, {}, { redirectOn401: false });
   window.location.assign(r.url);
 }
-/** Session handed back by GET /auth/google/callback in the URL fragment; completes it by loading /auth/session. */
-export async function adoptSessionFromFragment(fragment: string): Promise<{ session: Session; next: string; isNew: boolean; mailbox: string } | null> {
+/**
+ * Sign in / sign up with Microsoft (identity only), or with a session connect the Outlook mailbox
+ * (`intent: "connect"`, asks for Mail.Read + Mail.Send in a second consent).
+ */
+export async function startMicrosoft(opts: { role?: string; next?: string; intent?: "login" | "connect" } = {}): Promise<void> {
+  const q = new URLSearchParams({ intent: opts.intent || "login" });
+  if (opts.role) q.set("role", opts.role);
+  if (opts.next) q.set("next", opts.next);
+  const r = await api<{ url: string }>(`/auth/microsoft/start?${q.toString()}`, {}, { redirectOn401: false });
+  window.location.assign(r.url);
+}
+export type FragmentResult = { session: Session; next: string; isNew: boolean; mailbox: string; provider: string; connectedOnly: boolean };
+/**
+ * Result handed back by GET /auth/google|microsoft/callback in the URL fragment. A login carries a token
+ * (completed by loading /auth/session); a mailbox connect carries only `connected=` and reuses the current session.
+ */
+export async function adoptSessionFromFragment(fragment: string): Promise<FragmentResult | null> {
   const p = new URLSearchParams(fragment.replace(/^#/, ""));
   const token = p.get("token");
-  if (!token) return null;
+  const next = p.get("next") || "/welcome";
+  if (!token) {
+    const existing = getSession();
+    if (!p.get("connected") || !existing) return null;
+    const user = await api<SessionUser>("/auth/session", {}, { redirectOn401: false });
+    const session = { ...existing, user };
+    setSession(session);
+    return { session, next, isNew: false, mailbox: p.get("mailbox") || "", provider: p.get("connected") || "", connectedOnly: true };
+  }
   const draft: Session = { token, expires_at: p.get("expires_at") || "", user: { id: "", email: "", display_name: "", roles: [], permissions: [] } };
   setSession(draft);
   const user = await api<SessionUser>("/auth/session", {}, { redirectOn401: false });
   const session = { ...draft, user };
   setSession(session);
-  return { session, next: p.get("next") || "/welcome", isNew: p.get("new") === "1", mailbox: p.get("mailbox") || "" };
+  return { session, next, isNew: p.get("new") === "1", mailbox: p.get("mailbox") || "", provider: p.get("provider") || "google", connectedOnly: false };
 }
 export const getMailbox = () => api<Mailbox>("/me/mailbox");
-export const disconnectMailbox = () => api<{ ok: boolean; address: string; google_revoked: boolean }>("/me/mailbox", { method: "DELETE" });
+export const disconnectMailbox = () => api<{ ok: boolean; address: string; provider: string; google_revoked: boolean; note?: string | null }>("/me/mailbox", { method: "DELETE" });
 export const GOOGLE_ERRORS: Record<string, string> = {
   google_denied: "Google sign-in was cancelled.",
   bad_state: "The sign-in link expired or was already used. Try again.",
@@ -86,7 +110,10 @@ export const GOOGLE_ERRORS: Record<string, string> = {
   registration_unavailable: "Registration is not available on this backend.",
   unknown_user: "The account to connect no longer exists.",
   google_disabled: "Google sign-in is disabled in this authentication mode.",
-  storage_failed: "Signed in with Google, but the mailbox could not be saved. Apply supabase/migrations/0007_user_mailboxes.sql and try again.",
+  storage_failed: "Signed in, but the mailbox could not be saved. Apply supabase/migrations/0007_user_mailboxes.sql and try again.",
+  microsoft_denied: "Microsoft sign-in was cancelled.",
+  microsoft_disabled: "Microsoft sign-in is disabled in this authentication mode.",
+  mail_permission_missing: "Outlook was not connected: the mail permissions were not granted. Try again and accept 'Read your mail' and 'Send mail as you'.",
 };
 
 export async function logout(): Promise<void> {

@@ -319,23 +319,27 @@ Every seeded account uses `DEMO_PASSWORD`, which defaults to `novaship123`.
 
 Self-registration at `/register` creates an account on the **shared desk** (seeded cases stay visible). Default `REGISTER_ALLOWED_ROLES=OPERATIONS_STAFF`. The hackathon demo can set `ADMIN,SUPERVISOR,OPERATIONS_STAFF` so a visitor can register with their own email as Admin and manage the current project. Registration is enabled in `demo` mode, disabled by default in `local` mode, and unavailable in `jwt` mode. The API accepts only roles listed in `REGISTER_ALLOWED_ROLES`.
 
-### Sign up with Google and connected mailboxes
+### Sign in with Microsoft / Google and connected mailboxes
 
-`/register` and `/login` also offer **Continue with Google**. One consent (`openid email profile gmail.readonly gmail.send`) does three things:
+Each user works their **own** mailbox: the desk reads it and approved replies leave from it. No shared desk mailbox is needed (`EMAIL_PROVIDER=none`); when none is configured, Fetch shows *Connect a mailbox* and a reply to a case that did not arrive through a connected mailbox fails with a clear, retryable `502` instead of going out from somewhere else.
+
+**Continue with Microsoft** (`/login`, `/register`) asks for identity only (`openid profile email User.Read`) and creates or opens the desk account for that address. **Connect Outlook** (Guide page or the Inbox banner) is a second consent for `Mail.Read Mail.Send offline_access`; the refresh token is stored encrypted and Microsoft's rotated tokens are persisted on every refresh. Graph delegated mail permissions need no publisher review, so users see at most a small "unverified" tag (removed by Publisher Verification). Setup: `docs/MICROSOFT_SETUP.md`.
+
+**Continue with Google** does account + Gmail in one consent (`openid email profile gmail.readonly gmail.send`):
 
 1. creates the desk account for that Google address (role from the register form, validated against `REGISTER_ALLOWED_ROLES`) or logs in the existing account with that email;
 2. stores the Gmail refresh token **encrypted** (`user_mailboxes`, Fernet with `MAILBOX_TOKEN_KEY` or a key derived from `SESSION_SECRET`);
 3. returns a normal `nsa.*` session, so RBAC, audit, and every other route are unchanged.
 
-A signed-in password user can also connect a Gmail later (Guide page → *Connect Gmail*); the grant links to the current account instead of creating one.
+A signed-in password user can also connect a mailbox later (Guide page → *Connect Outlook* / *Connect Gmail*); the grant links to the current account instead of creating one. Which buttons appear comes from `GET /auth/config` (`microsoft_enabled`, `google_enabled`, `shared_mailbox_configured`).
 
 Once a mailbox is connected:
 
-- **Fetch Inbox** (and `POST /connectors/poll?source=auto`) polls that user's Gmail instead of the shared `GMAIL_ADDRESS`; `source=shared` still polls the desk mailbox.
+- **Fetch Inbox** (and `POST /connectors/poll?source=auto`) polls that user's Outlook or Gmail instead of the shared `GMAIL_ADDRESS`; `source=shared` still polls the desk mailbox when one is configured, otherwise `400 NO_SHARED_MAILBOX` / `NO_MAILBOX_CONNECTED`.
 - Every case pulled this way lands on the **shared desk** tagged with `mailbox` / `mailbox_user_id`; the Inbox shows the tag and offers a *My mailbox* preset (`GET /cases?mailbox=me`).
 - With `GMAIL_POLL_INTERVAL_SECONDS>0` a background thread polls every connected mailbox and the shared one on that interval (actor `scheduler`).
-- When a draft or external share on such a case is approved and `EMAIL_SEND_MODE=gmail`, the reply is sent **from the owner's Gmail** (the mailbox the request arrived in). Without `gmail.send` on that grant it falls back to the shared mailbox; the audit event records `from`.
-- `GET /me/mailbox` shows the connection; `DELETE /me/mailbox` disconnects it (best-effort revoke at Google, audited).
+- When a draft or external share on such a case is approved and `EMAIL_SEND_MODE=live` (alias `gmail`), the reply is sent **from the owner's mailbox** (the one the request arrived in: Gmail API or Microsoft Graph `sendMail`). Without send permission on that grant it falls back to the shared mailbox; the audit event records `from`.
+- `GET /me/mailbox` shows the connection and provider; `DELETE /me/mailbox` disconnects it (best-effort revoke at Google; Microsoft grants are removed at myaccount.microsoft.com/consent), audited.
 
 Google Cloud prerequisites: an OAuth client of type **Web application** whose authorized redirect URI is `GOOGLE_OAUTH_REDIRECT_URI` (`http://localhost:8000/auth/google/callback` locally, `https://<domain>/api/auth/google/callback` on Vercel); the Gmail API enabled; and, while the consent screen is in *Testing*, each Google account added as a test user. Password-only accounts keep working; Google-only accounts have no password and sign in with Google.
 
@@ -499,6 +503,10 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 | `GOOGLE_OAUTH_CLIENT_ID` | falls back to `GMAIL_CLIENT_ID` | Web-application OAuth client for Sign in with Google |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | falls back to `GMAIL_CLIENT_SECRET` | Secret for that client (server-only) |
 | `GOOGLE_OAUTH_REDIRECT_URI` | `http://localhost:8000/auth/google/callback` | Must be listed as an authorized redirect URI on the client |
+| `MICROSOFT_CLIENT_ID` | — | Entra app registration (Application ID) for Sign in with Microsoft + Connect Outlook |
+| `MICROSOFT_CLIENT_SECRET` | — | Client secret *value* (server-only) |
+| `MICROSOFT_TENANT` | `common` | `common` (work/school + personal) or a tenant id to restrict sign-in to one organisation |
+| `MICROSOFT_REDIRECT_URI` | `http://localhost:8000/auth/microsoft/callback` | Must be a Web platform redirect URI on the registration |
 | `FRONTEND_URL` | first `CORS_ORIGINS` entry | Where the callback sends the browser (`/auth/callback`) |
 | `MAILBOX_TOKEN_KEY` | derived from `SESSION_SECRET` | Fernet key that encrypts stored Gmail refresh tokens; rotating it forces users to reconnect |
 | `GMAIL_POLL_INTERVAL_SECONDS` | `0` | `>0` starts the background poller for every connected mailbox plus the shared one |
@@ -641,8 +649,10 @@ curl 'http://localhost:8000/cases?mismatch=yes&limit=5' \
 | GET | `/auth/session` | Validate the current session and return permissions and the connected mailbox |
 | GET | `/auth/google/start?role=&next=` | Build the Google consent URL; with a session it connects Gmail to that account |
 | GET | `/auth/google/callback` | Google redirect target; creates/logs in the user, stores the encrypted refresh token, redirects to the UI |
-| GET | `/me/mailbox` | The caller's connected Gmail (address, scopes, status, last poll) |
-| DELETE | `/me/mailbox` | Disconnect the caller's Gmail (revoke at Google best-effort, audited) |
+| GET | `/auth/microsoft/start?intent=login\|connect&role=&next=` | Microsoft consent URL: `login` = identity only; `connect` (needs a session) = Mail.Read + Mail.Send for the current account |
+| GET | `/auth/microsoft/callback` | Microsoft redirect target; creates/logs in the user, or stores the encrypted Outlook refresh token, then redirects to the UI |
+| GET | `/me/mailbox` | The caller's connected mailbox (provider, address, scopes, status, last poll) + which providers this deployment offers |
+| DELETE | `/me/mailbox` | Disconnect the caller's mailbox (revoke at Google best-effort, audited) |
 
 #### Ingestion and connectors
 

@@ -163,7 +163,7 @@ def google_callback(code: Optional[str] = None, state: Optional[str] = None, err
     if error:
         return _fail("google_denied")
     st = read_state(state)
-    if not st or not code:
+    if not st or not code or st.get("provider") not in (None, "google"):
         return _fail("bad_state")
     try:
         tokens = _exchange_code(code)

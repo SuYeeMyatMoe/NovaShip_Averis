@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from app.connectors.email_connectors import BaseConnector, GmailConnector, get_connector
+from app.connectors.email_connectors import BaseConnector, connector_for_mailbox, get_connector
 from app.contracts.schemas import ActorType, UserMailbox
 from app.services.case_service import CaseService
 
@@ -60,8 +60,20 @@ def poll_connector(service: CaseService, conn: BaseConnector, *, actor_id: str, 
     return {"connector": conn.name, "mailbox": mailbox.address if mailbox else "shared", "created": created, "duplicates_skipped": skipped}
 
 
+def rotate_token_callback(service: CaseService, mailbox: UserMailbox):
+    """Persist a rotated refresh token immediately (Microsoft issues a new one on every refresh)."""
+    from app.auth.mailbox_tokens import encrypt_token
+
+    def _store(new_token: str) -> None:
+        mailbox.refresh_token_enc = encrypt_token(new_token)
+        service.repo.save_mailbox(mailbox)
+
+    return _store
+
+
 def poll_user_mailbox(service: CaseService, mailbox: UserMailbox, *, actor_id: str, limit: int = 25) -> dict[str, Any]:
-    return poll_connector(service, GmailConnector.from_mailbox(mailbox), actor_id=actor_id, limit=limit, mailbox=mailbox)
+    conn = connector_for_mailbox(mailbox, on_refresh_token=rotate_token_callback(service, mailbox))
+    return poll_connector(service, conn, actor_id=actor_id, limit=limit, mailbox=mailbox)
 
 
 def poll_shared_mailbox(service: CaseService, *, actor_id: str, limit: int = 25) -> Optional[dict[str, Any]]:

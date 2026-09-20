@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from app.api.agent_routes import router as agent_router
 from app.api.auth_routes import router as auth_router, seed_demo_credentials
 from app.api.google_auth_routes import router as google_auth_router
+from app.api.microsoft_auth_routes import router as microsoft_auth_router
 from app.api.routes import router
 from app.auth.accounts import validate_session_configuration
 from app.config import auth_mode, cors_allowed_origins, get_repo
@@ -86,5 +87,6 @@ def startup() -> None:
 
 app.include_router(auth_router, prefix=API_PREFIX)
 app.include_router(google_auth_router, prefix=API_PREFIX)
+app.include_router(microsoft_auth_router, prefix=API_PREFIX)
 app.include_router(router, prefix=API_PREFIX)
 app.include_router(agent_router, prefix=API_PREFIX)

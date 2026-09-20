@@ -251,6 +251,178 @@ class GmailConnector(BaseConnector):
         return {"status": 200, "id": sent["id"], "thread_id": sent.get("threadId")}
 
 
+class MicrosoftGraphConnector(BaseConnector):
+    """Outlook / Microsoft 365 mailbox through Microsoft Graph, authorised by a user's delegated refresh token.
+
+    Microsoft rotates refresh tokens on every refresh; the new one is handed to `on_refresh_token`
+    so the caller can persist it (mailbox_service does).
+    """
+
+    name = "outlook"
+    GRAPH = "https://graph.microsoft.com/v1.0"
+    SCOPES = ("Mail.Read", "Mail.Send", "offline_access", "User.Read")
+    SEND_SCOPE = "Mail.Send"
+    MESSAGE_SELECT = "id,internetMessageId,conversationId,from,toRecipients,ccRecipients,subject,body,receivedDateTime,hasAttachments"
+
+    def __init__(self, *, client_id: str, client_secret: str, refresh_token: str, address: str, tenant: str = "common",
+                 on_refresh_token=None) -> None:
+        if not (client_id and client_secret and refresh_token and address):
+            from app.config import ConfigurationError
+
+            raise ConfigurationError("Microsoft Graph connector requires client id, client secret, refresh token and address")
+        self.client_id, self.client_secret = client_id.strip(), client_secret.strip()
+        self.refresh_token, self.address = refresh_token.strip(), address.strip()
+        self.tenant = (tenant or "common").strip()
+        self.on_refresh_token = on_refresh_token
+        self._access_token: Optional[str] = None
+        self._token_expires_at = 0.0
+
+    @classmethod
+    def from_mailbox(cls, mailbox, on_refresh_token=None) -> "MicrosoftGraphConnector":
+        from app.auth.mailbox_tokens import decrypt_token
+
+        client_id, client_secret, tenant = microsoft_oauth_client()
+        return cls(client_id=client_id, client_secret=client_secret, refresh_token=decrypt_token(mailbox.refresh_token_enc),
+                   address=mailbox.address, tenant=tenant, on_refresh_token=on_refresh_token)
+
+    # ---- auth
+    def token(self) -> str:
+        if self._access_token and time.monotonic() < self._token_expires_at:
+            return self._access_token
+        response = httpx.post(f"https://login.microsoftonline.com/{self.tenant}/oauth2/v2.0/token", data={
+            "client_id": self.client_id, "client_secret": self.client_secret, "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token, "scope": " ".join(self.SCOPES),
+        }, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+        self._access_token = payload.get("access_token")
+        if not self._access_token:
+            raise RuntimeError("Microsoft token endpoint returned no access token")
+        lifetime = float(payload.get("expires_in") or 3600)
+        self._token_expires_at = time.monotonic() + max(lifetime - min(60.0, lifetime * 0.1), 0.0)
+        rotated = (payload.get("refresh_token") or "").strip()
+        if rotated and rotated != self.refresh_token:
+            self.refresh_token = rotated
+            if self.on_refresh_token:
+                self.on_refresh_token(rotated)
+        return self._access_token
+
+    def _request(self, method: str, path: str, **kwargs) -> Any:
+        """One Graph call; refreshes and retries exactly once after a 401."""
+        for attempt in range(2):
+            headers = {"Authorization": f"Bearer {self.token()}", **kwargs.pop("headers", {})}
+            response = httpx.request(method, path if path.startswith("http") else f"{self.GRAPH}{path}", headers=headers, timeout=30, **kwargs)
+            if response.status_code == 401 and not attempt:
+                self._access_token, self._token_expires_at = None, 0.0
+                continue
+            if response.status_code >= 400:
+                raise RuntimeError(f"Microsoft Graph {method} {path} -> HTTP {response.status_code}")
+            return response
+        raise RuntimeError("unreachable")
+
+    # ---- inbound
+    def fetch(self, since: Optional[datetime] = None, limit: int = 50) -> Iterable[InboundMessage]:
+        if limit <= 0:
+            return
+        params = {"$top": str(min(limit, 100)), "$orderby": "receivedDateTime desc", "$select": self.MESSAGE_SELECT}
+        if since:
+            aware = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+            params["$filter"] = f"receivedDateTime ge {aware.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        listed = self._request("GET", "/me/mailFolders/inbox/messages", params=params).json()
+        for message in (listed.get("value") or [])[:limit]:
+            message_id = message["id"]
+            sender = ((message.get("from") or {}).get("emailAddress") or {})
+            to = [r["emailAddress"]["address"] for r in message.get("toRecipients") or [] if r.get("emailAddress", {}).get("address")]
+            cc = [r["emailAddress"]["address"] for r in message.get("ccRecipients") or [] if r.get("emailAddress", {}).get("address")]
+            body_obj = message.get("body") or {}
+            body = body_obj.get("content") or ""
+            if str(body_obj.get("contentType", "")).lower() == "html":
+                body = _strip_html(body)
+            blobs: dict[str, bytes] = {}
+            paths: list[str] = []
+            if message.get("hasAttachments"):
+                attachments = self._request("GET", f"/me/messages/{message_id}/attachments").json().get("value") or []
+                files = [a for a in attachments if a.get("@odata.type", "").endswith("fileAttachment") and a.get("contentBytes")]
+                validate_attachment_count(len(files))
+                for a in files:
+                    validate_file_size(int(a.get("size") or 0))
+                    data = base64.b64decode(a["contentBytes"])
+                    validate_file_size(len(data))
+                    name = safe_filename(a.get("name") or "attachment.bin")
+                    path = _unique_attachment_path(name, blobs)
+                    blobs[path] = data
+                    paths.append(path)
+            raw = {
+                "email_id": _safe_id(message.get("internetMessageId") or message_id),
+                "provider_message_id": message_id,
+                "conversation_id": message.get("conversationId"),
+                "from": sender.get("address") or "",
+                "from_name": sender.get("name") or None,
+                "to": to,
+                "cc": cc,
+                "subject": message.get("subject") or "",
+                "body": body,
+                "attachments": paths,
+            }
+            received_at = None
+            if message.get("receivedDateTime"):
+                try:
+                    received_at = datetime.fromisoformat(message["receivedDateTime"].replace("Z", "+00:00")).astimezone(timezone.utc).replace(tzinfo=None)
+                except ValueError:
+                    received_at = None
+            yield InboundMessage(raw=raw, blobs=blobs, received_at=received_at, provider="outlook")
+
+    # ---- outbound (only after human approval)
+    def send(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None) -> dict[str, Any]:
+        payload = {
+            "message": {
+                "subject": subject,
+                "body": {"contentType": "Text", "content": body},
+                "toRecipients": [{"emailAddress": {"address": a}} for a in to],
+                "ccRecipients": [{"emailAddress": {"address": a}} for a in (cc or [])],
+            },
+            "saveToSentItems": True,
+        }
+        response = self._request("POST", "/me/sendMail", json=payload)
+        if response.status_code != 202:
+            raise RuntimeError(f"Microsoft Graph sendMail returned HTTP {response.status_code}")
+        return {"status": 202, "id": response.headers.get("request-id") or response.headers.get("client-request-id") or "accepted", "from": self.address}
+
+
+def microsoft_oauth_client() -> tuple[str, str, str]:
+    """Entra app registration used for Microsoft sign-in and Outlook mailboxes: (client_id, client_secret, tenant)."""
+    client_id = os.environ.get("MICROSOFT_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("MICROSOFT_CLIENT_SECRET", "").strip()
+    tenant = os.environ.get("MICROSOFT_TENANT", "common").strip() or "common"
+    if not client_id or not client_secret:
+        from app.config import ConfigurationError
+
+        raise ConfigurationError("Microsoft sign-in requires MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET")
+    return client_id, client_secret, tenant
+
+
+def connector_for_mailbox(mailbox, on_refresh_token=None) -> BaseConnector:
+    """The connector that reads and sends for a user's connected mailbox, by provider."""
+    provider = (getattr(mailbox, "provider", "") or "gmail").lower()
+    if provider == "outlook":
+        return MicrosoftGraphConnector.from_mailbox(mailbox, on_refresh_token=on_refresh_token)
+    if provider == "gmail":
+        return GmailConnector.from_mailbox(mailbox)
+    from app.config import ConfigurationError
+
+    raise ConfigurationError(f"unsupported mailbox provider '{provider}'")
+
+
+def shared_mailbox_configured() -> bool:
+    """True when the desk still has a shared inbound mailbox (EMAIL_PROVIDER=gmail/bundle with its settings present)."""
+    provider = os.environ.get("EMAIL_PROVIDER", "none").strip().lower()
+    if provider == "bundle":
+        return True
+    if provider != "gmail":
+        return False
+    return all(os.environ.get(name, "").strip() for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS"))
+
+
 def google_oauth_client() -> tuple[str, str]:
     """OAuth client used for Google sign-in / per-user mailboxes; falls back to the shared Gmail client."""
     client_id = (os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or os.environ.get("GMAIL_CLIENT_ID") or "").strip()
@@ -281,11 +453,11 @@ def get_outbound_connector(mode: Optional[str] = None) -> Optional[BaseConnector
     selected = (mode or os.environ.get("EMAIL_SEND_MODE", "simulate")).strip().lower()
     if selected == "simulate":
         return None
-    if selected == "gmail":
+    if selected in ("gmail", "live"):
         return GmailConnector()
     from app.config import ConfigurationError
 
-    raise ConfigurationError("EMAIL_SEND_MODE must be one of: simulate, gmail")
+    raise ConfigurationError("EMAIL_SEND_MODE must be one of: simulate, gmail (alias: live)")
 
 
 def _decoded_header(value: str) -> str:

@@ -90,12 +90,13 @@ def seed_demo_credentials() -> int:
 @router.get("/config")
 def auth_config():
     """Register-form options. In demo mode also lists the seeded accounts so the login page can offer one-click fills."""
-    from app.api.google_auth_routes import google_sign_in_enabled
+    from app.api.routes import mailbox_providers
 
     mode = auth_mode()
     enabled = registration_enabled()
+    providers = mailbox_providers()
     out: dict[str, Any] = {"register_roles": allowed_register_roles() if enabled else [], "min_password_length": 8, "auth_mode": mode, "registration_enabled": enabled,
-                           "google_enabled": google_sign_in_enabled()}
+                           "google_enabled": providers["google"], "microsoft_enabled": providers["microsoft"], "shared_mailbox_configured": providers["shared_mailbox_configured"]}
     if mode == "demo":
         out["demo_password"] = DEMO_PASSWORD
         out["demo_accounts"] = [{"email": u.email, "display_name": u.display_name, "roles": [r.value for r in u.roles]}

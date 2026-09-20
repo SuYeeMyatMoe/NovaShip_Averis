@@ -34,6 +34,7 @@ export default function Dashboard() {
   const me = getSession()?.user;
   const canIngest = me?.permissions.includes("ingest") ?? false;
   const myMailbox = me?.mailbox?.connected ? me.mailbox.address : null;
+  const sharedMailbox = me?.mailbox?.providers?.shared_mailbox_configured ?? true;
   const warn = useOperatorWarning();
 
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 3500); };
@@ -93,7 +94,7 @@ export default function Dashboard() {
     try {
       const r = await post<{ created: string[]; duplicates_skipped: number; connector: string; mailbox?: string }>("/connectors/poll?limit=10&source=auto");
       const n = r.created?.length || 0;
-      const where = r.mailbox && r.mailbox !== "shared" ? r.mailbox : `the shared ${r.connector || "Gmail"} mailbox`;
+      const where = r.mailbox && r.mailbox !== "shared" ? r.mailbox : `the shared ${r.connector || ""} mailbox`;
       say(n ? `Fetched ${n} new case(s) from ${where} · skipped ${r.duplicates_skipped || 0} duplicate(s)` : `No new mail in ${where} (${r.duplicates_skipped || 0} already ingested)`);
       load();
       loadWidgets();
@@ -213,7 +214,8 @@ export default function Dashboard() {
       <div id="case-table" className="scroll-mt-16 overflow-hidden rounded-2xl border border-ink-200 bg-white shadow-card">
         <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-3 py-2">
           <span className="mr-1 text-sm font-semibold text-ink-800">All cases</span>
-          {canIngest && <Button kind="primary" disabled={fetching} onClick={fetchInbox} title={myMailbox ? `Polls ${myMailbox}` : "Polls the shared desk mailbox"}>{fetching ? "Fetching…" : myMailbox ? "Fetch my inbox" : "Fetch Inbox"}</Button>}
+          {canIngest && (myMailbox || sharedMailbox) && <Button kind="primary" disabled={fetching} onClick={fetchInbox} title={myMailbox ? `Polls ${myMailbox}` : "Polls the shared desk mailbox"}>{fetching ? "Fetching…" : myMailbox ? "Fetch my inbox" : "Fetch Inbox"}</Button>}
+          {canIngest && !myMailbox && !sharedMailbox && <Button kind="primary" onClick={() => router.push("/welcome")} title="No mailbox is connected yet">Connect a mailbox</Button>}
           <Button kind={f.attention === "yes" ? "primary" : "ghost"} onClick={() => applyPreset({ attention: "yes", sort: "priority" })}>Needs human</Button>
           {me?.id && <Button kind={f.assigned === me.id ? "primary" : "ghost"} onClick={() => applyPreset({ assigned: me.id, sort: "updated_desc" })}>Needs me</Button>}
           {myMailbox && <Button kind={f.mailbox === "me" ? "primary" : "ghost"} onClick={() => applyPreset({ mailbox: "me", sort: "received_desc" })} title={myMailbox}>My mailbox</Button>}

@@ -84,6 +84,19 @@ export function GoogleButton({ onClick, busy, label = "Continue with Google" }: 
   );
 }
 
+/** "Continue with Microsoft": identity only; the Outlook mailbox is connected afterwards in a separate consent. */
+export function MicrosoftButton({ onClick, busy, label = "Continue with Microsoft" }: { onClick: () => void; busy?: boolean; label?: string }) {
+  return (
+    <button type="button" onClick={onClick} disabled={busy} className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-ink-200 bg-white px-4 py-2.5 text-sm font-semibold text-ink-800 transition hover:border-accent hover:text-accent-fg active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60">
+      <svg width="18" height="18" viewBox="0 0 21 21" aria-hidden>
+        <rect x="1" y="1" width="9" height="9" fill="#F25022" /><rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
+        <rect x="1" y="11" width="9" height="9" fill="#00A4EF" /><rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+      </svg>
+      {busy ? "Opening Microsoft…" : label}
+    </button>
+  );
+}
+
 export function OrDivider({ text = "or" }: { text?: string }) {
   return (
     <div className="my-4 flex items-center gap-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-400" aria-hidden>

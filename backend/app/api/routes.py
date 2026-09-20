@@ -137,10 +137,19 @@ def llm_posture() -> dict[str, Any]:
     }
 
 
+def mailbox_providers() -> dict[str, Any]:
+    """Which mailbox paths this deployment offers (for the login/register pages and the mailbox card)."""
+    from app.api.google_auth_routes import google_sign_in_enabled
+    from app.api.microsoft_auth_routes import microsoft_sign_in_enabled
+    from app.connectors.email_connectors import shared_mailbox_configured
+
+    return {"google": google_sign_in_enabled(), "microsoft": microsoft_sign_in_enabled(), "shared_mailbox_configured": shared_mailbox_configured()}
+
+
 def mailbox_summary(user_id: str) -> dict[str, Any]:
-    """Safe view of a user's connected Gmail for /me, /auth/session and the shell; never includes the token."""
+    """Safe view of a user's connected mailbox for /me, /auth/session and the shell; never includes the token."""
     mailbox = get_repo().get_mailbox(user_id)
-    return mailbox.public() if mailbox else {"connected": False}
+    return {**(mailbox.public() if mailbox else {"connected": False}), "providers": mailbox_providers()}
 
 
 @router.get("/me")
@@ -173,17 +182,19 @@ def disconnect_mailbox(user: UserRecord = Depends(current_user)):
     if not mailbox:
         raise HTTPException(404, detail={"error": "no mailbox is connected to this account", "category": "EMAIL_CONNECTOR_ERROR"})
     revoked = False
-    try:
-        from app.auth.mailbox_tokens import decrypt_token
-        import httpx
+    if mailbox.provider == "gmail":
+        try:
+            from app.auth.mailbox_tokens import decrypt_token
+            import httpx
 
-        httpx.post("https://oauth2.googleapis.com/revoke", data={"token": decrypt_token(mailbox.refresh_token_enc)}, timeout=10)
-        revoked = True
-    except Exception:  # the local record is removed regardless; the user can also revoke at myaccount.google.com
-        revoked = False
+            httpx.post("https://oauth2.googleapis.com/revoke", data={"token": decrypt_token(mailbox.refresh_token_enc)}, timeout=10)
+            revoked = True
+        except Exception:  # the local record is removed regardless; the user can also revoke at myaccount.google.com
+            revoked = False
     repo.delete_mailbox(user.id)
-    svc().pipe.audit(None, ActorType.USER, user.id, "MAILBOX_DISCONNECTED", after={"address": mailbox.address, "google_revoked": revoked})
-    return {"ok": True, "address": mailbox.address, "google_revoked": revoked}
+    svc().pipe.audit(None, ActorType.USER, user.id, "MAILBOX_DISCONNECTED", after={"address": mailbox.address, "provider": mailbox.provider, "provider_revoked": revoked})
+    note = None if mailbox.provider == "gmail" else "Microsoft has no revoke endpoint for refresh tokens; remove NovaShip at myaccount.microsoft.com/consent if you want the grant gone too."
+    return {"ok": True, "address": mailbox.address, "provider": mailbox.provider, "google_revoked": revoked, "note": note}
 
 
 @router.get("/me/notifications")
@@ -294,7 +305,9 @@ def connectors_poll(limit: int = 25, source: str = Query(default="auto", descrip
             return poll_user_mailbox(s, mailbox, actor_id=user.id, limit=limit)
         conn = get_connector()
         if conn is None:
-            raise HTTPException(400, detail={"error": "EMAIL_PROVIDER is 'none' - set gmail or bundle in .env", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Configure Gmail OAuth variables and EMAIL_PROVIDER=gmail, or connect your own Gmail", "retryable": False})
+            if source == "shared":
+                raise HTTPException(400, detail={"error": "no shared mailbox is configured (EMAIL_PROVIDER is 'none')", "category": "EMAIL_CONNECTOR_ERROR", "code": "NO_SHARED_MAILBOX", "recovery": "Connect your own Gmail or Outlook from the Guide page", "retryable": False})
+            raise HTTPException(400, detail={"error": "no mailbox is connected to this account and the desk has no shared mailbox", "category": "EMAIL_CONNECTOR_ERROR", "code": "NO_MAILBOX_CONNECTED", "recovery": "Connect Gmail or Outlook from the Guide page, then fetch again", "retryable": False})
         return poll_connector(s, conn, actor_id=user.id, limit=limit)
     except MailboxPollError as exc:
         raise HTTPException(502, detail={"error": str(exc), "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Check credentials / network and retry", "retryable": True})
