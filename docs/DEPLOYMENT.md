@@ -45,12 +45,14 @@ Required for the existing live backend:
 | `EMBEDDING_PROVIDER` | `local` |
 | `EMBEDDING_DIMENSIONS` | `768` |
 | `SUPABASE_VECTOR_DIMENSIONS` | `768` |
-| `EMAIL_PROVIDER` | `gmail` |
-| `EMAIL_SEND_MODE` | `simulate` |
-| `GMAIL_CLIENT_ID` | existing OAuth client |
-| `GMAIL_CLIENT_SECRET` | existing OAuth secret |
-| `GMAIL_REFRESH_TOKEN` | existing refresh token |
-| `GMAIL_ADDRESS` | monitored mailbox |
+| `EMAIL_PROVIDER` | `none` (individual mailboxes only) or `gmail` with the `GMAIL_*` block for an optional shared mailbox |
+| `EMAIL_SEND_MODE` | `simulate` until one approved reply has been checked, then `live` |
+| `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT` | Entra app registration for Sign in with Microsoft + Connect Outlook |
+| `MICROSOFT_REDIRECT_URI` | `https://<domain>/api/auth/microsoft/callback` (also added as a Web redirect URI in Entra) |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI` | optional Google sign-in (`https://<domain>/api/auth/google/callback`) |
+| `FRONTEND_URL` | the deployed UI origin, where the OAuth callbacks send the browser |
+| `MAILBOX_TOKEN_KEY` | Fernet key for stored refresh tokens (keep stable across deploys) |
+| `GMAIL_CLIENT_ID` … `GMAIL_ADDRESS` | only for the optional shared mailbox |
 | `AUTH_MODE` | `demo` for the validated hackathon profile |
 | `SESSION_SECRET` | new long random server secret |
 | `DEMO_PASSWORD` | must match the existing demo credential set |

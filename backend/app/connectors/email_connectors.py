@@ -72,7 +72,8 @@ class BundleConnector(BaseConnector):
 class GmailConnector(BaseConnector):
     """Gmail API connector using a one-time user grant and a server-side refresh token.
 
-    `GmailConnector()` / `from_env()` is the shared desk mailbox configured in .env.
+    `GmailConnector()` / `from_env()` is the optional shared desk mailbox configured in .env;
+    `connector_for_mailbox()` picks Gmail or Microsoft Graph for a user's own connected mailbox.
     `from_mailbox()` is a user's own Gmail connected through Google sign-in.
     """
 
@@ -114,7 +115,7 @@ class GmailConnector(BaseConnector):
 
     @classmethod
     def from_mailbox(cls, mailbox) -> "GmailConnector":
-        """Connector for a user's connected Gmail (see app.api.google_auth_routes)."""
+        """Connector for a user's connected Gmail (see app.api.google_auth_routes); Outlook uses MicrosoftGraphConnector."""
         from app.auth.mailbox_tokens import decrypt_token
 
         client_id, client_secret = google_oauth_client()

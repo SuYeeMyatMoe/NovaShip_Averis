@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { AUTH_PATHS, api, getSession, logout, redirectToLogin, type NotificationItem } from "@/lib/api";
 import { ROLE_LABELS } from "@/components/auth";
 
-type Me = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; mailbox?: { connected: boolean; address?: string; status?: string } };
+type Me = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; mailbox?: { connected: boolean; address?: string; status?: string; provider?: string } };
 
 // `perm` hides the entry for roles the API would reject anyway (Audit: Supervisor/Admin/Auditor; Policies: Ops/Supervisor/Admin).
 const NAV: { href: string; label: string; icon: string; perm?: string }[] = [
@@ -77,7 +77,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <div className="hidden min-w-0 flex-1 sm:block">
                 <div className="truncate text-[13px] font-semibold text-ink-900" title={me?.email}>{me?.display_name || "…"}</div>
                 <div className="truncate text-[11px] text-ink-500" title={me?.email}>{(me?.roles || []).map((r) => ROLE_LABELS[r] || r).join(" · ") || "—"}</div>
-                {me?.mailbox?.connected && <div className="truncate font-mono text-[10px] text-ink-500" title={`Connected Gmail (${me.mailbox.status})`}>✉ {me.mailbox.address}</div>}
+                {me?.mailbox?.connected && <div className="truncate font-mono text-[10px] text-ink-500" title={`Connected ${me.mailbox.provider === "outlook" ? "Outlook" : "Gmail"} (${me.mailbox.status})`}>✉ {me.mailbox.address}</div>}
               </div>
               <SignOutButton onClick={signOut} busy={signingOut} className="inline-flex lg:hidden" />
             </div>

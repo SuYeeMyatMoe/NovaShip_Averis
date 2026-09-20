@@ -32,7 +32,7 @@ export default function WelcomePage() {
         <div>
           <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
           <h1 className="dashboard-number mt-6 text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl md:text-6xl">Every email becomes a case. Every verdict shows its evidence.</h1>
-          <p className="mt-4 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">NovaShip Averis reads the shared shipping inbox, checks each Draft Bill of Lading against its Shipping Instruction on seven fields, and asks a person before anything leaves the mailbox.</p>
+          <p className="mt-4 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">NovaShip Averis reads your connected shipping mailbox, checks each Draft Bill of Lading against its Shipping Instruction on seven fields, and asks a person before anything leaves the mailbox.</p>
           <div className="mt-5 flex flex-wrap gap-2">
             <Link href="/" className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover active:scale-[0.98]">Open the inbox</Link>
             <Link href="/agent" className="rounded-xl border border-ink-200 bg-white px-4 py-2 text-sm font-medium text-ink-800 transition hover:bg-ink-50 active:scale-[0.98]">See how the agent works</Link>

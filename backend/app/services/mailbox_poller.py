@@ -1,6 +1,6 @@
 """
 Background poller: every GMAIL_POLL_INTERVAL_SECONDS, pull new mail from every
-connected user mailbox and then from the shared desk mailbox (if EMAIL_PROVIDER=gmail).
+connected user mailbox (Gmail or Outlook) and then from the shared desk mailbox (only if EMAIL_PROVIDER=gmail).
 
 Off by default (interval 0) so tests, the offline demo and scoring runs are
 unaffected. Runs never overlap and never raise into the API process; a failing

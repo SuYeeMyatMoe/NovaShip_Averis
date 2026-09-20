@@ -174,7 +174,7 @@ class CaseService:
 
     def _deliver_email(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None,
                        mailbox=None) -> tuple[str, Optional[dict[str, Any]]]:
-        """Send through the owner's connected Gmail when `mailbox` is given, otherwise the shared desk mailbox."""
+        """Send through the owner's connected mailbox (Gmail API or Microsoft Graph) when `mailbox` is given, otherwise the shared desk mailbox."""
         recipients = [address.strip() for address in to]
         copies = [address.strip() for address in (cc or [])]
         if not recipients or any(not _EMAIL_RE.fullmatch(address) for address in recipients + copies):

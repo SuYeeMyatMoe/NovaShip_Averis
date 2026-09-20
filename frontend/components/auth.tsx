@@ -69,7 +69,7 @@ export function PasswordInput({ value, onChange, placeholder = "•••••�
   );
 }
 
-/** "Continue with Google": one consent creates or opens the account and connects that Gmail to the desk. */
+/** "Continue with Google": one consent creates or opens the account and connects that Gmail to the desk (Microsoft is two consents: login, then Connect Outlook). */
 export function GoogleButton({ onClick, busy, label = "Continue with Google" }: { onClick: () => void; busy?: boolean; label?: string }) {
   return (
     <button type="button" onClick={onClick} disabled={busy} className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-ink-200 bg-white px-4 py-2.5 text-sm font-semibold text-ink-800 transition hover:border-accent hover:text-accent-fg active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60">

@@ -176,7 +176,7 @@ def my_mailbox(user: UserRecord = Depends(current_user)):
 
 @router.delete("/me/mailbox")
 def disconnect_mailbox(user: UserRecord = Depends(current_user)):
-    """Forget the connected Gmail: best-effort revoke at Google, then delete the encrypted token."""
+    """Forget the connected mailbox (Gmail or Outlook): best-effort revoke at Google, then delete the encrypted token."""
     repo = get_repo()
     mailbox = repo.get_mailbox(user.id)
     if not mailbox:
@@ -287,7 +287,7 @@ def webhook_email(payload: dict[str, Any], user: UserRecord = Depends(require("i
 def connectors_poll(limit: int = 25, source: str = Query(default="auto", description="auto | mine | shared"), user: UserRecord = Depends(require("ingest"))):
     """Poll a mailbox and run the pipeline idempotently.
 
-    `mine` = the caller's connected Gmail; `shared` = the desk mailbox from .env (EMAIL_PROVIDER);
+    `mine` = the caller's connected Gmail/Outlook; `shared` = the optional desk mailbox from .env (EMAIL_PROVIDER);
     `auto` = the caller's mailbox when connected, otherwise the shared one.
     """
     from app.connectors.email_connectors import get_connector
@@ -299,7 +299,7 @@ def connectors_poll(limit: int = 25, source: str = Query(default="auto", descrip
         raise HTTPException(400, detail={"error": "source must be auto, mine or shared", "category": "EMAIL_CONNECTOR_ERROR", "retryable": False})
     mailbox = s.repo.get_mailbox(user.id) if source != "shared" else None
     if source == "mine" and mailbox is None:
-        raise HTTPException(400, detail={"error": "no Gmail is connected to this account - sign in with Google or connect a mailbox first", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Connect Gmail from the Guide page", "retryable": False})
+        raise HTTPException(400, detail={"error": "no mailbox is connected to this account - connect Outlook or Gmail from the Guide page first", "category": "EMAIL_CONNECTOR_ERROR", "recovery": "Connect Gmail from the Guide page", "retryable": False})
     try:
         if mailbox is not None and mailbox.status != "revoked":
             return poll_user_mailbox(s, mailbox, actor_id=user.id, limit=limit)

@@ -2,7 +2,7 @@
 Mailbox polling shared by the `Fetch Inbox` button, the background poller and tests.
 
 A poll pulls messages from one connector, ingests each unseen message through the
-normal audited pipeline and, for a user's connected Gmail, stamps the email with
+normal audited pipeline and, for a user's connected Gmail/Outlook, stamps the email with
 `mailbox_user_id` / `mailbox_address` so the shared desk can show where it came from.
 """
 from __future__ import annotations

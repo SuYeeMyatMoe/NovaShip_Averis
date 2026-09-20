@@ -41,7 +41,7 @@ AI-assisted shipping inbox and deterministic Shipping Instruction (SI) to Draft 
 
 ## 1. Overview
 
-Shipping documentation teams receive comparison requests, SI submissions, invoices, operational updates, automated notices, and spam in one shared mailbox. A single BL comparison can require an operator to locate two documents, reconcile different labels and formats, verify seven contractual fields, explain every discrepancy, draft a response, and preserve an audit trail.
+Shipping documentation teams receive comparison requests, SI submissions, invoices, operational updates, automated notices, and spam in their mailboxes. A single BL comparison can require an operator to locate two documents, reconcile different labels and formats, verify seven contractual fields, explain every discrepancy, draft a response, and preserve an audit trail.
 
 NovaShip turns that inbox into a case-management workflow. It can:
 
@@ -150,7 +150,8 @@ A missing or low-confidence value is not counted as a mismatch. It is routed to 
 ```mermaid
 flowchart LR
     subgraph Sources
-        Gmail[Gmail API mailbox]
+        Outlook[User Outlook via Microsoft Graph]
+        Gmail[User Gmail via Gmail API]
         Webhook[Email webhook]
         Bundle[SDOC bundle]
     end
@@ -174,7 +175,7 @@ flowchart LR
     end
 
     UI[Next.js dashboard] --> Auth
-    Gmail & Webhook & Bundle --> Pipeline
+    Outlook & Gmail & Webhook & Bundle --> Pipeline
     Auth --> Pipeline
     Pipeline --> Security --> AI --> Compare --> Human
     Pipeline --> Repo
@@ -231,13 +232,13 @@ The security and intent stages can end the flow early. A security-review message
 | Vector storage | Local JSON index or Supabase pgvector |
 | Document parsing | pypdf, python-docx, openpyxl, xlrd, olefile, standard-library csv/html/eml/rtf readers; Gemini vision OCR for scans and images (on when `GOOGLE_API_KEY` is set), pytesseract fallback |
 | Persistence | In-memory fixtures or Supabase PostgreSQL, Storage, RLS, and JWT |
-| Mail | SDOC bundle connector or Gmail API for inbound polling and approved outbound delivery |
+| Mail | Each user's own Outlook (Microsoft Graph) or Gmail (Gmail API) for inbound polling and approved outbound delivery; SDOC bundle connector for fixtures; optional shared Gmail desk mailbox |
 | Containers | Docker multi-stage images and Docker Compose |
 | Tests | pytest plus a production Next.js build |
 
 ## 6. Quick start with Docker
 
-Docker is the recommended first run. It uses the checked-in demo snapshot and does not require Supabase, OpenAI, Gemini, or Gmail credentials.
+Docker is the recommended first run. It uses the checked-in demo snapshot and does not require Supabase, OpenAI, Gemini, Microsoft, or Google credentials.
 
 ### Prerequisites
 
@@ -508,12 +509,14 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 | `MICROSOFT_TENANT` | `common` | `common` (work/school + personal) or a tenant id to restrict sign-in to one organisation |
 | `MICROSOFT_REDIRECT_URI` | `http://localhost:8000/auth/microsoft/callback` | Must be a Web platform redirect URI on the registration |
 | `FRONTEND_URL` | first `CORS_ORIGINS` entry | Where the callback sends the browser (`/auth/callback`) |
-| `MAILBOX_TOKEN_KEY` | derived from `SESSION_SECRET` | Fernet key that encrypts stored Gmail refresh tokens; rotating it forces users to reconnect |
-| `GMAIL_POLL_INTERVAL_SECONDS` | `0` | `>0` starts the background poller for every connected mailbox plus the shared one |
-| `GMAIL_CLIENT_ID` | empty | Google OAuth client ID |
-| `GMAIL_CLIENT_SECRET` | empty | Google OAuth client secret |
-| `GMAIL_REFRESH_TOKEN` | empty | Refresh token created by the local authorisation helper |
-| `GMAIL_ADDRESS` | empty | Monitored and sending mailbox |
+| `MAILBOX_TOKEN_KEY` | derived from `SESSION_SECRET` | Fernet key that encrypts stored Gmail/Outlook refresh tokens; rotating it forces users to reconnect |
+| `GMAIL_POLL_INTERVAL_SECONDS` | `0` | `>0` starts the background poller for every connected mailbox (Gmail and Outlook) plus the shared one when configured |
+| `EMAIL_PROVIDER` | `none` | `none` = individual mailboxes only (recommended); `gmail` = also poll the shared `GMAIL_*` mailbox; `bundle` = local fixtures |
+| `EMAIL_SEND_MODE` | `simulate` | `simulate` records approved sends without calling a provider; `live` (alias `gmail`) sends from the case's own mailbox, or the shared one |
+| `GMAIL_CLIENT_ID` | empty | *Optional shared mailbox only.* Google OAuth client ID |
+| `GMAIL_CLIENT_SECRET` | empty | *Optional shared mailbox only.* Google OAuth client secret |
+| `GMAIL_REFRESH_TOKEN` | empty | *Optional shared mailbox only.* Refresh token created by the local authorisation helper |
+| `GMAIL_ADDRESS` | empty | *Optional shared mailbox only.* Monitored and sending desk address |
 | `OCR_ENABLED` | `auto` | `auto` = on when `GOOGLE_API_KEY` is set; `1` forces on, `0` off. Gemini vision then pytesseract for scanned PDFs and image attachments; policy `ai_privacy.allow_vision_ocr` can veto it |
 | `LLM_PRIVACY` | `mask` | `mask` replaces company names, references, addresses and document values with `__IDn__` tokens before any OpenAI/Gemini prompt; `off` sends plain text |
 | `BATCH_PARALLELISM` | `4` | Default worker count for `/cases/batch` and `/agent/run-batch` (1–16) |
@@ -530,11 +533,7 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 
 Gemini vision OCR needs only `GOOGLE_API_KEY`; the pytesseract fallback additionally needs `pytesseract`, `pdf2image`, Tesseract, and Poppler, which the default image does not install. OCR never decides MATCH/MISMATCH; scans that stay unreadable still escalate to review. `scripts/run_bundle.py` keeps OCR off unless `--ocr` is passed so scoring stays deterministic.
 
-After setting the Gmail client ID and secret in a local `.env`, create or rotate the refresh token without printing it:
-
-```bash
-python backend/scripts/gmail_authorize.py
-```
+Only if you run an optional **shared** desk mailbox (`EMAIL_PROVIDER=gmail`): after setting the `GMAIL_*` client ID and secret in a local `.env`, create or rotate its refresh token without printing it with `python backend/scripts/gmail_authorize.py`. Individual mailboxes (Outlook / Gmail per user) need none of this; see §7 and `docs/MICROSOFT_SETUP.md`.
 
 ## 10. Using the application
 
@@ -659,7 +658,7 @@ curl 'http://localhost:8000/cases?mismatch=yes&limit=5' \
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/webhooks/email` | Ingest an email with base64 attachments or fixture paths |
-| POST | `/connectors/poll?limit=25&source=auto` | Poll a mailbox: `mine` (caller's connected Gmail), `shared` (bundle/Gmail from `.env`), `auto` (mine when connected, else shared) |
+| POST | `/connectors/poll?limit=25&source=auto` | Poll a mailbox: `mine` (caller's connected Outlook/Gmail), `shared` (bundle/Gmail from `.env`, if configured), `auto` (mine when connected, else shared; `400 NO_MAILBOX_CONNECTED` when neither exists) |
 | POST | `/ingest/bundle?limit=0` | Import the local SDOC fixture bundle |
 
 The webhook is idempotent on message content. A duplicate returns the existing case instead of creating another one.
@@ -1054,7 +1053,7 @@ Default images do not include OCR system packages. With `OCR_ENABLED=1` and `GOO
 
 ### An approved draft did not send real email
 
-Check `EMAIL_SEND_MODE`. In the safe default `simulate` mode, the item is recorded as simulated and no provider call occurs. For live delivery, set `EMAIL_SEND_MODE=gmail` and configure all four Gmail OAuth variables. If an item reaches `DELIVERY_UNKNOWN`, do not retry automatically: reconcile the audited recipient, subject, and approval time against Gmail Sent first.
+Check `EMAIL_SEND_MODE`. In the safe default `simulate` mode, the item is recorded as simulated and no provider call occurs. For live delivery set `EMAIL_SEND_MODE=live`; the reply then leaves from the mailbox the case arrived in (the user's Outlook via Microsoft Graph, or their Gmail). A case that did not arrive through a connected mailbox needs the optional shared `GMAIL_*` mailbox, otherwise approval returns a retryable `502 no mailbox can send this reply` and the draft becomes `SEND_FAILED`. If an item reaches `DELIVERY_UNKNOWN`, do not retry automatically: reconcile the audited recipient, subject, and approval time against the mailbox's Sent folder first.
 
 ### `GET /` on port 8000 returns 404
 

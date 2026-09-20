@@ -126,7 +126,9 @@ Order of operations for P3: run `0001_schema.sql`, `0002_rls.sql`, `0003_vector.
 | `EMBEDDING_PROVIDER=gemini` + `GOOGLE_API_KEY=AIzaSy...` | aistudio.google.com/app/apikey | Gemini `text-embedding-004` for RAG |
 | `EMBEDDING_PROVIDER=openai` | (uses `OPENAI_API_KEY`) | OpenAI embeddings for RAG |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET` | Supabase -> Project Settings -> API | persistence, RLS, storage, JWT auth |
-| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, `GMAIL_ADDRESS`, `EMAIL_PROVIDER=gmail` | Google Cloud Console + one-time `backend/scripts/gmail_authorize.py` | Primary Gmail ingestion (`POST /connectors/poll`) and approved sending |
+| `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT=common` | Entra admin center → App registrations (Web redirect `/auth/microsoft/callback`, delegated `User.Read Mail.Read Mail.Send`) | Sign in with Microsoft + *Connect Outlook*: each user's own mailbox is polled and replied from (`docs/MICROSOFT_SETUP.md`) |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Google Cloud Console (Web client, redirect `/auth/google/callback`) | Sign in with Google = account + that Gmail connected in one consent |
+| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, `GMAIL_ADDRESS`, `EMAIL_PROVIDER=gmail` | Google Cloud Console + one-time `backend/scripts/gmail_authorize.py` | *Optional* shared desk mailbox polled next to the user mailboxes; not needed for individual mode |
 
 | `LANGGRAPH_CHECKPOINT=postgres`, `LANGGRAPH_PG_URL` | Supabase -> Database -> Connection string | durable paused graphs |
 
@@ -191,8 +193,10 @@ Workbench: `/workbench` runs the same `/agent/*` and `/cases/batch` APIs. `/agen
 ### B. After Supabase
 Same commands with `REPO_BACKEND=supabase`. Then check rows: `select count(*) from cases;` (520), `select * from audit_events order by timestamp desc limit 5;`, `select count(*) from case_embeddings;` after `create_index`. Restart the API and confirm data persists (memory mode would have lost it).
 
-### C. After Gmail OAuth
-Set the Gmail client ID, client secret and mailbox address locally, run `python backend/scripts/gmail_authorize.py` once, then use `EMAIL_PROVIDER=gmail`. Send a test email with an SI and a Draft BL attached to the authorized mailbox, then `POST /connectors/poll?limit=5`. Expect a new case with the right verdict; polling again returns `duplicates_skipped: 1`. Approving a draft with `EMAIL_SEND_MODE=gmail` sends through Gmail only after human approval; the default `simulate` mode performs no provider call and records `NOTIFICATION_SIMULATED`. Graph remains available with the corresponding `graph` modes and `MS_*` values.
+### C. After mailbox credentials
+**Individual mailboxes (default):** set `MICROSOFT_CLIENT_ID/SECRET` (and/or `GOOGLE_OAUTH_CLIENT_ID/SECRET`), keep `EMAIL_PROVIDER=none`. Sign in with Microsoft → *Connect Outlook* (or Sign in with Google). Send a test email with an SI and a Draft BL attached to that mailbox, then *Fetch my inbox* / `POST /connectors/poll?source=mine&limit=5`. Expect a new case tagged with the address and the right verdict; polling again returns `duplicates_skipped: 1`. Approving a draft with `EMAIL_SEND_MODE=live` sends from that mailbox (Graph `sendMail` / Gmail API) only after human approval and the audit event records `from`; the default `simulate` mode performs no provider call and records `NOTIFICATION_SIMULATED`.
+
+**Optional shared mailbox:** set the `GMAIL_*` client ID, secret and address locally, run `python backend/scripts/gmail_authorize.py` once, then `EMAIL_PROVIDER=gmail`; `source=shared` polls it and it is the send fallback for cases that did not arrive through a user mailbox.
 
 ### D. After LLM / embedding keys
 `GET /health` log shows `llm=openai`; `GET /rag/info` shows the provider; run `case_email_004` again: `security_agent.decided_by = llm`, Ask AI free-form questions get model answers with citations. The scoreboard must still be 1.0 (`python scripts/run_bundle.py`), because the verdict is deterministic.

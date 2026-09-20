@@ -53,7 +53,7 @@ export async function register(body: { email: string; password: string; display_
   const s = await api<Session>("/auth/register", { method: "POST", body: JSON.stringify(body) }, { auth: false });
   setSession(s); return s;
 }
-/** Sign in / sign up with Google (also connects that Gmail). With a session, the grant links Gmail to the current account. */
+/** Sign in / sign up with Google (also connects that Gmail). With a session, the grant links Gmail to the current account. Outlook: see startMicrosoft. */
 export async function startGoogle(opts: { role?: string; next?: string } = {}): Promise<void> {
   const q = new URLSearchParams();
   if (opts.role) q.set("role", opts.role);

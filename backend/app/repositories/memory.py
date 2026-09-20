@@ -70,7 +70,7 @@ class MemoryRepository(BaseRepository):
         self.jobs: dict[str, dict[str, Any]] = {}
         self.credentials: dict[str, str] = {}      # user_id -> password hash
         self.revoked_sessions: set[str] = set()
-        self.mailboxes: dict[str, UserMailbox] = {}  # user_id -> connected Gmail (token encrypted)
+        self.mailboxes: dict[str, UserMailbox] = {}  # user_id -> connected Gmail/Outlook (token encrypted)
 
     # emails
     def save_email(self, email: EmailMessage) -> None:

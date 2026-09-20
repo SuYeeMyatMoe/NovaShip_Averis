@@ -58,11 +58,11 @@ Gemini vision OCR is on whenever `GOOGLE_API_KEY` exists, so scanned PDFs and im
 
 Real inbound Gmail can be processed, but outbound email is not transmitted.
 
-### Per-user Gmail (Sign in with Google)
+### Per-user mailboxes (Sign in with Microsoft → Connect Outlook, or Sign in with Google)
 
-Independent of `EMAIL_PROVIDER`. A user who signs in with Google gets their own Gmail connected (`user_mailboxes`, token encrypted). Fetch Inbox then polls *their* mailbox; the shared `GMAIL_ADDRESS` remains available through `source=shared` and the scheduler. In `EMAIL_SEND_MODE=simulate` nothing leaves either mailbox. In `gmail` mode an approved reply on a case that arrived in a user's mailbox is sent from that user's address, which is what the customer expects to see in the thread.
+Independent of `EMAIL_PROVIDER`. A user who signs in with Microsoft connects their Outlook in a second consent (*Connect Outlook*); a user who signs in with Google gets their Gmail connected in the same consent. Either way the mailbox lands in `user_mailboxes` (token encrypted, Microsoft's rotated tokens persisted). Fetch Inbox then polls *their* mailbox; a shared `GMAIL_ADDRESS`, if configured, remains available through `source=shared` and the scheduler. In `EMAIL_SEND_MODE=simulate` nothing leaves any mailbox. In `live` mode an approved reply on a case that arrived in a user's mailbox is sent from that user's address (Graph `sendMail` or the Gmail API), which is what the customer expects to see in the thread.
 
-Requires: a Web-application OAuth client (`GOOGLE_OAUTH_CLIENT_ID/SECRET`), its redirect URI (`GOOGLE_OAUTH_REDIRECT_URI`) registered in Google Cloud, migration `0007_user_mailboxes.sql` on Supabase, and each tester added as a test user while the consent screen is unverified. `GMAIL_POLL_INTERVAL_SECONDS` enables background polling; keep it `0` on serverless (Vercel) because there is no long-lived process, and poll from the UI or an external cron instead.
+Requires: for Microsoft an Entra app registration (`MICROSOFT_CLIENT_ID/SECRET`, Web redirect `MICROSOFT_REDIRECT_URI`, delegated `User.Read Mail.Read Mail.Send`; `docs/MICROSOFT_SETUP.md`); for Google a Web-application OAuth client (`GOOGLE_OAUTH_CLIENT_ID/SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`) with each tester added as a test user while the consent screen is unverified; migration `0007_user_mailboxes.sql` on Supabase. `GMAIL_POLL_INTERVAL_SECONDS` enables background polling of every connected mailbox; keep it `0` on serverless (Vercel) because there is no long-lived process, and poll from the UI or an external cron instead.
 
 ## Hackathon live
 
@@ -139,11 +139,11 @@ The seven-field verdict remains deterministic regardless of LLM choice.
 
 The live column is `vector(768)`. A replacement embedding provider must return 768 dimensions or the vector schema/index must be migrated and reindexed.
 
-### Real outbound Gmail
+### Real outbound mail
 
-Keep `EMAIL_SEND_MODE=simulate` until the deployed human-approval and recipient controls are verified. Only then intentionally set `EMAIL_SEND_MODE=gmail`.
+Keep `EMAIL_SEND_MODE=simulate` until the deployed human-approval and recipient controls are verified. Only then intentionally set `EMAIL_SEND_MODE=live` (alias `gmail`). The reply leaves from the mailbox the case arrived in: the user's Outlook (Microsoft Graph) or Gmail; the shared `GMAIL_*` mailbox is only a fallback and is optional.
 
-Outbound delivery is fail-closed. Drafts and shares are persisted as `DELIVERING` before Gmail is called. A confirmed provider response reaches `SENT`; an interrupted or ambiguous response becomes `DELIVERY_UNKNOWN`, blocks automatic resend, and must be reconciled against the Gmail Sent mailbox before an operator takes further action.
+Outbound delivery is fail-closed. Drafts and shares are persisted as `DELIVERING` before the provider is called. A confirmed provider response reaches `SENT`; an interrupted or ambiguous response becomes `DELIVERY_UNKNOWN`, blocks automatic resend, and must be reconciled against that mailbox's Sent folder before an operator takes further action. When no mailbox can send at all, approval returns a retryable `502` and the item is `SEND_FAILED` / `DELIVERY_FAILED` (nothing left the desk).
 
 ## Production gate
 
