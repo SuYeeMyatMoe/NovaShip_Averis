@@ -493,6 +493,13 @@ class SupabaseRepository(BaseRepository):
                 .gte("timestamp", since.isoformat()).order("timestamp").limit(5000).execute().data)
         return [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in rows]
 
+    def list_audit_by_action(self, actions: list[str], since: Optional[datetime] = None, limit: int = 5000) -> list[AuditEvent]:
+        q = self._t("audit_events").select("*").eq("tenant_id", self.tenant).in_("action", list(actions))
+        if since is not None:
+            q = q.gte("timestamp", since.isoformat())
+        rows = q.order("timestamp").limit(limit).execute().data
+        return [AuditEvent(**{k: v for k, v in r.items() if k != "tenant_id"}) for r in rows]
+
     # connected mailboxes (migration 0007). Tokens are Fernet-encrypted before they reach this table.
     @staticmethod
     def _mailbox_from_row(r: dict[str, Any]) -> UserMailbox:

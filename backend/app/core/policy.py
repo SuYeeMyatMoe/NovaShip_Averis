@@ -40,6 +40,13 @@ DEFAULT_POLICY: dict[str, Any] = {
         "duplicate_window_hours": 72,
         "trusted_domains": ["aprilasia.com", "april.com.my"],
         "partner_domains": ["fujitogrp.com", "safqa.co.ke", "psabdp.com", "roxcel.at", "ifpla.com", "algurg.ae", "vitalsolutions.sg"],
+        "blocked_senders": [],          # addresses or domains classified SPAM at the gate; learned from archived mail, saved by an Admin
+    },
+    # Learning from the security gate: after N flagged mails from one sender are archived, Policies proposes blocking it. Never applied by itself.
+    "learning": {
+        "enabled": True,
+        "min_archives": 3,              # archived flagged mails from one sender before a suggestion opens
+        "window_days": 90,              # only decisions this recent count
     },
     "intent": {
         "intent_model_threshold": 0.65,
@@ -105,7 +112,15 @@ def explain_policy(policy: dict[str, Any]) -> list[str]:
         f"Blocked attachment types: {', '.join(s['blocked_attachment_types'])}. Max attachments per email: {s['max_attachments']}.",
         _explain_operator_guard(policy.get("operator_guard") or {}),
         _explain_ai_privacy(policy.get("ai_privacy") or {}),
+        _explain_learning(policy),
     ]
+
+
+def _explain_learning(policy: dict[str, Any]) -> str:
+    s, l = policy.get("security") or {}, policy.get("learning") or {}
+    blocked = s.get("blocked_senders") or []
+    base = f"Learning: after {l.get('min_archives', 3)} flagged mails from one sender are archived without action, Policies proposes blocking that sender; nothing changes until an Admin saves it, and auto-send is never enabled."
+    return base + (f" {len(blocked)} sender(s) are currently blocked at the gate." if blocked else "")
 
 
 def _explain_operator_guard(g: dict[str, Any]) -> str:

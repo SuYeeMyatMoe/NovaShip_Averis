@@ -918,8 +918,30 @@ def get_policy(user: UserRecord = Depends(require("view_policy"))):
 @router.put("/policies")
 def put_policy(body: dict[str, Any], user: UserRecord = Depends(require("edit_policy"))):
     note = body.pop("change_note", "policy update")
-    p = svc().update_policy(body, user, note)
+    accepted = body.pop("accepted_suggestions", None)
+    p = svc().update_policy(body, user, note, accepted_suggestions=accepted if isinstance(accepted, list) else None)
     return {"active": p.model_dump(mode="json"), "explanation": explain_policy(merged_policy(p.values))}
+
+
+@router.get("/policies/suggestions")
+def policy_suggestions(user: UserRecord = Depends(require("view_policy"))):
+    """What the desk learned from the security gate and proposes as a policy change (nothing is applied by itself)."""
+    from app.ai.policy_learning import suggestions
+
+    repo = get_repo()
+    return suggestions(repo, merged_policy(repo.get_active_policy().values))
+
+
+@router.post("/policies/suggestions/{suggestion_id}/dismiss")
+def dismiss_policy_suggestion(suggestion_id: str, body: dict[str, Any] | None = None, user: UserRecord = Depends(require("edit_policy"))):
+    from app.ai.policy_learning import suggestions
+
+    repo = get_repo()
+    policy = merged_policy(repo.get_active_policy().values)
+    if all(s["id"] != suggestion_id for s in suggestions(repo, policy)["items"]):
+        raise HTTPException(404, detail={"error": f"suggestion {suggestion_id} is not open", "category": "DATABASE_ERROR"})
+    svc().dismiss_suggestion(suggestion_id, user, note=(body or {}).get("note"))
+    return suggestions(repo, policy)
 
 
 @router.get("/contracts/fields")

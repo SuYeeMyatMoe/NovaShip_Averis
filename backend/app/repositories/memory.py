@@ -308,6 +308,11 @@ class MemoryRepository(BaseRepository):
     def list_audit_for_actor(self, actor_id: str, since: datetime) -> list[AuditEvent]:
         return sorted((e for e in self.audit if e.actor_id == actor_id and e.timestamp >= since), key=lambda e: e.timestamp)
 
+    def list_audit_by_action(self, actions: list[str], since: Optional[datetime] = None, limit: int = 5000) -> list[AuditEvent]:
+        wanted = set(actions)
+        rows = [e for e in self.audit if e.action in wanted and (since is None or e.timestamp >= since)]
+        return sorted(rows, key=lambda e: e.timestamp)[-limit:]
+
     def get_mailbox(self, user_id: str) -> Optional[UserMailbox]:
         return self.mailboxes.get(user_id)
 

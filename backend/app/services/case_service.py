@@ -860,10 +860,21 @@ class CaseService:
         return buf.getvalue()
 
     # ------------------------------------------------------------ policy
-    def update_policy(self, values: dict[str, Any], user: UserRecord, note: str) -> PolicyRecord:
+    def update_policy(self, values: dict[str, Any], user: UserRecord, note: str, accepted_suggestions: Optional[list[str]] = None) -> PolicyRecord:
         current = self.repo.get_active_policy()
         n = len(self.repo.list_policy_versions()) + 1
         new = PolicyRecord(id=f"pol_v{n}", version=f"v{n}", name=current.name, values=merged_policy({**current.values, **values}), updated_by=user.id, updated_at=datetime.utcnow(), change_note=note)
         self.repo.save_policy_version(new)
-        self.pipe.audit(None, ActorType.USER, user.id, "POLICY_UPDATED", {"version": current.version}, {"version": new.version, "note": note, "changed_sections": list(values.keys())}, policy_version=new.version)
+        accepted = [str(s) for s in (accepted_suggestions or []) if s]
+        for sid in accepted:  # a learned suggestion the Admin carried into this version; the id keeps it from being proposed again
+            self.pipe.audit(None, ActorType.USER, user.id, "POLICY_SUGGESTION_ACCEPTED", after={"suggestion_id": sid, "version": new.version}, policy_version=new.version)
+        after = {"version": new.version, "note": note, "changed_sections": list(values.keys())}
+        if accepted:
+            after["accepted_suggestions"] = accepted
+        self.pipe.audit(None, ActorType.USER, user.id, "POLICY_UPDATED", {"version": current.version}, after, policy_version=new.version)
         return new
+
+    def dismiss_suggestion(self, suggestion_id: str, user: UserRecord, note: Optional[str] = None) -> None:
+        """Remember that an Admin declined a learned suggestion. The live policy is untouched."""
+        self.pipe.audit(None, ActorType.USER, user.id, "POLICY_SUGGESTION_DISMISSED", after={"suggestion_id": suggestion_id, "note": note or ""},
+                        policy_version=self.repo.get_active_policy().version)

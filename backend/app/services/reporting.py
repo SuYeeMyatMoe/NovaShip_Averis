@@ -56,14 +56,29 @@ def field_stats(cases) -> list[dict[str, Any]]:
     return list(stats.values())
 
 
-def security_rows(cases, emails: dict[str, Any]) -> list[dict[str, Any]]:
+def gate_state_of(c, marked_no_action: Optional[set[str]] = None) -> str:
+    """open = still waiting at the security gate; archived / reviewing / no_action = a person handled it.
+    NO_ACTION_INFO alone is not enough (the pipeline sets it for informational mail): `no_action` needs a person's MARKED_NO_ACTION."""
+    if any(sig.signal == "BLOCKED_SENDER" for sig in c.security.signals):
+        return "blocked"   # learned block list: spam at the gate, nobody needs to look at it
+    if c.status == CaseStatus.COMPLETED:
+        return "archived"
+    if c.status == CaseStatus.HUMAN_REVIEW:
+        return "reviewing"
+    if c.status == CaseStatus.NO_ACTION_INFO and marked_no_action and c.id in marked_no_action:
+        return "no_action"
+    return "open"
+
+
+def security_rows(cases, emails: dict[str, Any], marked_no_action: Optional[set[str]] = None) -> list[dict[str, Any]]:
     rows = []
     for c in cases:
         if c.security.outcome.value == "SAFE" and not c.anomalies:
             continue
         e = emails.get(c.source_email_id)
         rows.append({"case_id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "outcome": c.security.outcome.value, "score": c.security.score,
-                     "signals": [s.model_dump(mode="json") for s in c.security.signals], "anomalies": [a.model_dump(mode="json") for a in c.anomalies], "status": c.status.value})
+                     "signals": [s.model_dump(mode="json") for s in c.security.signals], "anomalies": [a.model_dump(mode="json") for a in c.anomalies], "status": c.status.value,
+                     "gate_state": gate_state_of(c, marked_no_action)})
     order = {"SECURITY_REVIEW": 0, "SUSPICIOUS": 1, "SPAM": 2, "SAFE": 3}
     rows.sort(key=lambda r: (order.get(r["outcome"], 9), -r["score"]))
     return rows

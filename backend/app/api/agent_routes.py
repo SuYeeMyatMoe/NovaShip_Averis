@@ -205,11 +205,19 @@ def field_cases(field: str, result: Optional[str] = None, user: UserRecord = Dep
 
 # ---------------------------------------------------------------- security queue + global audit
 @router.get("/security/queue")
-def security_queue(user: UserRecord = Depends(require("view_case"))):
+def security_queue(state: str = "open", user: UserRecord = Depends(require("view_case"))):
+    """Flagged cases. `state`: open (default, still at the gate) | handled (archived / sent to review / no action) | all."""
     repo = get_repo()
     emails = {e.id: e for e in repo.list_emails()}
-    rows = _security_rows(repo.list_cases(), emails)
-    return {"total": len(rows), "items": rows}
+    marked = {e.case_id for e in repo.list_audit_by_action(["MARKED_NO_ACTION"]) if e.case_id}
+    rows = _security_rows(repo.list_cases(), emails, marked)
+    counts = {"open": sum(1 for r in rows if r["gate_state"] == "open"), "handled": sum(1 for r in rows if r["gate_state"] != "open")}
+    state = (state or "open").lower()
+    if state == "open":
+        rows = [r for r in rows if r["gate_state"] == "open"]
+    elif state == "handled":
+        rows = [r for r in rows if r["gate_state"] != "open"]
+    return {"total": len(rows), "items": rows, "counts": counts}
 
 
 @router.get("/audit")

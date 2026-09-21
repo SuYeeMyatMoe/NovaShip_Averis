@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { api, post } from "@/lib/api";
 import { Badge, Button, Card, Empty, StatusBadge, Toast } from "@/components/ui";
 
+const GATE_LABEL: Record<string, string> = { archived: "archived", reviewing: "sent to review", no_action: "no action", blocked: "blocked sender" };
+const GATE_TONE: Record<string, string> = { archived: "bg-ink-100 text-ink-700", reviewing: "bg-review-bg text-review-fg", no_action: "bg-ink-100 text-ink-600", blocked: "bg-mismatch-bg text-mismatch-fg" };
 const TONE: Record<string, string> = { SECURITY_REVIEW: "bg-mismatch text-white", SPAM: "bg-mismatch-bg text-mismatch-fg", SUSPICIOUS: "bg-review-bg text-review-fg", SAFE: "bg-match-bg text-match-fg" };
 
 /** Security agent queue: everything the precheck + security agent flagged, with evidence and one-click actions. */
@@ -13,12 +15,17 @@ export default function SecurityPage() {
   const [page, setPage] = useState(1);
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 3500); };
-  const load = () => api("/security/queue").then((d) => setRows(d.items)).catch((e) => say(e.message, "err"));
+  const [handled, setHandled] = useState<any[] | null>(null);
+  const [handledCount, setHandledCount] = useState(0);
+  // open = still waiting at the gate (the working queue); handled = archived / sent to review / no action / blocked sender
+  const load = () => Promise.all([api("/security/queue?state=open"), api("/security/queue?state=handled")])
+    .then(([open, done]) => { setRows(open.items); setHandled(done.items); setHandledCount(open.counts?.handled ?? done.items.length); })
+    .catch((e) => say(e.message, "err"));
   useEffect(() => { load(); }, []);
   const act = async (id: string, path: string) => { try { await post(`/cases/${id}${path}`); say("Done"); load(); } catch (e: any) { say(e.message, "err"); } };
   const isOperator = (r: any) => (r.anomalies || []).some((a: any) => String(a.signal || "").startsWith("OPERATOR_") || String(a.signal || "").startsWith("AUTO_DRAFT"));
-  const shown = (rows || []).filter((r) => {
-    if (!filter) return true;
+  const shown = (filter === "HANDLED" ? handled || [] : rows || []).filter((r) => {
+    if (!filter || filter === "HANDLED") return true;
     if (filter === "OPERATOR") return isOperator(r);
     return r.outcome === filter;
   });
@@ -38,9 +45,9 @@ export default function SecurityPage() {
           <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">Review security signals, suspicious activity, and spam before cases move through the workflow. Automated checks can flag a case, while your team remains in control of the final action.</p>
         </div>
         <div className="inline-flex max-w-full flex-wrap gap-1 rounded-2xl border border-orange-200 bg-[#fffaf5] p-1.5 shadow-sm">
-          {["", "SECURITY_REVIEW", "SUSPICIOUS", "SPAM", "OPERATOR"].map((k) => (
+          {["", "SECURITY_REVIEW", "SUSPICIOUS", "SPAM", "OPERATOR", "HANDLED"].map((k) => (
             <button key={k || "all"} type="button" onClick={() => { setFilter(k); setPage(1); }} className={`rounded-xl px-3 py-2 text-xs font-bold tracking-wide transition duration-200 hover:-translate-y-0.5 sm:text-sm ${filter === k ? "bg-accent text-white shadow-sm" : "text-[#76503a] hover:bg-orange-100 hover:text-[#a44d13]"}`}>
-              {k === "OPERATOR" ? `Unusual operator signals (${counts.OPERATOR || 0})` : k ? `${k.replace(/_/g, " ")} (${counts[k] || 0})` : `All (${rows?.length || 0})`}
+              {k === "HANDLED" ? `Handled (${handledCount})` : k === "OPERATOR" ? `Unusual operator signals (${counts.OPERATOR || 0})` : k ? `${k.replace(/_/g, " ")} (${counts[k] || 0})` : `Open (${rows?.length || 0})`}
             </button>
           ))}
         </div>
@@ -60,7 +67,7 @@ export default function SecurityPage() {
                       </div>
                       <div className="mt-2 break-all text-xs text-ink-500">from <span className="font-mono">{r.sender}</span></div>
                     </div>
-                    <span className="flex shrink-0 items-center gap-2 text-xs"><StatusBadge status={r.status} /><span className="text-ink-500">score {r.score}</span></span>
+                    <span className="flex shrink-0 items-center gap-2 text-xs">{r.gate_state && r.gate_state !== "open" && <Badge className={GATE_TONE[r.gate_state] || "bg-ink-100 text-ink-700"}>{GATE_LABEL[r.gate_state] || r.gate_state}</Badge>}<StatusBadge status={r.status} /><span className="text-ink-500">score {r.score}</span></span>
                   </div>
                   <ul className="mt-3 grid gap-2 text-xs md:grid-cols-2">
                     {r.signals.map((s: any, i: number) => <li key={i} className="rounded-lg bg-[#fff7ee] p-2.5"><b>{s.signal}</b> <span className="text-ink-500">({s.severity})</span><div className="mt-1 text-ink-700">{s.evidence}</div><div className="text-ink-500">Recommended: {s.recommended_action}</div></li>)}
@@ -68,9 +75,11 @@ export default function SecurityPage() {
                   </ul>
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     <Link href={`/cases/${r.case_id}`}><Button kind="primary">Open case</Button></Link>
-                    <Button onClick={() => act(r.case_id, "/request-review")}>Send to human review</Button>
-                    <Button onClick={() => act(r.case_id, "/no-action")}>Mark no action</Button>
-                    <Button onClick={() => act(r.case_id, "/complete")}>Archive</Button>
+                    {(!r.gate_state || r.gate_state === "open") && <>
+                      <Button onClick={() => act(r.case_id, "/request-review")}>Send to human review</Button>
+                      <Button onClick={() => act(r.case_id, "/no-action")}>Mark no action</Button>
+                      <Button onClick={() => act(r.case_id, "/complete")} title="Remove from the queue. Three archived mails from one sender teach the desk to block it (see Policies)">Archive</Button>
+                    </>}
                   </div>
                 </article>
               ))}

@@ -58,6 +58,16 @@ export const POLICY_SCHEMA: Record<string, SectionSpec> = {
       duplicate_window_hours: { label: "Duplicate window (hours)", kind: "integer", min: 1, max: 720, step: 1, help: "Identical messages inside this window are treated as duplicates." },
       trusted_domains: { label: "Trusted domains", kind: "list", help: "Internal / first-party sender domains." },
       partner_domains: { label: "Partner domains", kind: "list", help: "Known forwarders, consignees and notify parties." },
+      blocked_senders: { label: "Blocked senders", kind: "list", help: "Addresses or domains classified SPAM at the gate. Filled by accepting a learned suggestion; you can also edit it here." },
+    },
+  },
+  learning: {
+    title: "Learning from the security gate",
+    blurb: "After enough flagged mail from one sender is archived, Policies proposes blocking it. Suggestions are never applied by themselves and never enable auto-send.",
+    fields: {
+      enabled: { label: "Propose changes", kind: "boolean", help: "Off = no suggestions are computed." },
+      min_archives: { label: "Archives before a suggestion", kind: "integer", min: 2, max: 20, step: 1, help: "Flagged mails from one sender a person must archive first." },
+      window_days: { label: "Look back (days)", kind: "integer", min: 7, max: 365, step: 1 },
     },
   },
   intent: {

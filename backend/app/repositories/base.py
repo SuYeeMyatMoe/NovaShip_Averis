@@ -144,6 +144,12 @@ class BaseRepository(ABC):
         """All audit events by one actor since `since`, oldest first. Default filters the global list."""
         return sorted((e for e in self.list_audit(None) if e.actor_id == actor_id and e.timestamp >= since), key=lambda e: e.timestamp)
 
+    def list_audit_by_action(self, actions: list[str], since: Optional[datetime] = None, limit: int = 5000) -> list[AuditEvent]:
+        """Audit events whose action is one of `actions` (any actor), oldest first. Default filters the global list."""
+        wanted = set(actions)
+        rows = [e for e in self.list_audit(None) if e.action in wanted and (since is None or e.timestamp >= since)]
+        return sorted(rows, key=lambda e: e.timestamp)[-limit:]
+
     # ---- connected mailboxes (Google sign-in) ----------------------------
     # Default: process memory. MemoryRepository persists them in its snapshot,
     # SupabaseRepository stores them in `user_mailboxes` (migration 0007).

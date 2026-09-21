@@ -48,6 +48,7 @@ def assess_security(email: EmailMessage, attachments: Iterable[AttachmentMeta], 
     max_attachments = int(policy.get("max_attachments", 10))
     trusted = TRUSTED_DOMAINS | set(policy.get("trusted_domains", []))
     partners = KNOWN_PARTNER_DOMAINS | set(policy.get("partner_domains", []))
+    blocked = {str(x).strip().lower() for x in policy.get("blocked_senders", []) if x}
 
     text = f"{email.subject}\n{email.body}".lower()
     signals: list[SecuritySignal] = []
@@ -144,8 +145,21 @@ def assess_security(email: EmailMessage, attachments: Iterable[AttachmentMeta], 
             recommended_action="Attach to the existing case; do not create a new one.",
         ))
 
+    # learned block list (policy `security.blocked_senders`, filled only by an Admin accepting a suggestion): straight to SPAM
+    sender_lc = (email.sender or "").strip().lower()
+    is_blocked = bool(blocked) and (sender_lc in blocked or dom in blocked)
+    if is_blocked:
+        score = max(score, 1.0)
+        signals.append(SecuritySignal(
+            signal="BLOCKED_SENDER", severity="HIGH",
+            evidence=f"Sender '{sender_lc}' is on the desk's blocked list (learned from archived mail).",
+            recommended_action="Treat as spam; no action needed.",
+        ))
+
     score = max(0.0, min(1.0, score))
-    if any(s.severity == "CRITICAL" for s in signals) or any(s.signal == "POLICY_BYPASS_REQUEST" for s in signals):
+    if is_blocked:
+        outcome = SecurityOutcome.SPAM
+    elif any(s.severity == "CRITICAL" for s in signals) or any(s.signal == "POLICY_BYPASS_REQUEST" for s in signals):
         outcome = SecurityOutcome.SECURITY_REVIEW
     elif score >= 0.5:
         outcome = SecurityOutcome.SPAM
