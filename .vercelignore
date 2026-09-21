@@ -1,0 +1,11 @@
+sdoc-hackathon-docker
+sdoc-hackathon-bundle
+backend/tests
+backend/.venv
+**/.pytest_cache
+**/__pycache__
+frontend/.next
+frontend/node_modules
+scratch_submission.json
+evaluation
+testkit
