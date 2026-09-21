@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { api, post, getSession, downloadFile, type CaseRow } from "@/lib/api";
+import { api, post, getSession, downloadFile } from "@/lib/api";
 import { Badge, Button, Card, Empty, KV, StatusBadge, Toast } from "@/components/ui";
 import { CaseMultiPicker } from "@/components/case-picker";
 import { useOperatorWarning } from "@/lib/operator-warning";
@@ -49,7 +49,6 @@ export default function WorkbenchPage() {
   const [parallel, setParallel] = useState(4);
   const [rows, setRows] = useState<Record<string, RunRow>>({});
   const [lastAction, setLastAction] = useState<string | null>(null);
-  const [pending, setPending] = useState<{ pending: number; paused: number } | null>(null);
   // the last results table survives a trip into a case and back
   useEffect(() => {
     try {
@@ -60,19 +59,6 @@ export default function WorkbenchPage() {
   useEffect(() => {
     try { Object.keys(rows).length ? sessionStorage.setItem(LAST_RUN_KEY, JSON.stringify({ rows, lastAction })) : sessionStorage.removeItem(LAST_RUN_KEY); } catch { /* ignore */ }
   }, [rows, lastAction]);
-  const loadPending = useCallback(() => {
-    Promise.all([api<{ total: number }>("/cases?agent=pending&limit=1"), api<{ total: number }>("/cases?agent=paused&limit=1")])
-      .then(([p, q]) => setPending({ pending: p.total, paused: q.total })).catch(() => {});
-  }, []);
-  useEffect(() => { loadPending(); }, [loadPending]);
-  const addPending = async (which: "pending" | "paused", n: number) => {
-    try {
-      const r = await api<{ items: CaseRow[] }>(`/cases?agent=${which}&sort=received_desc&limit=${n}`);
-      const fresh = r.items.map((c) => c.id).filter((id) => !ids.includes(id));
-      setIds([...ids, ...fresh]);
-      say(fresh.length ? `Added ${fresh.length} ${which === "pending" ? "not-run" : "paused"} case(s)` : `Nothing new to add`);
-    } catch (e: any) { say(e.message, "err"); }
-  };
   const { notice, dialog } = useOperatorWarning();
   const me = getSession()?.user;
   const canBatch = me?.permissions.includes("batch") ?? false;
@@ -139,7 +125,6 @@ export default function WorkbenchPage() {
       setLastAction("agent");
       setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(Object.entries(results).map(([id, x]) => [id, { action: "agent", ...x }])) }));
       say(`agent: ${Object.keys(results).length - r.failed_ids.length}/${Object.keys(results).length} ran · ${r.paused_ids.length} waiting for a person · ${r.parallel} in parallel`, r.failed_ids.length ? "err" : "ok");
-      loadPending();
     } catch (e: any) { say(e.message, "err"); }
     finally { setBusy(false); }
   };
@@ -152,7 +137,6 @@ export default function WorkbenchPage() {
       const results = (r.results || {}) as Record<string, any>;
       setRows((prev) => ({ ...prev, ...Object.fromEntries(Object.entries(results).map(([id, x]) => [id, { ...(prev[id] || { action: "agent" }), ok: x.ok, paused: x.ok ? !!x.paused : prev[id]?.paused, status: x.status ?? prev[id]?.status, error: x.ok ? undefined : x.error }])) }));
       say(`resume ${action}: ${Object.values(results).filter((x: any) => x.ok).length}/${pausedIds.length} succeeded`);
-      loadPending();
     } catch (e: any) { say(e.message, "err"); }
     finally { setBusy(false); }
   };
@@ -221,15 +205,6 @@ export default function WorkbenchPage() {
 
         <div className="space-y-4">
         <Card title="Batch run (Supervisor / Admin)" className="border-orange-200">
-            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-orange-200 bg-[#fffaf5] px-3 py-2 text-xs text-ink-700">
-              <span className="font-semibold">Before run:</span>
-              {pending ? <span><b>{pending.pending}</b> case(s) not run by the agent yet · <b>{pending.paused}</b> paused for a decision</span> : <span className="text-ink-400">counting…</span>}
-              <span className="ml-auto flex gap-1">
-                <Button kind="ghost" disabled={busy || !pending?.pending} onClick={() => addPending("pending", 20)}>Add 20 newest not-run</Button>
-                <Button kind="ghost" disabled={busy || !pending?.paused} onClick={() => addPending("paused", 50)}>Add all paused</Button>
-                <Link href="/history"><Button kind="ghost">Processed ↗</Button></Link>
-              </span>
-            </div>
             <label className="text-xs font-semibold text-ink-600">Cases</label>
             <CaseMultiPicker ids={ids} onChange={setIds} className="mt-1" />
             <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-ink-500">
@@ -312,7 +287,7 @@ export default function WorkbenchPage() {
                     <td className="max-w-[420px] px-2 py-1.5 text-ink-700">
                       {!r.ok && r.error ? <span className="text-mismatch-fg">{r.error.error || r.error.message || JSON.stringify(r.error)}{r.error.category ? ` · ${r.error.category}` : ""}{r.error.retryable ? " · retryable" : ""}</span>
                         : r.paused && r.interrupt ? <span className="line-clamp-2">{r.interrupt.summary}</span>
-                        : r.action === "agent" && r.ok ? <span className="text-ink-600">Agent finished{r.status ? ` · ${r.status.replace(/_/g, " ").toLowerCase()}` : ""} · <Link href={`/history?case=${id}`} className="text-accent-fg hover:underline">in Processed ↗</Link></span>
+                        : r.action === "agent" && r.ok ? <span className="text-ink-600">Agent finished{r.status ? ` · ${r.status.replace(/_/g, " ").toLowerCase()}` : ""}</span>
                         : r.next?.length ? <span className="font-mono text-ink-500">next: {r.next.join(", ")}</span> : <span className="text-ink-400">-</span>}
                     </td>
                     <td className="px-2 py-1.5">
