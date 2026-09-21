@@ -124,7 +124,7 @@ export default function Dashboard() {
     try {
       const st = await post<{ paused: boolean; status?: string; interrupt?: { summary?: string } }>(`/agent/run/${id}`);
       if (st.paused) { say(`Agent paused on ${id.replace("case_", "")}: it needs your decision`, "ok"); router.push(`/cases/${id}?tab=agent`); }
-      else say(`Agent finished ${id.replace("case_", "")} (${(st.status || "").replace(/_/g, " ")}) — now in History`);
+      else say(`Agent finished ${id.replace("case_", "")} (${(st.status || "").replace(/_/g, " ")}) — now in Processed`);
       load(); loadWidgets();
     } catch (e: any) { if (!warn.notice(e)) say(e.message, "err"); }
     finally { setRunning(null); }
@@ -385,7 +385,7 @@ export default function Dashboard() {
                   {visible.map((c) => <td key={c.key} className={`px-2 py-2 ${c.key === "case" ? "overflow-hidden" : ""} ${typeof c.td === "function" ? c.td(r) : c.td || ""}`} style={c.key === "case" ? caseColStyle : undefined}>{c.render(r)}</td>)}
                 </tr>
               ))}
-              {rows?.length === 0 && <tr><td colSpan={visible.length + 1} className="px-4 py-10 text-center text-sm text-ink-500">{apiDown ? "The API is offline. Start the backend on port 8000 and refresh." : f.agent === "pending" ? <span>Every case in this view has been run by the agent — see <Link href="/history" className="font-semibold text-accent-fg hover:underline">History</Link> or <button type="button" onClick={() => setFilter("agent", "any")} className="font-semibold text-accent-fg hover:underline">show processed cases</button>.</span> : <span>No cases match these filters. <button type="button" onClick={() => { setF(EMPTY_FILTERS); setPage(0); }} className="font-semibold text-accent-fg hover:underline">Clear filters</button></span>}</td></tr>}
+              {rows?.length === 0 && <tr><td colSpan={visible.length + 1} className="px-4 py-10 text-center text-sm text-ink-500">{apiDown ? "The API is offline. Start the backend on port 8000 and refresh." : f.agent === "pending" ? <span>Every case in this view has been run by the agent — see <Link href="/history" className="font-semibold text-accent-fg hover:underline">Processed</Link> or <button type="button" onClick={() => setFilter("agent", "any")} className="font-semibold text-accent-fg hover:underline">show processed cases</button>.</span> : <span>No cases match these filters. <button type="button" onClick={() => { setF(EMPTY_FILTERS); setPage(0); }} className="font-semibold text-accent-fg hover:underline">Clear filters</button></span>}</td></tr>}
             </tbody>
           </table>
         </div>
@@ -480,7 +480,7 @@ function FilterPanel({ open, onClose, f, setFilter, onClear, users, myMailbox, s
           <Field label="Shared with"><select className={inputClass} value={f.shared} onChange={(e) => setFilter("shared", e.target.value)}><option value="">Anyone</option>{userOpts}</select></Field>
           <Field label="Sender"><input className={inputClass} placeholder="name@company.com" value={f.sender} onChange={(e) => setFilter("sender", e.target.value)} /></Field>
           <Field label="Minimum confidence"><input type="number" step="0.05" min="0" max="1" placeholder="e.g. 0.80" className={inputClass} value={f.min_confidence} onChange={(e) => setFilter("min_confidence", e.target.value)} /></Field>
-          <Field label="Agent run" hint="Processed cases live on the History page."><select className={inputClass} value={f.agent} onChange={(e) => setFilter("agent", e.target.value || "any")}>{["pending","paused","done","any"].map((s) => opt(s, AGENT_LABELS[s]))}</select></Field>
+          <Field label="Agent run" hint="Processed cases live on the Processed page."><select className={inputClass} value={f.agent} onChange={(e) => setFilter("agent", e.target.value || "any")}>{["pending","paused","done","any"].map((s) => opt(s, AGENT_LABELS[s]))}</select></Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Received from"><input type="date" className={inputClass} value={f.date_from} onChange={(e) => setFilter("date_from", e.target.value)} /></Field>
             <Field label="Received to"><input type="date" className={inputClass} value={f.date_to.slice(0, 10)} onChange={(e) => setFilter("date_to", e.target.value ? e.target.value + "T23:59:59" : "")} /></Field>

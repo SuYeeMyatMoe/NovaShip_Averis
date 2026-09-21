@@ -99,8 +99,16 @@ def _make_checkpointer():
         raise ConfigurationError("LANGGRAPH_CHECKPOINT=postgres requires LANGGRAPH_PG_URL")
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
 
-        saver = _CHECKPOINTER_RESOURCES.enter_context(PostgresSaver.from_conn_string(pg_url))
+        # A pool (not one long-lived connection): Supabase's pooler closes idle sessions, and `check` replaces a dead
+        # connection before it is handed out, so a run after a quiet spell no longer fails with "the connection is closed".
+        pool = _CHECKPOINTER_RESOURCES.enter_context(ConnectionPool(
+            conninfo=pg_url, min_size=1, max_size=4, open=True, check=ConnectionPool.check_connection,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        ))
+        saver = PostgresSaver(pool)
         saver.setup()
         return saver
     except Exception as exc:

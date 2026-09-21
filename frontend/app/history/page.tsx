@@ -62,7 +62,7 @@ function HistoryInner() {
     try {
       const p = new URLSearchParams(query()); p.delete("limit"); p.delete("offset");
       await downloadFile(`/export/history.${kind}?${p.toString()}`, `novaship-history.${kind}`);
-      say(`History downloaded (${kind.toUpperCase()})`);
+      say(`Downloaded (${kind.toUpperCase()})`);
     } catch (e: any) { say(e.message, "err"); }
     finally { setBusy(false); }
   };
@@ -72,8 +72,8 @@ function HistoryInner() {
       {toast && <Toast {...toast} />}
       <header>
         <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
-        <h1 className="dashboard-number mt-6 text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl">History</h1>
-        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251]">Every case the AI agent has processed or a person marked complete, newest first. Open any row to see the case; download the whole history as Excel. The Inbox only shows cases that are still open.</p>
+        <h1 className="dashboard-number mt-6 text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl">Processed</h1>
+        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251]">Every case the AI agent has processed or a person marked complete, newest first. Open any row to see the case; download the list as Excel. The Inbox only shows cases that are still open.</p>
       </header>
 
       <div className="grid gap-3 sm:grid-cols-3">
@@ -97,7 +97,7 @@ function HistoryInner() {
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="rounded-md border border-ink-200 px-2 py-1 text-sm" aria-label="Run to" title="Run to" />
           <span className="ml-auto flex items-center gap-2 text-xs text-ink-500">
             {total} run(s)
-            {canExport && <Button kind="primary" disabled={busy} onClick={() => exportAs("xlsx")}>Download history (Excel)</Button>}
+            {canExport && <Button kind="primary" disabled={busy} onClick={() => exportAs("xlsx")}>Download Excel</Button>}
             {canExport && <Button kind="ghost" disabled={busy} onClick={() => exportAs("csv")}>CSV</Button>}
           </span>
         </div>

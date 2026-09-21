@@ -13,7 +13,7 @@ const NAV: { href: string; label: string; icon: string; perm?: string }[] = [
   { href: "/workbench", label: "Workbench", icon: "bench" },
   { href: "/verification", label: "Seven fields", icon: "check" },
   { href: "/security", label: "Security", icon: "shield" },
-  { href: "/history", label: "History", icon: "history" },
+  { href: "/history", label: "Processed", icon: "history" },
   { href: "/audit", label: "Audit", icon: "audit", perm: "view_audit" },
   { href: "/policies", label: "Policies", icon: "policy", perm: "view_policy" },
   { href: "/welcome", label: "Guide", icon: "guide" },
@@ -102,6 +102,7 @@ function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [seen, setSeen] = useState<Set<string>>(new Set());
   const [closed, setClosed] = useState<Set<string>>(new Set());
+  const [closedItems, setClosedItems] = useState<Set<string>>(new Set());   // "needs a person" entries already opened or dismissed
   const [prevMailIds, setPrevMailIds] = useState<Set<string> | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
 
@@ -111,6 +112,8 @@ function NotificationBell() {
       if (raw) setSeen(new Set(JSON.parse(raw) as string[]));
       const rawClosed = localStorage.getItem("novaship.closedNewMail");
       if (rawClosed) setClosed(new Set(JSON.parse(rawClosed) as string[]));
+      const rawItems = localStorage.getItem("novaship.closedNotifications");
+      if (rawItems) setClosedItems(new Set(JSON.parse(rawItems) as string[]));
     } catch { /* ignore */ }
   }, []);
 
@@ -137,7 +140,14 @@ function NotificationBell() {
 
   const keyOf = (n: NotificationItem) => `${n.case_id}:${n.updated_at}`;
   const visibleMail = mail.filter((m) => !closed.has(m.case_id));
-  const unseen = items.filter((n) => !seen.has(keyOf(n))).length + visibleMail.length;
+  // an item is keyed by case + last update, so a case that changes again shows up as a fresh notification
+  const visibleItems = items.filter((n) => !closedItems.has(keyOf(n)));
+  const unseen = visibleItems.filter((n) => !seen.has(keyOf(n))).length + visibleMail.length;
+  const closeItems = (keys: string[]) => {
+    const next = new Set([...closedItems, ...keys]);
+    setClosedItems(next);
+    try { localStorage.setItem("novaship.closedNotifications", JSON.stringify([...next].slice(-500))); } catch { /* ignore */ }
+  };
 
   const persistSeen = (next: Set<string>) => {
     setSeen(next);
@@ -195,16 +205,20 @@ function NotificationBell() {
               ))}
             </ul>
           )}
-          <div className="border-b border-t border-ink-100 px-3 py-2 text-[11px] font-semibold text-ink-800">Needs a person</div>
-          {items.length === 0 ? <p className="px-3 py-6 text-center text-xs text-ink-500">Queue is clear.</p> : (
+          <div className="flex items-center justify-between border-b border-t border-ink-100 px-3 py-2 text-[11px] font-semibold text-ink-800">
+            <span>Needs a person{visibleItems.length ? ` (${visibleItems.length})` : ""}</span>
+            {visibleItems.length > 0 && <button type="button" onClick={() => closeItems(visibleItems.map(keyOf))} className="text-ink-500 hover:text-ink-800">Clear all</button>}
+          </div>
+          {visibleItems.length === 0 ? <p className="px-3 py-6 text-center text-xs text-ink-500">Queue is clear.</p> : (
             <ul className="max-h-64 overflow-y-auto">
-              {items.map((n) => (
-                <li key={keyOf(n)}>
-                  <Link href={`/cases/${n.case_id}`} onClick={() => setOpen(false)} className="block border-b border-ink-50 px-3 py-2 hover:bg-accent-bg">
+              {visibleItems.map((n) => (
+                <li key={keyOf(n)} className="flex items-stretch border-b border-ink-50">
+                  <Link href={`/cases/${n.case_id}`} onClick={() => { closeItems([keyOf(n)]); setOpen(false); }} className="min-w-0 flex-1 px-3 py-2 hover:bg-accent-bg">
                     <div className="text-[10px] font-bold uppercase tracking-wide text-accent">{n.reason}</div>
                     <div className="truncate text-xs font-semibold text-ink-900">{n.subject || n.case_id}</div>
                     <div className="text-[10px] text-ink-500">{n.status.replace(/_/g, " ")} · {n.priority}</div>
                   </Link>
+                  <button type="button" onClick={() => closeItems([keyOf(n)])} className="px-2 text-ink-400 hover:bg-ink-50 hover:text-ink-800" aria-label="Dismiss notification" title="Dismiss">×</button>
                 </li>
               ))}
             </ul>

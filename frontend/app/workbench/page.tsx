@@ -271,7 +271,7 @@ export default function WorkbenchPage() {
             <span className="ml-auto flex gap-1">
               <Button kind="ghost" disabled={busy || !pending?.pending} onClick={() => addPending("pending", 20)}>Add 20 newest not-run</Button>
               <Button kind="ghost" disabled={busy || !pending?.paused} onClick={() => addPending("paused", 50)}>Add all paused</Button>
-              <Link href="/history"><Button kind="ghost">History ↗</Button></Link>
+              <Link href="/history"><Button kind="ghost">Processed ↗</Button></Link>
             </span>
           </div>
           <label className="text-xs font-semibold text-ink-600">Cases</label>
@@ -321,7 +321,7 @@ export default function WorkbenchPage() {
                     <td className="max-w-[420px] px-2 py-1.5 text-ink-700">
                       {!r.ok && r.error ? <span className="text-mismatch-fg">{r.error.error || r.error.message || JSON.stringify(r.error)}{r.error.category ? ` · ${r.error.category}` : ""}{r.error.retryable ? " · retryable" : ""}</span>
                         : r.paused && r.interrupt ? <span className="line-clamp-2">{r.interrupt.summary}</span>
-                        : r.action === "agent" && r.ok ? <span className="text-ink-600">Agent finished{r.status ? ` · ${r.status.replace(/_/g, " ").toLowerCase()}` : ""} · <Link href={`/history?case=${id}`} className="text-accent-fg hover:underline">in History ↗</Link></span>
+                        : r.action === "agent" && r.ok ? <span className="text-ink-600">Agent finished{r.status ? ` · ${r.status.replace(/_/g, " ").toLowerCase()}` : ""} · <Link href={`/history?case=${id}`} className="text-accent-fg hover:underline">in Processed ↗</Link></span>
                         : r.next?.length ? <span className="font-mono text-ink-500">next: {r.next.join(", ")}</span> : <span className="text-ink-400">-</span>}
                     </td>
                     <td className="px-2 py-1.5">

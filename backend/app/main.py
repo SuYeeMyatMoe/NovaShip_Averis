@@ -49,6 +49,18 @@ app = FastAPI(
     openapi_url=f"{API_PREFIX}/openapi.json" if API_PREFIX else "/openapi.json",
 )
 
+# Registered before CORSMiddleware so it sits *inside* it: an unhandled exception becomes a JSON 500 that still carries the
+# CORS headers (the outermost ServerErrorMiddleware handler below cannot, and the browser would only say "Failed to fetch").
+@app.middleware("http")
+async def json_500(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:  # noqa: BLE001 - last line of defence, logged with the traceback
+        log.exception("unhandled error on %s", request.url.path)
+        return JSONResponse(status_code=500, content={"error": f"internal error ({type(exc).__name__})", "category": "DATABASE_ERROR", "step": request.url.path,
+                                                      "recovery": "Retry; if it persists check backend logs.", "retryable": True})
+
+
 app.add_middleware(CORSMiddleware, allow_origins=cors_allowed_origins(), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 

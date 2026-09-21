@@ -13,7 +13,7 @@ function useSuggestions(query: string, open: boolean) {
     let cancelled = false;
     setLoading(true);
     const t = setTimeout(() => {
-      api<{ items: CaseSuggestion[] }>(`/cases/suggest?q=${encodeURIComponent(query)}&limit=10`)
+      api<{ items: CaseSuggestion[] }>(`/cases/suggest?q=${encodeURIComponent(query)}&limit=50`)
         .then((d) => { if (!cancelled) setItems(d.items || []); })
         .catch(() => { if (!cancelled) setItems([]); })
         .finally(() => { if (!cancelled) setLoading(false); });
@@ -27,12 +27,12 @@ function Row({ s, active, onPick }: { s: CaseSuggestion; active: boolean; onPick
   return (
     <li role="option" aria-selected={active} onMouseDown={(e) => { e.preventDefault(); onPick(); }}
       className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs ${active ? "bg-accent-bg" : "hover:bg-ink-50"}`}>
-      <span className="w-28 shrink-0 font-mono text-[11px] text-accent-fg">{s.id.replace("case_", "")}</span>
+      <span className="w-28 shrink-0 truncate font-mono text-[11px] text-accent-fg" title={s.id}>{s.id.replace("case_", "")}</span>
       <span className="min-w-0 flex-1 truncate text-ink-800">{s.subject || "(no subject)"} <span className="text-ink-400">· {s.sender}</span></span>
-      {s.mismatch_count > 0 && <span className="rounded-full bg-mismatch-bg px-1.5 text-[10px] font-semibold text-mismatch-fg">{s.mismatch_count} mismatch</span>}
-      {s.agent && s.agent !== "pending" && <span className={`rounded-full px-1.5 text-[10px] font-semibold ${s.agent === "paused" ? "bg-review-bg text-review-fg" : "bg-match-bg text-match-fg"}`} title="AI-agent run state">{s.agent === "paused" ? "paused" : "processed"}</span>}
-      {(!s.agent || s.agent === "pending") && <span className="rounded-full bg-ink-100 px-1.5 text-[10px] font-semibold text-ink-600" title="the AI agent has not run this case yet">not run</span>}
-      <StatusBadge status={s.status} />
+      {s.mismatch_count > 0 && <span className="shrink-0 whitespace-nowrap rounded-full bg-mismatch-bg px-1.5 text-[10px] font-semibold text-mismatch-fg">{s.mismatch_count} mismatch</span>}
+      {s.agent && s.agent !== "pending" && <span className={`shrink-0 whitespace-nowrap rounded-full px-1.5 text-[10px] font-semibold ${s.agent === "paused" ? "bg-review-bg text-review-fg" : "bg-match-bg text-match-fg"}`} title="AI-agent run state">{s.agent === "paused" ? "paused" : "processed"}</span>}
+      {(!s.agent || s.agent === "pending") && <span className="shrink-0 whitespace-nowrap rounded-full bg-ink-100 px-1.5 text-[10px] font-semibold text-ink-600" title="the AI agent has not run this case yet">not run</span>}
+      <span className="hidden shrink-0 whitespace-nowrap sm:inline-flex"><StatusBadge status={s.status} /></span>
     </li>
   );
 }
@@ -59,7 +59,7 @@ export function CasePicker({ value, onChange, placeholder = "Type a case id, sub
         }}
         placeholder={placeholder} className="w-full rounded-md border border-ink-200 px-2 py-1.5 font-mono text-xs" />
       {open && (items.length > 0 || loading) && (
-        <ul role="listbox" className="absolute left-0 right-0 top-full z-30 mt-1 max-h-72 overflow-auto rounded-xl border border-ink-200 bg-white py-1 shadow-lg">
+        <ul role="listbox" className="absolute left-0 right-0 top-full z-30 mt-1 max-h-80 overflow-y-auto overflow-x-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-lg scrollbar-thin">
           {loading && items.length === 0 && <li className="px-3 py-1.5 text-xs text-ink-400">Searching…</li>}
           {items.map((s, i) => <Row key={s.id} s={s} active={i === cursor} onPick={() => pick(s)} />)}
         </ul>
@@ -113,7 +113,7 @@ export function CaseMultiPicker({ ids, onChange, className = "" }: { ids: string
           placeholder={ids.length ? "Add more…" : "Type to search cases, or paste ids"} className="min-w-[160px] flex-1 border-0 px-1 py-1 font-mono text-xs outline-none" />
       </div>
       {open && (candidates.length > 0 || loading) && (
-        <ul role="listbox" className="absolute left-0 right-0 top-full z-30 mt-1 max-h-72 overflow-auto rounded-xl border border-ink-200 bg-white py-1 shadow-lg">
+        <ul role="listbox" className="absolute left-0 right-0 top-full z-30 mt-1 max-h-80 overflow-y-auto overflow-x-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-lg scrollbar-thin">
           {loading && candidates.length === 0 && <li className="px-3 py-1.5 text-xs text-ink-400">Searching…</li>}
           {candidates.map((s, i) => <Row key={s.id} s={s} active={i === cursor} onPick={() => add(s.id)} />)}
         </ul>
