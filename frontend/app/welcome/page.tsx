@@ -35,7 +35,7 @@ export default function WelcomePage() {
           <p className="mt-4 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251] sm:text-lg">NovaShip Averis reads your connected shipping mailbox, checks each Draft Bill of Lading against its Shipping Instruction on seven fields, and asks a person before anything leaves the mailbox.</p>
           <div className="mt-5 flex flex-wrap gap-2">
             <Link href="/" className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover active:scale-[0.98]">Open the inbox</Link>
-            <Link href="/agent" className="rounded-xl border border-ink-200 bg-white px-4 py-2 text-sm font-medium text-ink-800 transition hover:bg-ink-50 active:scale-[0.98]">See how the agent works</Link>
+            <Link href="/workbench" className="rounded-xl border border-ink-200 bg-white px-4 py-2 text-sm font-medium text-ink-800 transition hover:bg-ink-50 active:scale-[0.98]">See how the agent works</Link>
           </div>
         </div>
         <div className="rounded-2xl border border-orange-100 bg-[#fffdf9] p-5 shadow-sm transition duration-200 hover:-translate-y-1 hover:shadow-md">
@@ -94,7 +94,7 @@ export default function WelcomePage() {
             <li><Link className="text-accent hover:underline" href="/">Inbox</Link>: metrics, case table, filters, batch actions.</li>
             <li><Link className="text-accent hover:underline" href="/verification">Seven fields</Link>: per-field mismatch statistics and every case per field.</li>
             <li><Link className="text-accent hover:underline" href="/security">Security</Link>: what the security agent flagged and why.</li>
-            <li><Link className="text-accent hover:underline" href="/agent">AI agent</Link>: run the LangGraph on a case, see the pause, resume with a decision.</li>
+            <li><Link className="text-accent hover:underline" href="/workbench">Workbench</Link>: run the LangGraph on a case, see the pause, resume with a decision.</li>
             <li><Link className="text-accent hover:underline" href="/audit">Audit</Link>: global append-only history.</li>
             <li><Link className="text-accent hover:underline" href="/policies">Policies</Link>: versioned thresholds and rules (Admin edits).</li>
           </ul>

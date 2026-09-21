@@ -85,38 +85,82 @@ HISTORY_COLUMNS = ["run_at", "case_id", "subject", "sender", "mailbox", "run_by"
                    "comparison_status", "decision", "ms", "runs", "mode", "priority", "error"]
 
 
+def closed_by_person(c) -> bool:
+    """A case a person marked complete counts as processed even if the AI agent never finished a run on it."""
+    return c.status == CaseStatus.COMPLETED and not (c.agent_run and c.agent_run.result == "completed")
+
+
+def history_result_of(c) -> Optional[str]:
+    """done | paused | error for a processed case, None for a case that still belongs in the Inbox."""
+    if closed_by_person(c):
+        return "done"
+    if c.agent_run is None:
+        return None
+    return "done" if c.agent_run.result == "completed" else c.agent_run.result
+
+
+def _completed_events(repo) -> dict[str, Any]:
+    """case_id -> the latest USER `COMPLETED` audit event (one query; the Supabase repo serves it from its recent-events cache)."""
+    latest: dict[str, Any] = {}
+    try:
+        events = repo.list_audit()
+    except Exception:
+        return latest
+    for ev in events:
+        if ev.action != "COMPLETED" or not ev.case_id or ev.actor_type.value != "USER":
+            continue
+        cur = latest.get(ev.case_id)
+        if cur is None or ev.timestamp > cur.timestamp:
+            latest[ev.case_id] = ev
+    return latest
+
+
 def history_rows(repo, user_id: str, *, result: str = "done", run_by: Optional[str] = None, date_from: Optional[str] = None,
                  date_to: Optional[str] = None, q: Optional[str] = None) -> list[dict[str, Any]]:
-    """One row per case the AI agent has run (its latest run), newest first. `result`: done | paused | error | all."""
+    """One row per processed case, newest first: the AI agent's latest run, or the person who marked it complete
+    (`mode` = "human"). `result`: done | paused | error | all."""
     result = (result or "done").lower()
-    want = {"done": {"completed"}, "paused": {"paused"}, "error": {"error"}, "all": {"completed", "paused", "error"}}.get(result, {"completed"})
+    want = {"done": {"done"}, "paused": {"paused"}, "error": {"error"}, "all": {"done", "paused", "error"}}.get(result, {"done"})
     if run_by == "me":
         run_by = user_id
     names = {u.id: u.display_name for u in repo.list_users()}
     emails = {e.id: e for e in repo.list_emails()}
+    completed_events: Optional[dict[str, Any]] = None
     rows: list[dict[str, Any]] = []
     for c in repo.list_cases():
+        outcome = history_result_of(c)
+        if outcome is None or outcome not in want:
+            continue
         a = c.agent_run
-        if not a or a.result not in want:
+        if closed_by_person(c):
+            if completed_events is None:
+                completed_events = _completed_events(repo)
+            ev = completed_events.get(c.id)
+            actor = ev.actor_id if ev else "—"
+            stamp = (ev.timestamp if ev else c.updated_at).isoformat()
+            note = ((ev.after or {}).get("note") if ev else None) or ""
+            detail = {"run_by": actor, "decision": note or "MARKED_COMPLETE", "status_after": CaseStatus.COMPLETED.value, "ms": 0,
+                      "runs": a.runs if a else 0, "mode": "human", "error": ""}
+        else:
+            actor = a.last_run_by
+            stamp = a.last_run_at.isoformat()
+            detail = {"run_by": actor, "decision": a.decision or "", "status_after": a.status_after.value, "ms": a.ms, "runs": a.runs,
+                      "mode": a.mode, "error": a.error or ""}
+        if run_by and actor != run_by:
             continue
-        if run_by and a.last_run_by != run_by:
-            continue
-        stamp = a.last_run_at.isoformat()
         if date_from and stamp < date_from:
             continue
         if date_to and stamp[:10] > date_to[:10]:
             continue
         e = emails.get(c.source_email_id)
         if q:
-            hay = f"{c.id} {e.subject if e else ''} {e.sender if e else ''} {a.last_run_by} {a.decision or ''}".lower()
+            hay = f"{c.id} {e.subject if e else ''} {e.sender if e else ''} {actor} {detail['decision']}".lower()
             if q.lower() not in hay:
                 continue
         rows.append({
             "run_at": stamp, "case_id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "mailbox": (e.mailbox_address if e else None) or "",
-            "run_by": a.last_run_by, "run_by_name": names.get(a.last_run_by, a.last_run_by), "result": "done" if a.result == "completed" else a.result,
-            "status_after": a.status_after.value, "status": c.status.value, "mismatch_count": c.mismatch_count,
-            "comparison_status": c.comparison_status.value if c.comparison_status else "", "decision": a.decision or "", "ms": a.ms, "runs": a.runs,
-            "mode": a.mode, "priority": c.priority.value, "error": a.error or "",
+            "run_by_name": names.get(actor, actor), "result": outcome, "status": c.status.value, "mismatch_count": c.mismatch_count,
+            "comparison_status": c.comparison_status.value if c.comparison_status else "", "priority": c.priority.value, **detail,
         })
     rows.sort(key=lambda r: r["run_at"], reverse=True)
     return rows

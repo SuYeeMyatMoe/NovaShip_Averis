@@ -13,7 +13,6 @@ const NAV: { href: string; label: string; icon: string; perm?: string }[] = [
   { href: "/workbench", label: "Workbench", icon: "bench" },
   { href: "/verification", label: "Seven fields", icon: "check" },
   { href: "/security", label: "Security", icon: "shield" },
-  { href: "/agent", label: "AI agent", icon: "spark" },
   { href: "/history", label: "History", icon: "history" },
   { href: "/audit", label: "Audit", icon: "audit", perm: "view_audit" },
   { href: "/policies", label: "Policies", icon: "policy", perm: "view_policy" },

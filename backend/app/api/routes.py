@@ -106,7 +106,9 @@ def _case_row(c, e) -> dict[str, Any]:
 
 
 def _agent_state(c) -> str:
-    """pending (never run or last run errored) | paused | done."""
+    """pending (never run or last run errored) | paused | done. A case a person marked complete is done regardless of the agent."""
+    if c.status == CaseStatus.COMPLETED:
+        return "done"
     if c.agent_run is None or c.agent_run.result == "error":
         return "pending"
     return "paused" if c.agent_run.result == "paused" else "done"
@@ -799,13 +801,16 @@ def history_rows(repo, user_id: str, *, result: str = "done", run_by: Optional[s
 @router.get("/history")
 def agent_history(result: str = "done", run_by: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None,
                   q: Optional[str] = None, limit: int = 50, offset: int = 0, user: UserRecord = Depends(require("view_case"))):
-    """Processed cases: every case the AI agent has run (default: finished runs), each row opens the case."""
+    """Processed cases: every case the AI agent has run or a person marked complete (default: finished), each row opens the case."""
+    from app.services.reporting import history_result_of
+
     rows = history_rows(get_repo(), user.id, result=result, run_by=run_by, date_from=date_from, date_to=date_to, q=q)
     cap = max(1, min(limit, 500))
     counts = {"done": 0, "paused": 0, "error": 0}
     for c in get_repo().list_cases():
-        if c.agent_run:
-            counts["done" if c.agent_run.result == "completed" else c.agent_run.result] += 1
+        outcome = history_result_of(c)
+        if outcome:
+            counts[outcome] += 1
     return {"total": len(rows), "items": rows[offset: offset + cap], "counts": counts}
 
 

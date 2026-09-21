@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, post, getSession, downloadFile, type CaseRow } from "@/lib/api";
-import { Badge, Button, Card, Empty, StatusBadge, Toast } from "@/components/ui";
+import { Badge, Button, Card, Empty, KV, StatusBadge, Toast } from "@/components/ui";
 import { CaseMultiPicker, CasePicker } from "@/components/case-picker";
 import { useOperatorWarning } from "@/lib/operator-warning";
 
@@ -22,6 +22,20 @@ const LAST_RUN_KEY = "novaship.workbench.lastRun";
 type LlmPosture = { provider: string; model: string | null; privacy: "mask" | "off"; audit_provider_calls: boolean; vision_ocr: boolean; embeddings: string; calls: { total: number; masked: number; errors: number } };
 
 const RESUME_ACTIONS = ["retry", "request_review", "reject", "mark_no_action", "complete"];
+
+const NODES = [
+  ["security_precheck", "Deterministic spam, sender, link, attachment-type, duplicate and bypass checks."],
+  ["security_agent", "LLM reasons over the signals and may escalate (never downgrade) to SECURITY_REVIEW."],
+  ["classify", "Intent + priority + action needed. Rules on the real subject grammar; LLM tie-break under 0.75."],
+  ["detect_documents", "SI / Draft BL / invoice / supporting / unknown; routes to waiting-documents or unreadable."],
+  ["extract", "Seven-field extraction with label-synonym resolution and evidence (page, line, snippet)."],
+  ["compare", "The final check that decides whether fields match or differ."],
+  ["summarize_and_draft", "Policy evaluation, recommendation, summary, draft (never sent), RAG context."],
+  ["human_review", "interrupt(): the graph pauses here until a person approves, edits, rejects, reassigns, notifies or retries."],
+  ["notify", "Executes only what the human approved, then writes GRAPH_COMPLETED to the audit log."],
+] as const;
+
+const NODE_ALIAS: Record<string, string> = { classify: "intent_classifier", detect_documents: "attachment_classifier", extract: "document_extractor", compare: "seven_field_comparator", summarize_and_draft: "summary_and_draft", notify: "notifier" };
 
 /** Operator run console: agent pause/resume, batch (never sends email), CSV/XLSX export, RAG + privacy posture. */
 export default function WorkbenchPage() {
@@ -157,6 +171,7 @@ export default function WorkbenchPage() {
 
   const llm: LlmPosture | undefined = rag?.llm;
   const rowList = Object.entries(rows);
+  const traceNodes = new Set((st?.trace || []).map((t: any) => t.node));
 
   return (
     <div className="space-y-5">
@@ -189,35 +204,67 @@ export default function WorkbenchPage() {
         ) : <Empty text="RAG info unavailable." />}
       </Card>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Run agent on one case" className="border-orange-200">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <CasePicker value={caseId} onChange={setCaseId} className="flex-1" />
-            <Button kind="primary" disabled={busy || !canCompare} onClick={run}>Run graph</Button>
-            <Button disabled={busy} onClick={() => api(`/agent/state/${caseId}`).then(setSt).catch((e) => say(e.message, "err"))}>Refresh state</Button>
-          </div>
-          {!st ? <p className="mt-3 text-xs text-ink-500">Run or refresh to see interrupt/resume controls. The graph diagram stays on <Link href="/agent" className="text-accent hover:underline">/agent</Link>.</p> : (
-            <div className="mt-3 space-y-2 text-sm">
-              <div>Paused: <b>{String(!!st.paused)}</b> · next: <span className="font-mono text-xs">{st.next?.join(", ") || "END"}</span> · status: {st.status || "-"}</div>
-              {st.interrupt && (
-                <div className="rounded-lg border border-review bg-review-bg/40 p-3 text-xs">
-                  <div className="mb-1 font-semibold text-review-fg">Human decision required</div>
-                  <div>{st.interrupt.summary}</div>
-                  <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note for the audit log" className="mt-2 w-full rounded-md border border-ink-200 px-2 py-1" />
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {(st.interrupt.allowed_actions || []).filter((a: string) => a !== "notify_party" && a !== "reassign").map((a: string) => (
-                      <Button key={a} kind={a === "approve" ? "success" : a === "reject" ? "danger" : "default"} disabled={busy} onClick={() => resume(caseId, a)}>{a.replace("_", " ")}</Button>
-                    ))}
-                    <Link href={`/cases/${caseId}?tab=collab`}><Button kind="ghost">notify / reassign in case</Button></Link>
-                  </div>
-                </div>
-              )}
-              <Link href={`/cases/${caseId}`} className="text-xs text-accent hover:underline">Open case {caseId}</Link>
-            </div>
-          )}
+      <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
+        <Card title="Graph nodes" className="border-orange-200" right={rag && <span className="text-[11px] text-ink-500">RAG: {rag.embedding_provider} embeddings, {rag.vector_store} store, {rag.chunks} chunks</span>}>
+          <ol className="space-y-1.5">
+            {NODES.map(([n, desc], i) => {
+              const hit = traceNodes.has(n) || traceNodes.has(NODE_ALIAS[n] || "");
+              const paused = st?.paused && st?.next?.includes(n);
+              return (
+                <li key={n} className={`flex gap-3 rounded-lg border border-orange-200 p-2 text-xs transition duration-200 hover:-translate-y-0.5 hover:border-orange-400 hover:shadow-sm ${paused ? "bg-review-bg/50" : hit ? "bg-match-bg/30" : "bg-[#fffdf9]"}`}>
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent-bg text-[11px] font-bold text-accent-fg ring-1 ring-accent-ring/60">{i + 1}</span>
+                  <div><div className="font-mono font-semibold text-ink-900">{n}{n === "compare" && <Badge className="ml-2 bg-ink-900 text-white">deterministic</Badge>}{n === "human_review" && <Badge className="ml-2 bg-review text-white">interrupt</Badge>}</div><div className="text-ink-600">{desc}</div></div>
+                </li>
+              );
+            })}
+          </ol>
         </Card>
 
-        <Card title="Batch run (Supervisor / Admin)" className="border-orange-200">
+        <div className="space-y-4">
+          <Card title="Run agent on one case" className="border-orange-200">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <CasePicker value={caseId} onChange={setCaseId} className="flex-1" />
+              <Button kind="primary" disabled={busy || !canCompare} onClick={run}>Run graph</Button>
+              <Button disabled={busy} onClick={() => api(`/agent/state/${caseId}`).then(setSt).catch((e) => say(e.message, "err"))}>Refresh state</Button>
+            </div>
+            <p className="mt-2 text-xs text-ink-500">Run or refresh to highlight nodes that executed and to see interrupt/resume controls.</p>
+          </Card>
+
+          <Card title="Graph state" className="border-orange-200">
+            {!st ? <Empty text="Run the graph or refresh the state for a case." /> : (
+              <div className="space-y-2 text-sm">
+                <KV k="Paused" v={st.paused ? <Badge className="bg-review text-white">waiting for human</Badge> : <Badge className="bg-match-bg text-match-fg">not paused</Badge>} />
+                <KV k="Next node" v={<span className="font-mono text-xs">{st.next?.join(", ") || "END"}</span>} />
+                <KV k="Case status" v={st.status || "-"} /><KV k="Route" v={st.route || "-"} /><KV k="Notified" v={String(st.notified)} />
+                {st.security_agent && <KV k="Security agent" v={<span className="text-xs">{st.security_agent.outcome} ({st.security_agent.decided_by}, {st.security_agent.confidence}): {st.security_agent.reasoning}</span>} />}
+                {st.rag_context?.length > 0 && <KV k="RAG context" v={<span className="font-mono text-[10px]">{st.rag_context.map((r: any) => r.id).join(", ")}</span>} />}
+                {st.interrupt && (
+                  <div className="rounded-lg border border-review bg-review-bg/40 p-3 text-xs">
+                    <div className="mb-1 font-semibold text-review-fg">Human decision required</div>
+                    <div>{st.interrupt.summary}</div>
+                    {st.interrupt.mismatch_fields?.length > 0 && <div className="mt-1">Mismatch: {st.interrupt.mismatch_fields.join(", ")}</div>}
+                    {st.interrupt.review_reason && <div className="mt-1">Review reason: {st.interrupt.review_reason}</div>}
+                    {st.interrupt.draft_subject && <div className="mt-1 text-ink-500">Draft: {st.interrupt.draft_subject}</div>}
+                    <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note for the audit log" className="mt-2 w-full rounded-md border border-ink-200 px-2 py-1" />
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {(st.interrupt.allowed_actions || []).filter((a: string) => a !== "notify_party" && a !== "reassign").map((a: string) => (
+                        <Button key={a} kind={a === "approve" ? "success" : a === "reject" ? "danger" : "default"} disabled={busy} onClick={() => resume(caseId, a)}>{a.replace("_", " ")}</Button>
+                      ))}
+                      <Link href={`/cases/${caseId}?tab=collab`}><Button kind="ghost">notify / reassign in case</Button></Link>
+                    </div>
+                  </div>
+                )}
+                <details className="text-xs"><summary className="cursor-pointer text-accent">Trace ({st.trace?.length || 0} nodes)</summary>
+                  <ol className="mt-1 space-y-1">{(st.trace || []).map((t: any, i: number) => <li key={i} className="rounded bg-ink-50 p-1.5"><b>{t.node}</b> <Badge className="bg-ink-100 text-ink-700">{t.actor_type}</Badge> <span className="font-mono text-[10px] text-ink-600">{JSON.stringify(t.output).slice(0, 220)}</span></li>)}</ol>
+                </details>
+                <Link href={`/cases/${caseId}`} className="text-xs text-accent hover:underline">Open case {caseId}</Link>
+              </div>
+            )}
+          </Card>
+        </div>
+      </div>
+
+      <Card title="Batch run (Supervisor / Admin)" className="border-orange-200">
           <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-orange-200 bg-[#fffaf5] px-3 py-2 text-xs text-ink-700">
             <span className="font-semibold">Before run:</span>
             {pending ? <span><b>{pending.pending}</b> case(s) not run by the agent yet · <b>{pending.paused}</b> paused for a decision</span> : <span className="text-ink-400">counting…</span>}
@@ -251,7 +298,6 @@ export default function WorkbenchPage() {
           </div>
           {!canBatch && <p className="mt-2 text-xs text-review-fg">Batch actions need Supervisor or Admin. Export needs export_data.</p>}
         </Card>
-      </div>
 
       {rowList.length > 0 && (
         <Card title={`Last run · ${lastAction === "agent" ? "agent" : lastAction} · ${rowList.length} case(s)`} className="border-orange-200"

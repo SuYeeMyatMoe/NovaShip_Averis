@@ -3,6 +3,9 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Badge, Button, Empty, fmtDate } from "@/components/ui";
+import { CaseColHandle, caseColStyle, useCaseColWidth } from "@/components/col-resize";
+
+const CASE_COL_KEY = "novaship.audit.caseColWidth";
 
 /** Global append-only audit log (Supervisor, Admin, Auditor). */
 export default function AuditPage() {
@@ -13,6 +16,7 @@ export default function AuditPage() {
   const [actor, setActor] = useState("");
   const [limit, setLimit] = useState(200);
   const [page, setPage] = useState(0);
+  const [caseColWidth, setCaseColWidth] = useCaseColWidth(CASE_COL_KEY);
   useEffect(() => {
     setPage(0);
     setEvents(null);
@@ -21,6 +25,8 @@ export default function AuditPage() {
   }, [action, actor, limit]);
   const pageCount = events ? Math.max(1, Math.ceil(events.length / pageSize)) : 1;
   const pageEvents = events?.slice(page * pageSize, (page + 1) * pageSize) || [];
+  const colStyle = caseColStyle(caseColWidth);
+  const caseLabels = pageEvents.map((e) => (e.case_id ? String(e.case_id).replace("case_", "") : ""));
 
   return (
     <div className="space-y-5">
@@ -41,11 +47,19 @@ export default function AuditPage() {
           <>
           <div className="overflow-auto rounded-2xl border border-orange-100 bg-white shadow-sm transition duration-200 hover:-translate-y-1 hover:border-orange-300 hover:shadow-md">
             <table className="w-full min-w-[1000px] text-xs">
-              <thead className="bg-ink-50 text-[11px] uppercase text-ink-500"><tr><th className="px-2 py-1.5 text-left">Time</th><th className="px-2 text-left">Case</th><th className="px-2 text-left">Actor</th><th className="px-2 text-left">Action</th><th className="px-2 text-left">After</th><th className="px-2 text-left">Policy</th></tr></thead>
+              <colgroup>
+                <col />
+                <col style={{ width: caseColWidth }} />
+                <col />
+                <col />
+                <col />
+                <col />
+              </colgroup>
+              <thead className="bg-ink-50 text-[11px] uppercase text-ink-500"><tr><th className="px-2 py-1.5 text-left">Time</th><th className="relative overflow-hidden px-2 text-left" style={colStyle}><span className="block truncate pr-1">Case</span><CaseColHandle storageKey={CASE_COL_KEY} width={caseColWidth} onChange={setCaseColWidth} labels={caseLabels} /></th><th className="px-2 text-left">Actor</th><th className="px-2 text-left">Action</th><th className="px-2 text-left">After</th><th className="px-2 text-left">Policy</th></tr></thead>
               <tbody>{pageEvents.map((e) => (
                 <tr key={e.event_id} className="border-t border-ink-100 align-top transition hover:bg-[#fffaf5]">
                   <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[10px] text-ink-500">{fmtDate(e.timestamp)}</td>
-                  <td className="px-2 py-1.5 font-mono text-[10px]">{e.case_id ? <Link href={`/cases/${e.case_id}?tab=audit`} className="text-accent hover:underline">{e.case_id.replace("case_", "")}</Link> : "-"}</td>
+                  <td className="overflow-hidden px-2 py-1.5 font-mono text-[10px]" style={colStyle}>{e.case_id ? <Link href={`/cases/${e.case_id}?tab=audit`} title={e.case_id} className="block truncate text-accent hover:underline">{e.case_id.replace("case_", "")}</Link> : "-"}</td>
                   <td className="px-2 py-1.5"><Badge className={{ USER: "bg-accent-bg text-accent-fg", AI: "bg-accent-soft text-accent-fg", SYSTEM: "bg-ink-100 text-ink-700" }[e.actor_type as string]}>{e.actor_type}</Badge> <span className="text-[10px] text-ink-500">{e.actor_id}</span></td>
                   <td className="px-2 py-1.5 font-medium">{e.action}</td>
                   <td className="max-w-[480px] px-2 py-1.5 font-mono text-[10px] text-ink-700">{e.after ? JSON.stringify(e.after).slice(0, 240) : ""}</td>

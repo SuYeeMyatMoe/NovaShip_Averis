@@ -9,7 +9,7 @@ const PAGE = 25;
 const RESULT_LABELS: Record<string, string> = { done: "Processed", paused: "Paused – waiting", error: "Failed", all: "All runs" };
 
 /**
- * History = every case the AI agent has run, newest first. Unlike Audit (an event log), each row is a
+ * History = every case the AI agent has run or a person marked complete, newest first. Unlike Audit (an event log), each row is a
  * case you can open, and the whole list downloads as Excel/CSV.
  */
 export default function HistoryPage() {
@@ -68,7 +68,7 @@ function HistoryInner() {
       <header>
         <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
         <h1 className="dashboard-number mt-6 text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl">History</h1>
-        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251]">Every case the AI agent has processed, newest first. Open any row to see the case; download the whole history as Excel. The Inbox only shows cases that are still waiting to be run.</p>
+        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251]">Every case the AI agent has processed or a person marked complete, newest first. Open any row to see the case; download the whole history as Excel. The Inbox only shows cases that are still open.</p>
       </header>
 
       <div className="grid gap-3 sm:grid-cols-3">
@@ -114,12 +114,12 @@ function HistoryInner() {
                   <td className="px-2 py-2 font-mono text-[11px]"><Link href={`/cases/${r.case_id}`} className="text-accent hover:underline">{r.case_id.replace("case_", "")}</Link></td>
                   <td className="max-w-[380px] px-2 py-2"><div className="line-clamp-1 font-medium text-ink-900">{r.subject || "(no subject)"}</div><div className="truncate text-[11px] text-ink-500">{r.sender}</div></td>
                   <td className="px-2 py-2 text-[11px] text-ink-600">{r.mailbox || <span className="text-ink-400">shared / webhook</span>}</td>
-                  <td className="px-2 py-2 text-[11px]">{r.run_by_name}{r.mode === "batch" && <span className="ml-1 rounded-full bg-ink-100 px-1.5 text-[10px] text-ink-600">batch</span>}</td>
+                  <td className="px-2 py-2 text-[11px]">{r.run_by_name}{r.mode === "batch" && <span className="ml-1 rounded-full bg-ink-100 px-1.5 text-[10px] text-ink-600">batch</span>}{r.mode === "human" && <span className="ml-1 rounded-full bg-accent-bg px-1.5 text-[10px] text-accent-fg" title="Marked complete by a person">by hand</span>}</td>
                   <td className="px-2 py-2">{r.result === "done" ? <Badge className="bg-match-bg text-match-fg">processed</Badge> : r.result === "paused" ? <Badge className="bg-review-bg text-review-fg">paused</Badge> : <span title={r.error}><Badge className="bg-mismatch text-white">failed</Badge></span>}</td>
                   <td className="px-2 py-2"><StatusBadge status={r.status_after} />{r.status !== r.status_after && <div className="mt-0.5 text-[10px] text-ink-500">now {r.status.replace(/_/g, " ").toLowerCase()}</div>}</td>
                   <td className="px-2 py-2">{r.comparison_status ? (r.mismatch_count > 0 ? <Badge className="bg-mismatch text-white">{r.mismatch_count} mismatch</Badge> : <Badge className="bg-match-bg text-match-fg">no mismatch</Badge>) : <span className="text-ink-400">-</span>}</td>
                   <td className="px-2 py-2 text-[11px]">{r.decision ? r.decision.replace(/_/g, " ") : <span className="text-ink-400">-</span>}</td>
-                  <td className="px-2 py-2 font-mono text-[11px] text-ink-500">{r.ms} ms</td>
+                  <td className="px-2 py-2 font-mono text-[11px] text-ink-500">{r.mode === "human" ? "—" : `${r.ms} ms`}</td>
                   <td className="px-2 py-2 text-[11px] text-ink-500">{r.runs}</td>
                   <td className="px-2 py-2"><Link href={`/cases/${r.case_id}?tab=agent`}><Button kind="primary">Open</Button></Link></td>
                 </tr>

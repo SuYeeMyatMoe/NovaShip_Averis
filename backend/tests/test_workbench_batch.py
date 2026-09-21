@@ -130,3 +130,24 @@ def test_history_lists_agent_runs_and_inbox_filters_pending_paused_done():
     assert csv_text.startswith("run_at,case_id") and clean_id in csv_text
     report = openpyxl.load_workbook(io.BytesIO(client.get("/export/report.xlsx", headers=SUP).content))
     assert "Agent runs" in report.sheetnames
+
+
+def test_case_marked_complete_by_a_person_moves_from_inbox_to_history():
+    """Marking a never-run case complete makes it 'done': gone from the Inbox default view, listed in History as a by-hand row."""
+    cid = _ingest("wb_hist_004", bl=BL_OK)
+    assert cid in {r["id"] for r in client.get("/cases", params={"agent": "pending", "limit": 500}, headers=SUP).json()["items"]}
+    assert all(r["case_id"] != cid for r in client.get("/history", params={"result": "all"}, headers=SUP).json()["items"])
+
+    assert client.post(f"/cases/{cid}/complete", json={"note": "checked by hand"}, headers=SUP).status_code == 200
+
+    assert cid not in {r["id"] for r in client.get("/cases", params={"agent": "pending", "limit": 500}, headers=SUP).json()["items"]}
+    assert cid in {r["id"] for r in client.get("/cases", params={"agent": "done", "limit": 500}, headers=SUP).json()["items"]}
+    assert client.get("/cases/suggest", params={"q": "wb_hist_004"}, headers=SUP).json()["items"][0]["agent"] == "done"
+    hist = client.get("/history", headers=SUP).json()
+    row = next(r for r in hist["items"] if r["case_id"] == cid)
+    assert row["result"] == "done" and row["mode"] == "human" and row["run_by"] == "u_sup_1" and row["run_by_name"]
+    assert row["status_after"] == "COMPLETED" and row["decision"] == "checked by hand" and row["ms"] == 0
+    assert hist["counts"]["done"] >= 1
+    assert cid in {r["case_id"] for r in client.get("/history", params={"run_by": "me"}, headers=SUP).json()["items"]}
+    assert all(r["case_id"] != cid for r in client.get("/history", params={"result": "paused"}, headers=SUP).json()["items"])
+    assert cid in client.get("/export/history.csv", headers=SUP).text

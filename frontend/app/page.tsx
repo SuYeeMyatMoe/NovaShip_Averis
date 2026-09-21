@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { createPortal } from "react-dom";
 import { agentStateOf, api, post, getSession, ApiError, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
 import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
+import { CaseColHandle, caseColStyle as caseColBox, useCaseColWidth } from "@/components/col-resize";
 import { MailboxCard } from "@/components/mailbox-card";
 import { Field, inputClass } from "@/components/auth";
 import { useOperatorWarning } from "@/lib/operator-warning";
@@ -20,37 +21,10 @@ type ColKey = (typeof COLUMN_KEYS)[number];
 const DEFAULT_COLS: ColKey[] = ["case","subject","action","priority","docs","mismatch","status","updated","actions"];
 const COLS_KEY = "novaship.inbox.columns";
 const CASE_COL_KEY = "novaship.inbox.caseColWidth";
-const CASE_COL_DEFAULT = 80;
-const CASE_COL_MIN = 72;
-const CASE_COL_MAX = 448;
 const PANEL_FILTER_KEYS = ["status","priority","intent","mailbox","mismatch","security","assigned","shared","sender","min_confidence","date_from","date_to"];
 const TOOLBAR_BTN = "inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-3 py-2 text-xs font-semibold text-ink-800 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
 const KEBAB_BTN = "rounded-lg border border-ink-200 bg-white px-2 py-1.5 text-sm font-bold leading-none text-ink-700 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
 const STATUS_TONE: Record<string, string> = { HUMAN_REVIEW: "bg-review", MISMATCH_DETECTED: "bg-mismatch", SECURITY_REVIEW: "bg-mismatch", ERROR: "bg-mismatch", WAITING_DOCUMENTS: "bg-review", NO_MISMATCH_DETECTED: "bg-match", COMPLETED: "bg-match", NO_ACTION_INFO: "bg-ink-300" };
-
-function clampCaseCol(n: number) {
-  return Math.min(CASE_COL_MAX, Math.max(CASE_COL_MIN, Math.round(n)));
-}
-
-function persistCaseCol(n: number) {
-  const w = clampCaseCol(n);
-  try { localStorage.setItem(CASE_COL_KEY, String(w)); } catch { /* ignore */ }
-  return w;
-}
-
-function measureCaseFit(labels: string[]) {
-  if (typeof document === "undefined" || !labels.length) return CASE_COL_MAX;
-  const el = document.createElement("span");
-  el.style.cssText = "position:absolute;left:-9999px;top:0;white-space:nowrap;font:11px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace";
-  document.body.appendChild(el);
-  let max = CASE_COL_DEFAULT;
-  for (const label of labels) {
-    el.textContent = label;
-    max = Math.max(max, el.offsetWidth + 24);
-  }
-  el.remove();
-  return clampCaseCol(max);
-}
 
 export default function Dashboard() {
   const router = useRouter();
@@ -78,7 +52,7 @@ export default function Dashboard() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const closeFilters = useCallback(() => setFiltersOpen(false), []);
   const [visibleCols, setVisibleCols] = useState<ColKey[]>(DEFAULT_COLS);
-  const [caseColWidth, setCaseColWidth] = useState(CASE_COL_DEFAULT);
+  const [caseColWidth, setCaseColWidth] = useCaseColWidth(CASE_COL_KEY);
   useEffect(() => {
     try {
       const raw = localStorage.getItem(COLS_KEY);
@@ -87,12 +61,6 @@ export default function Dashboard() {
       if (!Array.isArray(arr)) return;
       const ok = arr.filter((k): k is ColKey => (COLUMN_KEYS as readonly string[]).includes(k));
       if (ok.length) setVisibleCols(ok);
-    } catch { /* ignore */ }
-    try {
-      const raw = localStorage.getItem(CASE_COL_KEY);
-      if (!raw) return;
-      const n = Number(raw);
-      if (Number.isFinite(n)) setCaseColWidth(clampCaseCol(n));
     } catch { /* ignore */ }
   }, []);
   const persistCols = (next: ColKey[]) => { try { localStorage.setItem(COLS_KEY, JSON.stringify(next)); } catch { /* ignore */ } return next; };
@@ -241,7 +209,7 @@ export default function Dashboard() {
   ];
   const visible = columns.filter((c) => visibleCols.includes(c.key));
   const pages = Math.max(1, Math.ceil(total / limit));
-  const caseColStyle = { width: caseColWidth, maxWidth: caseColWidth, minWidth: caseColWidth };
+  const caseColStyle = caseColBox(caseColWidth);
   const caseLabels = (rows || []).map((r) => r.id.replace("case_", ""));
 
   return (
@@ -402,7 +370,7 @@ export default function Dashboard() {
                     {c.key === "case" ? (
                       <>
                         <span className="block truncate pr-1">{c.label}</span>
-                        <CaseColHandle width={caseColWidth} onChange={setCaseColWidth} labels={caseLabels} />
+                        <CaseColHandle storageKey={CASE_COL_KEY} width={caseColWidth} onChange={setCaseColWidth} labels={caseLabels} />
                       </>
                     ) : c.label}
                   </th>
@@ -428,54 +396,6 @@ export default function Dashboard() {
       </div>
       <FilterPanel open={filtersOpen} onClose={closeFilters} f={f} setFilter={setFilter} onClear={() => { setF(EMPTY_FILTERS); setPage(0); }} users={users} myMailbox={myMailbox} sharedMailbox={sharedMailbox} />
     </div>
-  );
-}
-
-function CaseColHandle({ width, onChange, labels }: { width: number; onChange: (n: number) => void; labels: string[] }) {
-  const widthRef = useRef(width);
-  widthRef.current = width;
-  const drag = useRef<{ x: number; w: number } | null>(null);
-  const apply = (n: number) => { const w = persistCaseCol(n); onChange(w); };
-
-  return (
-    <button
-      type="button"
-      aria-orientation="vertical"
-      aria-valuemin={CASE_COL_MIN}
-      aria-valuemax={CASE_COL_MAX}
-      aria-valuenow={width}
-      aria-label="Resize Case column"
-      title="Drag to expand the case id. Double-click to fit or reset."
-      className="absolute inset-y-0 right-0 z-10 w-2 cursor-col-resize touch-none border-0 bg-transparent p-0 hover:bg-accent/40"
-      onPointerDown={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        e.currentTarget.setPointerCapture(e.pointerId);
-        drag.current = { x: e.clientX, w: widthRef.current };
-      }}
-      onPointerMove={(e) => {
-        if (!drag.current) return;
-        onChange(clampCaseCol(drag.current.w + e.clientX - drag.current.x));
-      }}
-      onPointerUp={() => {
-        if (!drag.current) return;
-        drag.current = null;
-        persistCaseCol(widthRef.current);
-      }}
-      onPointerCancel={() => { drag.current = null; }}
-      onDoubleClick={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        drag.current = null;
-        apply(Math.abs(widthRef.current - CASE_COL_DEFAULT) <= 4 ? measureCaseFit(labels) : CASE_COL_DEFAULT);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "ArrowRight") { e.preventDefault(); apply(widthRef.current + 16); }
-        if (e.key === "ArrowLeft") { e.preventDefault(); apply(widthRef.current - 16); }
-        if (e.key === "Home") { e.preventDefault(); apply(CASE_COL_DEFAULT); }
-        if (e.key === "End") { e.preventDefault(); apply(measureCaseFit(labels)); }
-      }}
-    />
   );
 }
 
