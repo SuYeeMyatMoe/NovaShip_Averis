@@ -103,6 +103,7 @@ def test_connect_refuses_when_mail_permission_was_not_granted(monkeypatch):
     r = client.get("/auth/microsoft/callback", params={"code": "c", "state": state})
     assert r.headers["location"].endswith("error=mail_permission_missing")
     assert client.get("/auth/microsoft/callback", params={"error": "access_denied", "error_description": "user said no"}).headers["location"].endswith("error=microsoft_denied")
+    assert client.get("/auth/microsoft/callback", params={"error": "server_error", "error_description": "AADSTS90033"}).headers["location"].endswith("error=microsoft_error")
     # a Microsoft state cannot be replayed against the Google callback
     import app.api.google_auth_routes as google_auth
 

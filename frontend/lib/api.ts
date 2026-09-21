@@ -128,11 +128,12 @@ export const GOOGLE_ERRORS: Record<string, string> = {
   google_disabled: "Google sign-in is disabled in this authentication mode.",
   storage_failed: "Signed in, but the mailbox could not be saved. Apply supabase/migrations/0007_user_mailboxes.sql and try again.",
   microsoft_denied: "Microsoft sign-in was cancelled.",
+  microsoft_error: "Microsoft could not complete the sign-in (provider error). Try again; if it repeats, sign out at login.live.com and reconnect.",
   microsoft_disabled: "Microsoft sign-in is disabled in this authentication mode.",
   mail_permission_missing: "Outlook was not connected: the mail permissions were not granted. Try again and accept 'Read your mail' and 'Send mail as you'.",
   mailbox_table_missing: "Mailbox storage is not set up on the server (migration 0007). Run `python backend/scripts/apply_migrations.py` with SUPABASE_DB_URL set, then connect again.",
 };
-export const CONNECT_ERROR_CODES = new Set(["storage_failed", "mailbox_table_missing", "mail_permission_missing", "unknown_user", "exchange_failed", "userinfo_failed", "no_refresh_token", "bad_state", "microsoft_denied", "google_denied"]);
+export const CONNECT_ERROR_CODES = new Set(["storage_failed", "mailbox_table_missing", "mail_permission_missing", "unknown_user", "exchange_failed", "userinfo_failed", "no_refresh_token", "bad_state", "microsoft_denied", "microsoft_error", "google_denied"]);
 
 export async function logout(): Promise<void> {
   try { await api("/auth/logout", { method: "POST" }, { redirectOn401: false }); } catch {}

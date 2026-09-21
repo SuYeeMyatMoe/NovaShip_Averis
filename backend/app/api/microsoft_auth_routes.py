@@ -130,8 +130,9 @@ def microsoft_callback(code: Optional[str] = None, state: Optional[str] = None, 
     if auth_mode() == "jwt":
         return _fail("microsoft_disabled")
     if error:
-        log.info("microsoft consent refused: %s %s", error, (error_description or "")[:120])
-        return _fail("microsoft_denied")
+        log.info("microsoft sign-in failed: %s %s", error, (error_description or "")[:120])
+        # access_denied = the person cancelled or refused consent; anything else (server_error, temporarily_unavailable, ...) is Microsoft's side
+        return _fail("microsoft_denied" if error == "access_denied" else "microsoft_error")
     st = read_state(state)
     if not st or not code or st.get("provider") != "microsoft":
         return _fail("bad_state")
