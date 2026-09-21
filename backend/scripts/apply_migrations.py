@@ -5,7 +5,6 @@ Apply the SQL migrations in supabase/migrations/ to the project's Postgres.
     python backend/scripts/apply_migrations.py --dry-run      # show applied / pending, change nothing
     python backend/scripts/apply_migrations.py                # apply every pending migration, in order
     python backend/scripts/apply_migrations.py --only 0007    # just this one
-    docker compose exec api python scripts/apply_migrations.py   # same, from inside the api image
 
 Needs SUPABASE_DB_URL (Supabase -> Connect -> URI, session pooler, with the database password), e.g.
 postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
@@ -25,6 +24,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = ROOT / "supabase" / "migrations"
+
+
+def _load_repo_env() -> None:
+    """Load repo-root .env so host runs pick up SUPABASE_DB_URL. Process env still wins."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(ROOT / ".env")
 
 # migration file stem -> SQL that returns true when the migration is already in the database
 PROBES: dict[str, str] = {
@@ -50,7 +58,7 @@ def _connect(url: str):
     try:
         import psycopg
     except ImportError:  # pragma: no cover - the api image ships psycopg
-        sys.exit("psycopg is not installed here; run inside the api container: docker compose exec api python scripts/apply_migrations.py")
+        sys.exit('psycopg is not installed here; from the repo root run: pip install "psycopg[binary]"')
     return psycopg.connect(url, autocommit=False)
 
 
@@ -93,17 +101,19 @@ def apply(conn, name: str, path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_repo_env()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true", help="list applied/pending migrations and exit")
     ap.add_argument("--only", help="apply only the migration whose file name starts with this prefix (e.g. 0007)")
-    ap.add_argument("--url", default=os.environ.get("SUPABASE_DB_URL", ""), help="Postgres URL (default: SUPABASE_DB_URL)")
+    ap.add_argument("--url", default="", help="Postgres URL (default: SUPABASE_DB_URL from the environment or repo-root .env)")
     a = ap.parse_args(argv)
-    if not a.url.strip():
+    url = (a.url or os.environ.get("SUPABASE_DB_URL") or "").strip()
+    if not url:
         sys.exit("SUPABASE_DB_URL is not set. Supabase -> Connect -> URI (session pooler) -> put it in .env, then rerun.")
     if not MIGRATIONS.exists():
         sys.exit(f"no migrations folder at {MIGRATIONS}")
 
-    conn = _connect(a.url.strip())
+    conn = _connect(url)
     try:
         rows = status(conn)
         width = max(len(n) for n, _, _ in rows)

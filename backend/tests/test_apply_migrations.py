@@ -100,7 +100,18 @@ def test_only_filter_and_sql_failure_reporting(monkeypatch, capsys):
     assert "does not exist" in capsys.readouterr().out and "0004_accounts" not in db2.recorded
 
 
+def test_url_is_read_from_env_after_dotenv(monkeypatch):
+    def load():
+        monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://from-env")
+
+    monkeypatch.setattr(mod, "_load_repo_env", load)
+    db = FakeDB(present=set())
+    monkeypatch.setattr(mod, "_connect", lambda url: db if url == "postgresql://from-env" else (_ for _ in ()).throw(AssertionError("unexpected url")))
+    assert mod.main(["--dry-run"]) == 0
+
+
 def test_missing_url_is_a_clear_exit(monkeypatch):
+    monkeypatch.setattr(mod, "_load_repo_env", lambda: None)
     monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
     try:
         mod.main([])
