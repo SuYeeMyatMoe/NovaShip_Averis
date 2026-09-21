@@ -1,10 +1,12 @@
 "use client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { agentStateOf, api, post, getSession, ApiError, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
 import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
 import { MailboxCard } from "@/components/mailbox-card";
+import { Field, inputClass } from "@/components/auth";
 import { useOperatorWarning } from "@/lib/operator-warning";
 
 const STATUSES = ["RECEIVED","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","WAITING_DOCUMENTS","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
@@ -12,6 +14,14 @@ const INTENTS = ["DOCUMENT_VERIFICATION","DOCUMENT_CORRECTION","PREPARE_SHIPPING
 const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "", mailbox: "", agent: "pending" };
 const AGENT_LABELS: Record<string, string> = { pending: "Not run yet", paused: "Paused – waiting for you", done: "Processed", any: "All (incl. processed)" };
 const STATUS_ORDER = ["RECEIVED","SECURITY_CHECK","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","DOCUMENTS_DETECTED","WAITING_DOCUMENTS","EXTRACTING","COMPARING","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
+const SORT_LABELS: Record<string, string> = { updated_desc: "Last update", received_desc: "Received", priority: "Priority", confidence: "Confidence, low first", run_desc: "Last agent run" };
+const COLUMN_KEYS = ["case","subject","intent","security","action","priority","docs","mismatch","confidence","assigned","shared","status","run","updated","actions"] as const;
+type ColKey = (typeof COLUMN_KEYS)[number];
+const DEFAULT_COLS: ColKey[] = ["case","subject","action","priority","docs","mismatch","status","updated","actions"];
+const COLS_KEY = "novaship.inbox.columns";
+const PANEL_FILTER_KEYS = ["status","priority","intent","mailbox","mismatch","security","assigned","shared","sender","min_confidence","date_from","date_to"];
+const TOOLBAR_BTN = "inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-3 py-2 text-xs font-semibold text-ink-800 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
+const KEBAB_BTN = "rounded-lg border border-ink-200 bg-white px-2 py-1.5 text-sm font-bold leading-none text-ink-700 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
 const STATUS_TONE: Record<string, string> = { HUMAN_REVIEW: "bg-review", MISMATCH_DETECTED: "bg-mismatch", SECURITY_REVIEW: "bg-mismatch", ERROR: "bg-mismatch", WAITING_DOCUMENTS: "bg-review", NO_MISMATCH_DETECTED: "bg-match", COMPLETED: "bg-match", NO_ACTION_INFO: "bg-ink-300" };
 
 export default function Dashboard() {
@@ -37,6 +47,23 @@ export default function Dashboard() {
   const myMailbox = me?.mailbox?.connected ? me.mailbox.address : null;
   const sharedMailbox = me?.mailbox?.providers?.shared_mailbox_configured ?? true;
   const warn = useOperatorWarning();
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const closeFilters = useCallback(() => setFiltersOpen(false), []);
+  const [visibleCols, setVisibleCols] = useState<ColKey[]>(DEFAULT_COLS);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(COLS_KEY);
+      if (!raw) return;
+      const arr: unknown = JSON.parse(raw);
+      if (!Array.isArray(arr)) return;
+      const ok = arr.filter((k): k is ColKey => (COLUMN_KEYS as readonly string[]).includes(k));
+      if (ok.length) setVisibleCols(ok);
+    } catch { /* ignore */ }
+  }, []);
+  const persistCols = (next: ColKey[]) => { try { localStorage.setItem(COLS_KEY, JSON.stringify(next)); } catch { /* ignore */ } return next; };
+  const setCols = (next: ColKey[]) => setVisibleCols(persistCols(next));
+  const toggleCol = (k: ColKey) => setVisibleCols((prev) => { const next = prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]; return next.length ? persistCols(next) : prev; });
+  const activeFilters = PANEL_FILTER_KEYS.filter((k) => f[k]).length + (f.agent !== "pending" ? 1 : 0);
 
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 3500); };
 
@@ -137,6 +164,49 @@ export default function Dashboard() {
   const fieldMax = Math.max(1, ...fields.map((x) => x.mismatch));
   const secCounts: Record<string, number> = (security || []).reduce((acc: Record<string, number>, r) => ({ ...acc, [r.outcome]: (acc[r.outcome] || 0) + 1 }), {} as Record<string, number>);
 
+  type Col = { key: ColKey; label: string; title?: string; td?: string | ((r: CaseRow) => string); render: (r: CaseRow) => React.ReactNode };
+  const columns: Col[] = [
+    { key: "case", label: "Case", td: "font-mono text-[11px]", render: (r) => <Link href={`/cases/${r.id}`} className="text-accent hover:underline">{r.id.replace("case_", "")}</Link> },
+    { key: "subject", label: "Subject / sender", td: "max-w-[360px]", render: (r) => (
+      <>
+        <Link href={`/cases/${r.id}`} className="line-clamp-1 font-medium text-ink-900 hover:text-accent">{r.subject || "(no subject)"}</Link>
+        <div className="truncate text-[11px] text-ink-500">{r.sender}{r.mailbox && <span className="ml-1.5 rounded-full bg-orange-50 px-1.5 py-px text-[10px] font-semibold text-accent-fg" title={`Fetched from ${r.mailbox}`}>{r.mailbox_user_id === me?.id ? "my mailbox" : r.mailbox}</span>}</div>
+      </>
+    ) },
+    { key: "intent", label: "Intent", render: (r) => <Badge className="bg-ink-100 text-ink-700">{r.intent.replace(/_/g, " ")}</Badge> },
+    { key: "security", label: "Security", render: (r) => <Badge className={r.security === "SAFE" ? "bg-match-bg text-match-fg" : "bg-mismatch-bg text-mismatch-fg"}>{r.security}</Badge> },
+    { key: "action", label: "Action", render: (r) => r.action_required ? <span className="font-semibold text-accent">Required</span> : <span className="text-ink-400">No reply</span> },
+    { key: "priority", label: "Priority", td: (r) => `font-semibold ${PRIORITY_COLORS[r.priority] || ""}`, render: (r) => r.priority },
+    { key: "docs", label: "SI / BL", td: "font-mono text-[11px]", render: (r) => <><Dot ok={r.si_available} label="SI" /> <Dot ok={r.bl_available} label="BL" /></> },
+    { key: "mismatch", label: "Mismatch", render: (r) => (
+      <>
+        {r.comparison_status === null ? <span className="text-ink-400">—</span> : r.mismatch_count > 0 ? <Badge className="bg-mismatch-bg text-mismatch-fg">{r.mismatch_count} mismatch</Badge> : r.comparison_status === "PASSED" ? <Badge className="bg-match-bg text-match-fg">No mismatch</Badge> : <Badge className="bg-review-bg text-review-fg">Review</Badge>}
+        {r.review_reason && <div className="mt-0.5 text-[10px] text-review-fg">{r.review_reason.replace(/_/g, " ")}</div>}
+      </>
+    ) },
+    { key: "confidence", label: "Confidence", render: (r) => <Confidence value={r.confidence} /> },
+    { key: "assigned", label: "Assigned", td: "text-[11px]", render: (r) => users.find((u) => u.id === r.assigned_user_id)?.display_name || <span className="text-ink-400">-</span> },
+    { key: "shared", label: "Shared", td: "text-[11px]", render: (r) => r.shared_with.length ? `${r.shared_with.length} recipient(s)` : <span className="text-ink-400">-</span> },
+    { key: "status", label: "Status", render: (r) => <><StatusBadge status={r.status} />{r.errors > 0 && <div className="mt-0.5 text-[10px] text-mismatch">{r.errors} error(s)</div>}</> },
+    { key: "run", label: "Run", title: "Last AI-agent run", td: "whitespace-nowrap text-[11px]", render: (r) => <RunCell r={r} /> },
+    { key: "updated", label: "Updated", td: "whitespace-nowrap text-[11px] text-ink-500", render: (r) => fmtDate(r.updated_at) },
+    { key: "actions", label: "Actions", render: (r) => (
+      <div className="flex items-center gap-1">
+        <Button kind="primary" onClick={() => router.push(`/cases/${r.id}`)}>Open</Button>
+        <Menu label={`More actions for ${r.id.replace("case_", "")}`} width={200} triggerClassName={KEBAB_BTN} trigger={<span aria-hidden>⋯</span>}>
+          {agentStateOf(r) !== "done" && <MenuItem disabled={running === r.id} onClick={() => runAgent(r.id)}>{running === r.id ? "Running…" : agentStateOf(r) === "paused" ? "Resume agent" : "Run agent"}</MenuItem>}
+          <MenuItem onClick={() => quick(r.id, "/compare")}>Compare documents</MenuItem>
+          <MenuItem onClick={() => router.push(`/cases/${r.id}?tab=ask`)}>Ask AI</MenuItem>
+          <MenuItem onClick={() => router.push(`/cases/${r.id}?tab=collab`)}>Share</MenuItem>
+          <MenuItem onClick={() => router.push(`/cases/${r.id}?tab=drafts`)}>Draft</MenuItem>
+          <MenuItem onClick={() => router.push(`/cases/${r.id}?tab=audit`)}>Audit</MenuItem>
+        </Menu>
+      </div>
+    ) },
+  ];
+  const visible = columns.filter((c) => visibleCols.includes(c.key));
+  const pages = Math.max(1, Math.ceil(total / limit));
+
   return (
     <div className="dashboard-type space-y-3">
       {toast && <Toast {...toast} />}
@@ -224,32 +294,44 @@ export default function Dashboard() {
       {/* ---- case table --------------------------------------------------------- */}
       {canIngest && <MailboxCard compact />}
       <div id="case-table" className="scroll-mt-16 overflow-hidden rounded-2xl border border-ink-200 bg-white shadow-card">
-        <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-3 py-2">
-          <span className="mr-1 text-sm font-semibold text-ink-800">All cases</span>
-          {canIngest && (myMailbox || sharedMailbox) && <Button kind="primary" disabled={fetching} onClick={fetchInbox} title={myMailbox ? `Polls ${myMailbox}` : "Polls the shared desk mailbox"}>{fetching ? "Fetching…" : myMailbox ? "Fetch my inbox" : "Fetch Inbox"}</Button>}
-          {canIngest && !myMailbox && !sharedMailbox && <Button kind="primary" onClick={() => router.push("/welcome")} title="No mailbox is connected yet">Connect a mailbox</Button>}
-          <Button kind={f.attention === "yes" ? "primary" : "ghost"} onClick={() => applyPreset({ attention: "yes", sort: "priority", agent: f.agent })}>Needs human</Button>
-          {me?.id && <Button kind={f.assigned === me.id ? "primary" : "ghost"} onClick={() => applyPreset({ assigned: me.id, sort: "updated_desc", agent: f.agent })}>Needs me</Button>}
-          {myMailbox && <Button kind={f.mailbox === "me" ? "primary" : "ghost"} onClick={() => applyPreset({ mailbox: "me", sort: "received_desc", agent: f.agent })} title={myMailbox}>My mailbox</Button>}
-          <Sel v={f.agent} on={(v) => setFilter("agent", v || "any")} opts={["pending","paused","done","any"]} ph="Agent run" labels={AGENT_LABELS} />
-          <label className="flex items-center gap-1 text-[11px] text-ink-600" title="Processed = the AI agent finished a run on the case; they live on the History page">
-            <input type="checkbox" checked={f.agent === "any"} onChange={(e) => setFilter("agent", e.target.checked ? "any" : "pending")} /> Show processed
+        <div className="flex flex-wrap items-start justify-between gap-3 px-4 pb-3 pt-4">
+          <div>
+            <h2 className="text-base font-semibold text-ink-900">Work queue</h2>
+            <p className="mt-0.5 text-xs text-ink-500">{total} cases · page {page + 1} of {pages}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {canIngest && (myMailbox || sharedMailbox) && <Button kind="primary" disabled={fetching} onClick={fetchInbox} title={myMailbox ? `Polls ${myMailbox}` : "Polls the shared desk mailbox"}>{fetching ? "Fetching…" : myMailbox ? "Fetch my inbox" : "Fetch Inbox"}</Button>}
+            {canIngest && !myMailbox && !sharedMailbox && <Button kind="primary" onClick={() => router.push("/welcome")} title="No mailbox is connected yet">Connect a mailbox</Button>}
+            <Button kind={f.attention === "yes" ? "primary" : "default"} onClick={() => applyPreset(f.attention === "yes" ? { agent: f.agent } : { attention: "yes", sort: "priority", agent: f.agent })}>Needs human</Button>
+            {me?.id && <Button kind={f.assigned === me.id ? "primary" : "default"} onClick={() => applyPreset(f.assigned === me.id ? { agent: f.agent } : { assigned: me.id, sort: "updated_desc", agent: f.agent })}>Needs me</Button>}
+            <button type="button" onClick={() => setFiltersOpen(true)} aria-haspopup="dialog" aria-expanded={filtersOpen} className={TOOLBAR_BTN}>
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M3 5h18l-7 8v6l-4-2v-4z" /></svg>
+              Filters
+              {activeFilters > 0 && <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-white">{activeFilters}</span>}
+            </button>
+            <Menu label="Columns" width={240} triggerClassName={TOOLBAR_BTN} trigger={<>
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16" /></svg>
+              Columns
+              <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M6 9l6 6 6-6" /></svg>
+            </>}>
+              <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-ink-500">Visible columns</div>
+              <MenuItem keepOpen onClick={() => setCols([...COLUMN_KEYS])}>All columns</MenuItem>
+              <div className="my-1 border-t border-ink-100" role="separator" />
+              {columns.map((c) => <MenuItem key={c.key} keepOpen checked={visibleCols.includes(c.key)} onClick={() => toggleCol(c.key)}>{c.label}</MenuItem>)}
+            </Menu>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 border-t border-ink-100 px-4 py-2.5 sm:flex-row sm:items-center">
+          <div className="relative flex-1">
+            <svg viewBox="0 0 24 24" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+            <input placeholder="Search case, subject, sender or summary" value={f.q} onChange={(e) => setFilter("q", e.target.value)} className="w-full rounded-xl border border-ink-200 bg-white py-2 pl-9 pr-3 text-sm text-ink-900 placeholder:text-ink-400 transition focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring/60" aria-label="Search" />
+          </div>
+          <label className="flex items-center gap-2 text-xs text-ink-500">
+            <span className="hidden sm:inline">Sort</span>
+            <select value={f.sort} onChange={(e) => setFilter("sort", e.target.value)} aria-label="Sort" className="rounded-lg border border-ink-200 bg-white px-2 py-1.5 text-sm text-ink-800">
+              {Object.entries(SORT_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
           </label>
-          <input placeholder="Search case, subject, sender, summary" value={f.q} onChange={(e) => setFilter("q", e.target.value)} className="w-full rounded-md border border-ink-200 px-2 py-1.5 text-sm sm:w-60" aria-label="Search" />
-          <Sel v={f.status} on={(v) => setFilter("status", v)} opts={STATUSES} ph="Status" />
-          <Sel v={f.priority} on={(v) => setFilter("priority", v)} opts={["CRITICAL","HIGH","MEDIUM","LOW"]} ph="Priority" />
-          <Sel v={f.intent} on={(v) => setFilter("intent", v)} opts={INTENTS} ph="Intent" />
-          <Sel v={f.mismatch} on={(v) => setFilter("mismatch", v)} opts={["yes","no"]} ph="Mismatch" labels={{ yes: "Mismatch", no: "No mismatch" }} />
-          <Sel v={f.security} on={(v) => setFilter("security", v)} opts={["SAFE","SPAM","SUSPICIOUS","SECURITY_REVIEW"]} ph="Security" />
-          <Sel v={f.assigned} on={(v) => setFilter("assigned", v)} opts={users.map((u) => u.id)} ph="Assigned to" labels={Object.fromEntries(users.map((u) => [u.id, u.display_name]))} />
-          <Sel v={f.shared} on={(v) => setFilter("shared", v)} opts={users.map((u) => u.id)} ph="Shared with" labels={Object.fromEntries(users.map((u) => [u.id, u.display_name]))} />
-          <input placeholder="Sender" value={f.sender} onChange={(e) => setFilter("sender", e.target.value)} className="w-32 rounded-md border border-ink-200 px-2 py-1.5 text-sm" aria-label="Sender" />
-          <input type="number" step="0.05" min="0" max="1" placeholder="Min conf" value={f.min_confidence} onChange={(e) => setFilter("min_confidence", e.target.value)} className="w-24 rounded-md border border-ink-200 px-2 py-1.5 text-sm" aria-label="Minimum confidence" />
-          <input type="date" value={f.date_from} onChange={(e) => setFilter("date_from", e.target.value)} className="rounded-md border border-ink-200 px-2 py-1 text-sm" title="Received from" aria-label="Received from" />
-          <input type="date" value={f.date_to.slice(0, 10)} onChange={(e) => setFilter("date_to", e.target.value ? e.target.value + "T23:59:59" : "")} className="rounded-md border border-ink-200 px-2 py-1 text-sm" title="Received to" aria-label="Received to" />
-          <Sel v={f.sort} on={(v) => setFilter("sort", v)} opts={["updated_desc","received_desc","priority","confidence","run_desc"]} ph="Sort" labels={{ updated_desc: "Last update", received_desc: "Received", priority: "Priority", confidence: "Confidence, low first", run_desc: "Last agent run" }} />
-          <Button kind="ghost" onClick={() => { setF(EMPTY_FILTERS); setPage(0); }}>Clear</Button>
-          <span className="ml-auto text-xs text-ink-500">{total} cases</span>
         </div>
 
         {sel.size > 0 && (
@@ -270,62 +352,31 @@ export default function Dashboard() {
         )}
 
         <div className="overflow-x-auto scrollbar-thin">
-          <table className="w-full min-w-[1500px] text-left text-xs">
+          <table className="w-full min-w-[880px] text-left text-xs">
             <thead className="bg-ink-50 text-[11px] uppercase tracking-wide text-ink-500">
               <tr>
                 <th className="px-2 py-2"><input type="checkbox" aria-label="Select all on page" checked={!!rows?.length && rows.every((r) => sel.has(r.id))} onChange={(e) => setSel(e.target.checked ? new Set((rows || []).map((r) => r.id)) : new Set())} /></th>
-                <th className="px-2 py-2">Case</th><th className="px-2 py-2">Subject / sender</th><th className="px-2 py-2">Intent</th><th className="px-2 py-2">Security</th>
-                <th className="px-2 py-2">Action</th><th className="px-2 py-2">Priority</th><th className="px-2 py-2">SI / BL</th><th className="px-2 py-2">Mismatch</th>
-                <th className="px-2 py-2">Confidence</th><th className="px-2 py-2">Assigned</th><th className="px-2 py-2">Shared</th><th className="px-2 py-2">Status</th><th className="px-2 py-2" title="Last AI-agent run">Run</th><th className="px-2 py-2">Updated</th><th className="px-2 py-2">Actions</th>
+                {visible.map((c) => <th key={c.key} className="px-2 py-2" title={c.title}>{c.label}</th>)}
               </tr>
             </thead>
             <tbody>
-              {rows === null && Array.from({ length: 6 }, (_, i) => <tr key={i} className="border-t border-ink-100"><td colSpan={16} className="px-2 py-2"><div className="h-6 animate-pulse rounded bg-ink-100" /></td></tr>)}
+              {rows === null && Array.from({ length: 6 }, (_, i) => <tr key={i} className="border-t border-ink-100"><td colSpan={visible.length + 1} className="px-2 py-2"><div className="h-6 animate-pulse rounded bg-ink-100" /></td></tr>)}
               {rows?.map((r) => (
                 <tr key={r.id} className={`border-t border-ink-100 align-top transition hover:bg-accent-bg/30 ${sel.has(r.id) ? "bg-accent-bg/40" : ""} ${agentStateOf(r) === "done" ? "opacity-70" : ""}`}>
                   <td className="px-2 py-2"><input type="checkbox" aria-label={`Select ${r.id}`} checked={sel.has(r.id)} onChange={() => toggle(r.id)} /></td>
-                  <td className="px-2 py-2 font-mono text-[11px]"><Link href={`/cases/${r.id}`} className="text-accent hover:underline">{r.id.replace("case_", "")}</Link></td>
-                  <td className="max-w-[360px] px-2 py-2">
-                    <Link href={`/cases/${r.id}`} className="line-clamp-1 font-medium text-ink-900 hover:text-accent">{r.subject || "(no subject)"}</Link>
-                    <div className="truncate text-[11px] text-ink-500">{r.sender}{r.mailbox && <span className="ml-1.5 rounded-full bg-orange-50 px-1.5 py-px text-[10px] font-semibold text-accent-fg" title={`Fetched from ${r.mailbox}`}>{r.mailbox_user_id === me?.id ? "my mailbox" : r.mailbox}</span>}</div>
-                  </td>
-                  <td className="px-2 py-2"><Badge className="bg-ink-100 text-ink-700">{r.intent.replace(/_/g, " ")}</Badge></td>
-                  <td className="px-2 py-2"><Badge className={r.security === "SAFE" ? "bg-match-bg text-match-fg" : "bg-mismatch-bg text-mismatch-fg"}>{r.security}</Badge></td>
-                  <td className="px-2 py-2">{r.action_required ? <span className="font-semibold text-accent">Required</span> : <span className="text-ink-400">No reply needed</span>}</td>
-                  <td className={`px-2 py-2 ${PRIORITY_COLORS[r.priority]}`}>{r.priority}</td>
-                  <td className="px-2 py-2 font-mono text-[11px]"><Dot ok={r.si_available} label="SI" /> <Dot ok={r.bl_available} label="BL" /></td>
-                  <td className="px-2 py-2">
-                    {r.comparison_status === null ? <span className="text-ink-400">-</span> : r.mismatch_count > 0 ? <Badge className="bg-mismatch text-white">{r.mismatch_count} mismatch</Badge> : r.comparison_status === "PASSED" ? <Badge className="bg-match-bg text-match-fg">No mismatch</Badge> : <Badge className="bg-review-bg text-review-fg">Review</Badge>}
-                    {r.review_reason && <div className="mt-0.5 text-[10px] text-review-fg">{r.review_reason.replace(/_/g, " ")}</div>}
-                  </td>
-                  <td className="px-2 py-2"><Confidence value={r.confidence} /></td>
-                  <td className="px-2 py-2 text-[11px]">{users.find((u) => u.id === r.assigned_user_id)?.display_name || <span className="text-ink-400">-</span>}</td>
-                  <td className="px-2 py-2 text-[11px]">{r.shared_with.length ? `${r.shared_with.length} recipient(s)` : <span className="text-ink-400">-</span>}</td>
-                  <td className="px-2 py-2"><StatusBadge status={r.status} />{r.errors > 0 && <div className="mt-0.5 text-[10px] text-mismatch">{r.errors} error(s)</div>}</td>
-                  <td className="whitespace-nowrap px-2 py-2 text-[11px]"><RunCell r={r} /></td>
-                  <td className="whitespace-nowrap px-2 py-2 text-[11px] text-ink-500">{fmtDate(r.updated_at)}</td>
-                  <td className="px-2 py-2">
-                    <div className="table-row-action flex flex-nowrap gap-1">
-                      <Button kind="primary" onClick={() => router.push(`/cases/${r.id}`)}>Open</Button>
-                      {agentStateOf(r) !== "done" && <Button disabled={running === r.id} onClick={() => runAgent(r.id)} title="Run the AI agent on this case (pauses for you when a decision is needed)">{running === r.id ? "Running…" : agentStateOf(r) === "paused" ? "Resume" : "Run agent"}</Button>}
-                      <Button onClick={() => quick(r.id, "/compare")} title="Re-run extraction and the deterministic comparison">Compare</Button>
-                      <Button onClick={() => router.push(`/cases/${r.id}?tab=ask`)}>Ask AI</Button>
-                      <Button onClick={() => router.push(`/cases/${r.id}?tab=collab`)}>Share</Button>
-                      <Button onClick={() => router.push(`/cases/${r.id}?tab=drafts`)}>Draft</Button>
-                      <Button onClick={() => router.push(`/cases/${r.id}?tab=audit`)}>Audit</Button>
-                    </div>
-                  </td>
+                  {visible.map((c) => <td key={c.key} className={`px-2 py-2 ${typeof c.td === "function" ? c.td(r) : c.td || ""}`}>{c.render(r)}</td>)}
                 </tr>
               ))}
-              {rows?.length === 0 && <tr><td colSpan={16} className="px-4 py-10 text-center text-sm text-ink-500">{apiDown ? "The API is offline. Start the backend on port 8000 and refresh." : f.agent === "pending" ? <span>Every case in this view has been run by the agent — see <Link href="/history" className="font-semibold text-accent-fg hover:underline">History</Link> or tick <em>Show processed</em>.</span> : "No cases match these filters."}</td></tr>}
+              {rows?.length === 0 && <tr><td colSpan={visible.length + 1} className="px-4 py-10 text-center text-sm text-ink-500">{apiDown ? "The API is offline. Start the backend on port 8000 and refresh." : f.agent === "pending" ? <span>Every case in this view has been run by the agent — see <Link href="/history" className="font-semibold text-accent-fg hover:underline">History</Link> or <button type="button" onClick={() => setFilter("agent", "any")} className="font-semibold text-accent-fg hover:underline">show processed cases</button>.</span> : <span>No cases match these filters. <button type="button" onClick={() => { setF(EMPTY_FILTERS); setPage(0); }} className="font-semibold text-accent-fg hover:underline">Clear filters</button></span>}</td></tr>}
             </tbody>
           </table>
         </div>
         <div className="flex items-center justify-between border-t border-ink-100 px-3 py-2 text-xs text-ink-500">
-          <span>Page {page + 1} of {Math.max(1, Math.ceil(total / limit))}</span>
+          <span>Page {page + 1} of {pages}</span>
           <div className="flex gap-1"><Button disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</Button><Button disabled={(page + 1) * limit >= total} onClick={() => setPage(page + 1)}>Next</Button></div>
         </div>
       </div>
+      <FilterPanel open={filtersOpen} onClose={closeFilters} f={f} setFilter={setFilter} onClear={() => { setF(EMPTY_FILTERS); setPage(0); }} users={users} myMailbox={myMailbox} sharedMailbox={sharedMailbox} />
     </div>
   );
 }
@@ -361,14 +412,6 @@ function Ring({ value, total }: { value: number; total: number }) {
     </svg>
   );
 }
-function Sel({ v, on, opts, ph, labels }: { v: string; on: (v: string) => void; opts: string[]; ph: string; labels?: Record<string, string> }) {
-  return (
-    <select value={v} onChange={(e) => on(e.target.value)} aria-label={ph} className="rounded-md border border-ink-200 bg-white px-2 py-1.5 text-sm">
-      <option value="">{ph}</option>
-      {opts.map((o) => <option key={o} value={o}>{labels?.[o] || o.replace(/_/g, " ")}</option>)}
-    </select>
-  );
-}
 function Dot({ ok, label }: { ok: boolean; label: string }) {
   return <span className={`inline-flex items-center gap-1 ${ok ? "text-match-fg" : "text-ink-400"}`}><span className={`h-2 w-2 rounded-full ${ok ? "bg-match" : "bg-ink-200"}`} aria-hidden />{label}</span>;
 }
@@ -380,4 +423,118 @@ function RunCell({ r }: { r: CaseRow }) {
   if (!a || a.result === "error") return <span className="text-ink-400" title={a?.error ? `last run failed: ${a.error}` : "the AI agent has not run this case yet"}>{a?.error ? "error · retry" : "—"}</span>;
   if (a.result === "paused") return <span className="rounded-full bg-review-bg px-1.5 py-px text-[10px] font-bold uppercase text-review-fg" title={`paused ${fmtDate(a.last_run_at)} · waiting for a decision`}>paused</span>;
   return <span className="text-ink-600" title={`run ${a.runs}× · last by ${a.last_run_by} · ${a.ms} ms`}><span className="rounded-full bg-match-bg px-1.5 py-px text-[10px] font-bold uppercase text-match-fg">done</span> {fmtDate(a.last_run_at)}</span>;
+}
+
+/** Right-hand slide-over holding every work-queue filter. Filters apply as soon as they change. */
+function FilterPanel({ open, onClose, f, setFilter, onClear, users, myMailbox, sharedMailbox }: { open: boolean; onClose: () => void; f: Record<string, string>; setFilter: (k: string, v: string) => void; onClear: () => void; users: any[]; myMailbox: string | null | undefined; sharedMailbox: boolean }) {
+  const first = useRef<HTMLSelectElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    first.current?.focus({ preventScroll: true });
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeRef.current(); };
+    window.addEventListener("keydown", onKey);
+    return () => { document.body.style.overflow = prev; window.removeEventListener("keydown", onKey); };
+  }, [open]);
+  if (!open) return null;
+  const userOpts = users.map((u) => <option key={u.id} value={u.id}>{u.display_name}</option>);
+  const opt = (o: string, label?: string) => <option key={o} value={o}>{label || o.replace(/_/g, " ")}</option>;
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-[55] bg-ink-900/30" onClick={onClose} aria-hidden />
+      <aside role="dialog" aria-modal="true" aria-labelledby="filter-title" className="fixed inset-y-0 right-0 z-[56] flex w-full flex-col bg-white shadow-2xl sm:w-[380px]">
+        <header className="flex items-start justify-between gap-3 border-b border-ink-100 px-5 py-4">
+          <div><h2 id="filter-title" className="text-base font-semibold text-ink-900">Filter work queue</h2><p className="mt-0.5 text-xs text-ink-500">Filters apply instantly to the work queue.</p></div>
+          <button type="button" onClick={onClose} aria-label="Close filters" className="rounded-lg px-2 py-1 text-lg leading-none text-ink-400 transition hover:bg-ink-50 hover:text-ink-800">×</button>
+        </header>
+        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 scrollbar-thin">
+          <Field label="Sort"><select ref={first} className={inputClass} value={f.sort} onChange={(e) => setFilter("sort", e.target.value)}>{Object.entries(SORT_LABELS).map(([k, l]) => opt(k, l))}</select></Field>
+          <Field label="Status"><select className={inputClass} value={f.status} onChange={(e) => setFilter("status", e.target.value)}><option value="">Any status</option>{STATUSES.map((s) => opt(s))}</select></Field>
+          <Field label="Priority"><select className={inputClass} value={f.priority} onChange={(e) => setFilter("priority", e.target.value)}><option value="">Any priority</option>{["CRITICAL","HIGH","MEDIUM","LOW"].map((s) => opt(s))}</select></Field>
+          <Field label="Intent"><select className={inputClass} value={f.intent} onChange={(e) => setFilter("intent", e.target.value)}><option value="">Any intent</option>{INTENTS.map((s) => opt(s))}</select></Field>
+          <Field label="Mailbox"><select className={inputClass} value={f.mailbox} onChange={(e) => setFilter("mailbox", e.target.value)}><option value="">Any mailbox</option>{myMailbox && opt("me", `My mailbox (${myMailbox})`)}{sharedMailbox && opt("shared", "Shared desk mailbox")}</select></Field>
+          <Field label="Mismatch"><select className={inputClass} value={f.mismatch} onChange={(e) => setFilter("mismatch", e.target.value)}><option value="">Any result</option>{opt("yes", "Mismatch")}{opt("no", "No mismatch")}</select></Field>
+          <Field label="Security"><select className={inputClass} value={f.security} onChange={(e) => setFilter("security", e.target.value)}><option value="">Any outcome</option>{["SAFE","SPAM","SUSPICIOUS","SECURITY_REVIEW"].map((s) => opt(s))}</select></Field>
+          <Field label="Assigned to"><select className={inputClass} value={f.assigned} onChange={(e) => setFilter("assigned", e.target.value)}><option value="">Anyone</option>{userOpts}</select></Field>
+          <Field label="Shared with"><select className={inputClass} value={f.shared} onChange={(e) => setFilter("shared", e.target.value)}><option value="">Anyone</option>{userOpts}</select></Field>
+          <Field label="Sender"><input className={inputClass} placeholder="name@company.com" value={f.sender} onChange={(e) => setFilter("sender", e.target.value)} /></Field>
+          <Field label="Minimum confidence"><input type="number" step="0.05" min="0" max="1" placeholder="e.g. 0.80" className={inputClass} value={f.min_confidence} onChange={(e) => setFilter("min_confidence", e.target.value)} /></Field>
+          <Field label="Agent run" hint="Processed cases live on the History page."><select className={inputClass} value={f.agent} onChange={(e) => setFilter("agent", e.target.value || "any")}>{["pending","paused","done","any"].map((s) => opt(s, AGENT_LABELS[s]))}</select></Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Received from"><input type="date" className={inputClass} value={f.date_from} onChange={(e) => setFilter("date_from", e.target.value)} /></Field>
+            <Field label="Received to"><input type="date" className={inputClass} value={f.date_to.slice(0, 10)} onChange={(e) => setFilter("date_to", e.target.value ? e.target.value + "T23:59:59" : "")} /></Field>
+          </div>
+        </div>
+        <footer className="flex items-center justify-between border-t border-ink-100 px-5 py-3">
+          <Button kind="ghost" onClick={onClear}>Clear all</Button>
+          <Button kind="primary" onClick={onClose}>Done</Button>
+        </footer>
+      </aside>
+    </>,
+    document.body,
+  );
+}
+
+const MenuCtx = createContext<() => void>(() => {});
+
+/** Small dropdown menu. The panel is portalled with fixed positioning so the table's horizontal scroll never clips it. */
+function Menu({ label, trigger, triggerClassName, width = 224, children }: { label: string; trigger: React.ReactNode; triggerClassName: string; width?: number; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => { setOpen(false); setPos(null); }, []);
+  useLayoutEffect(() => {
+    if (!open || !btn.current || !panel.current) return;
+    const b = btn.current.getBoundingClientRect();
+    const h = panel.current.offsetHeight;
+    const m = 8, gap = 4;
+    const left = Math.max(m, Math.min(b.right - width, window.innerWidth - width - m));
+    let top = b.bottom + gap;
+    if (top + h > window.innerHeight - m && b.top - gap - h >= m) top = b.top - gap - h;
+    setPos({ top, left });
+  }, [open, width]);
+  // the panel is kept invisible until it is positioned, and invisible elements cannot take focus
+  useEffect(() => { if (open && pos) panel.current?.querySelector<HTMLElement>('[role^="menuitem"]:not([disabled])')?.focus({ preventScroll: true }); }, [open, pos]);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => { const t = e.target as Node; if (panel.current?.contains(t) || btn.current?.contains(t)) return; close(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { close(); btn.current?.focus(); } };
+    const onScroll = (e: Event) => { if (panel.current?.contains(e.target as Node)) return; close(); };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", close);
+    return () => { document.removeEventListener("pointerdown", onDown, true); document.removeEventListener("keydown", onKey); window.removeEventListener("scroll", onScroll, true); window.removeEventListener("resize", close); };
+  }, [open, close]);
+  const onPanelKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const items = Array.from(panel.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([disabled])') || []);
+    if (!items.length) return;
+    e.preventDefault();
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    items[e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length].focus();
+  };
+  return (
+    <>
+      <button ref={btn} type="button" aria-haspopup="menu" aria-expanded={open} aria-label={label} title={label} onClick={() => (open ? close() : setOpen(true))} className={triggerClassName}>{trigger}</button>
+      {open && createPortal(
+        <MenuCtx.Provider value={close}>
+          <div ref={panel} role="menu" aria-label={label} tabIndex={-1} onKeyDown={onPanelKey} style={{ position: "fixed", top: pos?.top ?? 0, left: pos?.left ?? 0, width, visibility: pos ? "visible" : "hidden" }} className="z-50 overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-lg">{children}</div>
+        </MenuCtx.Provider>,
+        document.body,
+      )}
+    </>
+  );
+}
+function MenuItem({ children, onClick, checked, disabled, keepOpen }: { children: React.ReactNode; onClick: () => void; checked?: boolean; disabled?: boolean; keepOpen?: boolean }) {
+  const close = useContext(MenuCtx);
+  return (
+    <button type="button" role={checked === undefined ? "menuitem" : "menuitemcheckbox"} aria-checked={checked} disabled={disabled} onClick={() => { onClick(); if (!keepOpen) close(); }} className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs text-ink-800 transition hover:bg-ink-50 focus:bg-accent-bg focus:outline-none disabled:cursor-not-allowed disabled:opacity-50">
+      <span>{children}</span>{checked && <span aria-hidden className="text-ink-700">✓</span>}
+    </button>
+  );
 }
