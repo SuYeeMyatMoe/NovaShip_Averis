@@ -56,7 +56,12 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
               <pre className="mt-1 whitespace-pre-wrap rounded-md bg-ink-50 p-3 font-mono text-[11px]">{d.body}</pre>
             </div>
           )}
-          {(d.status === "SENT" || d.status === "SIMULATED" || d.status === "DELIVERY_UNKNOWN") && <DeliveryBlock d={d} verifying={verifying === d.id} onVerify={() => verify(d)} />}
+          {(d.status === "SENT" || d.status === "SIMULATED" || d.status === "DELIVERY_UNKNOWN") && <DeliveryBlock d={d} liveReady={sendMode === "live"} verifying={verifying === d.id} onVerify={() => verify(d)} />}
+          {d.status === "SIMULATED" && sendMode === "live" && (
+            <div className="mt-2">
+              <Button kind="success" disabled={!canApprove || busy} title={canApprove ? "Deliver this already-approved draft from the connected mailbox" : "Requires SUPERVISOR/ADMIN"} onClick={() => act("approve", d)}>Send now</Button>
+            </div>
+          )}
           {d.status !== "SENT" && d.status !== "SIMULATED" && d.status !== "REJECTED" && editing?.id !== d.id && (
             <div className="mt-2 flex flex-wrap gap-2">
               <Button onClick={() => { setEditing(d); setSubject(d.subject); setBody(d.body); }}>Edit</Button>
@@ -71,11 +76,16 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
 }
 
 /** What left the desk for this draft and what the sending mailbox says about it. */
-function DeliveryBlock({ d, verifying, onVerify }: { d: Draft; verifying: boolean; onVerify: () => void }) {
+function DeliveryBlock({ d, liveReady, verifying, onVerify }: { d: Draft; liveReady?: boolean; verifying: boolean; onVerify: () => void }) {
   const info = d.delivery;
   const providerName: Record<string, string> = { outlook: "Microsoft Graph (Outlook)", gmail: "Gmail API", shared: "the shared desk mailbox", simulate: "nobody" };
   if (d.status === "SIMULATED" || info?.mode === "simulate") {
-    return <div className="mt-2 rounded-lg border border-review bg-review-bg/40 px-3 py-2 text-xs text-review-fg"><span className="font-semibold">No e-mail was sent (simulated).</span> The approval is recorded; the server was in <span className="font-mono">EMAIL_SEND_MODE=simulate</span> at the time.</div>;
+    return (
+      <div className="mt-2 rounded-lg border border-review bg-review-bg/40 px-3 py-2 text-xs text-review-fg">
+        <span className="font-semibold">No e-mail was sent (simulated).</span> The approval is recorded; the server was in <span className="font-mono">EMAIL_SEND_MODE=simulate</span> at the time.
+        {liveReady ? <> Sending is live now — use <span className="font-semibold">Send now</span> below to deliver this draft from the connected mailbox.</> : null}
+      </div>
+    );
   }
   const tone = info?.verified === true ? "border-match bg-match-bg/40 text-match-fg" : info?.verified === false ? "border-mismatch bg-mismatch-bg/40 text-mismatch-fg" : "border-ink-200 bg-ink-50 text-ink-700";
   return (

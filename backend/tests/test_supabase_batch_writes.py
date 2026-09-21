@@ -32,6 +32,8 @@ class _Query:
     def delete(self): return self._op("delete")
     def select(self, *a, **k): return self._op("select")
     def eq(self, *a): return self
+    def gt(self, *a): return self
+    def in_(self, *a): return self
     def order(self, *a, **k): return self
     def limit(self, *a): return self
 
@@ -150,3 +152,35 @@ def test_batches_are_per_thread():
         t = threading.Thread(target=other)
         t.start(); t.join()
     assert seen["inserts"] == 1
+
+
+def test_case_cache_refreshes_rows_written_by_another_instance(monkeypatch):
+    """Several API instances share one database: after REPO_CACHE_TTL_S the cache asks for rows newer than its watermark."""
+    import time as _time
+
+    from app.contracts.schemas import CaseStatus as _CS
+    repo = _repo()
+    repo._cases_refreshed_at, repo._cases_watermark = 0.0, None
+    a = _case("case_a"); a.updated_at = datetime(2026, 9, 21, 10, 0, 0)
+    repo.client.rows["cases"] = [{"payload": a.model_dump(mode="json")}]
+    assert [c.id for c in repo.list_cases()] == ["case_a"] and repo._cases_watermark == a.updated_at.isoformat()
+    # another instance archives the case and creates a new one with a new e-mail
+    a2 = _case("case_a"); a2.status = _CS.COMPLETED; a2.updated_at = datetime(2026, 9, 21, 23, 32, 0)
+    b = _case("case_b"); b.updated_at = datetime(2026, 9, 21, 23, 33, 0)
+    repo.client.rows["cases"] = [{"payload": b.model_dump(mode="json")}, {"payload": a2.model_dump(mode="json")}]
+    repo.client.rows["email_messages"] = [{"payload": _email("em_case_b").model_dump(mode="json")}]
+    assert repo.get_case("case_a").status == _CS.CLASSIFIED, "inside the TTL the cache answers"
+    monkeypatch.setenv("REPO_CACHE_TTL_S", "0.01")
+    _time.sleep(0.02)
+    cases = repo.list_cases()
+    assert [c.id for c in cases] == ["case_b", "case_a"] and repo.get_case("case_a").status == _CS.COMPLETED
+    assert repo._cases_watermark == b.updated_at.isoformat()
+    selects = [(t, o) for t, o, _ in repo.client.log if t in ("cases", "email_messages") and o == "select"]
+    assert selects.count(("cases", "select")) == 2 and ("email_messages", "select") in selects, "one incremental query + the missing e-mail"
+    assert repo.get_email("em_case_b") is not None
+    # a refresh that fails must not break reads
+    def boom(self):
+        raise RuntimeError("network")
+    monkeypatch.setattr(type(repo.client.table("cases")), "execute", boom)
+    _time.sleep(0.02)
+    assert repo.get_case("case_b") is not None

@@ -315,7 +315,9 @@ class CaseService:
         """Human approval gate; transport success is required before an item becomes SENT."""
         case = self.get(case_id)
         d = self._draft(case, dec.draft_id)
-        if d.status in {DraftStatus.SENT, DraftStatus.SIMULATED}:
+        if d.status == DraftStatus.SENT:
+            return case
+        if d.status == DraftStatus.SIMULATED and send_mode() == "simulate":
             return case
         if d.status in {DraftStatus.DELIVERING, DraftStatus.DELIVERY_UNKNOWN}:
             raise HTTPException(

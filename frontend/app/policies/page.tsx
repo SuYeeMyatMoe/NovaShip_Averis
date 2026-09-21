@@ -157,7 +157,13 @@ function OperatorProfileCard({ suggestions, accepted, canEdit, onAccept, onDismi
         {!current ? (
           <div className="mt-2 text-xs text-ink-600">
             <p>Nothing learned yet. After {suggestions?.settings?.min_archives ?? 3} archived mails share a pattern (the same subject wording, the same sender, or the same word in the sender&apos;s domain) a suggestion appears here.</p>
-            {suggestions?.progress?.length ? <ul className="mt-1.5 space-y-0.5 text-[11px] text-ink-500">{suggestions.progress.map((p) => <li key={`${p.recipe}:${p.bucket}`} className="flex justify-between gap-2"><span className="truncate" title={p.bucket}>{p.label || p.bucket}</span><span className="shrink-0 font-mono">{p.count} / {p.needed}</span></li>)}</ul> : null}
+            <p className="mt-1 text-[11px] text-ink-500">{suggestions?.evidence_rule || "Counts flagged mail a person archived (Complete). 'No action' and 'Request review' do not count."}{suggestions?.counts ? ` Currently ${suggestions.counts.archived_flagged} archived flagged mail(s) in the window.` : ""}</p>
+            {suggestions?.progress?.length ? <ul className="mt-1.5 space-y-1 text-[11px] text-ink-500">{suggestions.progress.map((p) => (
+              <li key={`${p.recipe}:${p.bucket}`}>
+                <div className="flex justify-between gap-2"><span className="truncate" title={p.bucket}>{p.label || p.bucket}</span><span className={`shrink-0 font-mono ${p.blocked_by?.length ? "text-review-fg" : ""}`}>{p.count} / {p.needed}{p.blocked_by?.length ? " · blocked" : ""}</span></div>
+                {p.blocked_by?.length ? <div className="mt-0.5 rounded-md bg-review-bg/50 px-2 py-1 text-[10px] text-review-fg">{p.note} {p.blocked_by.map((b) => <Link key={b.case_id} href={`/cases/${b.case_id}`} className="ml-1 font-mono underline">{b.case_id.replace("case_", "")}</Link>)}</div> : null}
+              </li>
+            ))}</ul> : null}
           </div>
         ) : (
           <div className="mt-2 rounded-xl border border-orange-200 bg-[#fffaf5] p-3 text-xs">
@@ -179,6 +185,14 @@ function OperatorProfileCard({ suggestions, accepted, canEdit, onAccept, onDismi
             </div>
           </div>
         )}
+        {current && suggestions?.progress?.some((p) => p.blocked_by?.length) ? (
+          <ul className="mt-2 space-y-1 text-[11px] text-ink-500">{suggestions.progress.filter((p) => p.blocked_by?.length).map((p) => (
+            <li key={`${p.recipe}:${p.bucket}`}>
+              <div className="flex justify-between gap-2"><span className="truncate" title={p.bucket}>{p.label || p.bucket}</span><span className="shrink-0 font-mono text-review-fg">{p.count} / {p.needed} · blocked</span></div>
+              <div className="mt-0.5 rounded-md bg-review-bg/50 px-2 py-1 text-[10px] text-review-fg">{p.note} {p.blocked_by!.map((b) => <Link key={b.case_id} href={`/cases/${b.case_id}`} className="ml-1 font-mono underline">{b.case_id.replace("case_", "")}</Link>)}</div>
+            </li>
+          ))}</ul>
+        ) : null}
         <p className="mt-2 text-[11px] text-ink-500">Suggestions are never applied by themselves and never enable auto-send: Accept puts the change into the pending changes, and it only takes effect when you save a new version.</p>
       </section>
       <p className="mt-2 text-[11px] text-ink-500">Warnings are shown as a dialog{s.warning_dialog ? "" : " (off in policy)"}, recorded in the audit trail, and never lock an account. Edit the <span className="font-mono">operator_guard</span> section to change the rules.</p>

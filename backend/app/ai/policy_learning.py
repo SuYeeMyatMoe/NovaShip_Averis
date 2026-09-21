@@ -91,21 +91,25 @@ def gather(repo, settings: dict[str, Any]) -> dict[str, Any]:
     since = datetime.utcnow() - timedelta(days=settings["window_days"])
     events = _audit_by_action(repo, EVIDENCE_ACTIONS, since)
     archived_by: dict[str, Any] = {}
-    reviewed: set[str] = set()
+    reviewed_at: dict[str, datetime] = {}
     for e in events:
         if not e.case_id or e.actor_type != ActorType.USER:
             continue
         if e.action == "REVIEW_REQUESTED":
-            reviewed.add(e.case_id)
+            if e.case_id not in reviewed_at or e.timestamp > reviewed_at[e.case_id]:
+                reviewed_at[e.case_id] = e.timestamp
         elif e.action == "COMPLETED":
             cur = archived_by.get(e.case_id)
             if cur is None or e.timestamp > cur.timestamp:
                 archived_by[e.case_id] = e
+    # the latest human decision wins: a review that was later archived is an archive, not a review
+    reviewed = {cid for cid, t in reviewed_at.items() if cid not in archived_by or archived_by[cid].timestamp < t}
     emails = {e.id: e for e in repo.list_emails()}
     archived: list[Evidence] = []
     legit_subjects: list[str] = []      # normalised subjects of mail the desk treated as legitimate
     legit_domains: set[str] = set()     # sender domains the desk replied to / reviewed / cleared as SAFE
     conflicted: set[str] = set()        # sender buckets with contradicting decisions
+    conflicts: dict[str, list[dict[str, Any]]] = defaultdict(list)   # subject_norm / bucket -> the human decisions that block a rule
     for c in repo.list_cases():
         email = emails.get(c.source_email_id)
         if not email or not email.sender:
@@ -119,6 +123,10 @@ def gather(repo, settings: dict[str, Any]) -> dict[str, Any]:
                 legit_domains.add(_domain_of(email.sender))
             if flagged:
                 conflicted.add(bucket)
+                why = "replied to" if replied else "sent to human review"
+                entry = {"case_id": c.id, "decision": why, "status": c.status.value}
+                conflicts[normalise_text(email.subject)].append(entry)
+                conflicts[bucket].append(entry)
             continue
         ev = archived_by.get(c.id)
         if c.status != CaseStatus.COMPLETED or ev is None or c.updated_at < since:
@@ -128,7 +136,7 @@ def gather(repo, settings: dict[str, Any]) -> dict[str, Any]:
             "status": c.status.value, "when": ev.timestamp.isoformat(), "by": ev.actor_id,
             "subject_norm": normalise_text(email.subject), "domain": _domain_of(email.sender), "bucket": bucket,
         }))
-    return {"archived": archived, "legit_subjects": legit_subjects, "legit_domains": legit_domains, "conflicted": conflicted}
+    return {"archived": archived, "legit_subjects": legit_subjects, "legit_domains": legit_domains, "conflicted": conflicted, "conflicts": dict(conflicts)}
 
 
 def _public(ev: Evidence) -> dict[str, Any]:
@@ -160,10 +168,18 @@ def recipe_block_phrase(data: dict[str, Any], policy: dict[str, Any], settings: 
         for g in _ngrams(ev["subject_norm"]):
             by_phrase[g].append(ev)
     legit = [f" {s} " for s in data["legit_subjects"]]
+    conflicts = data.get("conflicts") or {}
+    blocked: dict[frozenset, tuple[str, list[Evidence], list[dict[str, Any]]]] = {}
     # every window of one campaign subject is supported by the same mails: keep only the longest phrase per support set
     by_support: dict[frozenset, tuple[str, list[Evidence]]] = {}
     for g, evs in by_phrase.items():
         if any(f" {g} " in s for s in legit):
+            # enough archives but a person also reviewed / replied to mail with this wording: say so instead of staying silent
+            key = frozenset(e["case_id"] for e in evs)
+            if len(key) >= needed:
+                why = [d for subj, ds in conflicts.items() if f" {g} " in f" {subj} " for d in ds]
+                if why and (key not in blocked or len(g.split()) > len(blocked[key][0].split())):
+                    blocked[key] = (g, evs, why)
             continue
         key = frozenset(e["case_id"] for e in evs)
         best = by_support.get(key)
@@ -173,6 +189,11 @@ def recipe_block_phrase(data: dict[str, Any], policy: dict[str, Any], settings: 
     candidates = sorted(by_support.values(), key=lambda kv: (-len(kv[1]), -len(kv[0].split()), kv[0]))
     items: list[dict[str, Any]] = []
     progress: list[dict[str, Any]] = []
+    for g, evs, why in blocked.values():
+        n = len({e["case_id"] for e in evs})
+        label = f'subject "{g[:48]}{"…" if len(g) > 48 else ""}"'
+        progress.append({"recipe": "block_phrase", "kind": "phrase", "bucket": g, "label": label, "count": n, "needed": needed,
+                         "blocked_by": why[:3], "note": f"{n} archived, but {len(why)} mail(s) with this wording were {why[0]['decision']}; the desk never blocks wording a person kept."})
     chosen: list[str] = []
     for g, evs in candidates:
         if any(f" {g} " in f" {c} " for c in chosen):
@@ -245,11 +266,21 @@ def recipe_block_sender(data: dict[str, Any], policy: dict[str, Any], settings: 
     protected = {str(x).lower() for x in (security.get("trusted_domains") or [])} | {str(x).lower() for x in (security.get("partner_domains") or [])}
     needed = settings["min_archives"]
     by_bucket: dict[str, list[Evidence]] = defaultdict(list)
+    held: dict[str, list[Evidence]] = defaultdict(list)
     for ev in data["archived"]:
         if ev["bucket"] not in data["conflicted"]:
             by_bucket[ev["bucket"]].append(ev)
+        else:
+            held[ev["bucket"]].append(ev)
     items: list[dict[str, Any]] = []
     progress: list[dict[str, Any]] = []
+    conflicts = data.get("conflicts") or {}
+    for bucket, evs in held.items():
+        n = len(evs)
+        if n >= needed:
+            why = (conflicts.get(bucket) or [])[:3]
+            progress.append({"recipe": "block_sender", "kind": "sender", "bucket": bucket, "label": f"sender {bucket}", "count": n, "needed": needed,
+                             "blocked_by": why, "note": f"{n} archived, but a mail from this sender was {why[0]['decision'] if why else 'kept by a person'}; resolve that case to unlock."})
     for bucket, evs in sorted(by_bucket.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         domain = bucket.split("@")[-1]
         if bucket in current or domain in current or domain in protected:
@@ -289,5 +320,7 @@ def suggestions(repo, policy: dict[str, Any]) -> dict[str, Any]:
         found, pending = recipe(data, policy, settings)
         items.extend(s for s in found if s["id"] not in decided)
         progress.extend(pending)
-    progress.sort(key=lambda p: (-p["count"], p["label"]))
-    return {"items": items, "progress": progress[:3], "settings": settings, "total": len(items)}
+    progress.sort(key=lambda p: (0 if p.get("blocked_by") else 1, -p["count"], p["label"]))   # blocked-but-ready first: that is what a person can act on
+    return {"items": items, "progress": progress[:5], "settings": settings, "total": len(items),
+            "counts": {"archived_flagged": len(data["archived"]), "conflicted_senders": len(data["conflicted"])},
+            "evidence_rule": "Counts mail the security gate flagged and a person then archived (Complete). 'No action' and 'Request review' do not count; a review or a reply on the same wording/sender blocks the rule."}

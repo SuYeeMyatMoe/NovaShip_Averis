@@ -254,3 +254,26 @@ def test_accepting_a_phrase_blocks_the_campaign_from_any_new_sender():
         assert all(x["bucket"] != normalise_text(subject) for x in _suggestions()["items"])
     finally:
         _reset_policy()
+
+
+def test_a_pattern_held_back_by_a_review_is_explained_instead_of_hidden():
+    """Five archived spam mails share a subject, one more with that subject was sent to human review: the rule stays
+    unproposed (a person kept that mail) but the card says so, with the case to resolve."""
+    _reset_policy()
+    subject = "Bitcoin investment opportunity - guaranteed 300% return"
+    body = "Send bitcoin now, you have won a guaranteed return. Verify your account to claim."
+    ids = [_ingest(f"spam{i}@offer-{i}.biz", subject=subject, body=body) for i in range(5)]
+    for cid in ids:
+        assert client.post(f"/cases/{cid}/complete", headers=SUP).status_code == 200
+    reviewed = _ingest("winner@prize-claims.info", subject=subject, body=body)
+    assert client.post(f"/cases/{reviewed}/request-review", json={"note": "check"}, headers=SUP).status_code == 200
+    s = _suggestions()
+    assert all("bitcoin investment" not in x["bucket"] for x in s["items"]), "a reviewed mail with this wording blocks the rule"
+    held = [p for p in s["progress"] if p["recipe"] == "block_phrase" and "bitcoin investment" in p["bucket"]]
+    assert held and held[0]["count"] == 5 and held[0]["blocked_by"][0]["case_id"] == reviewed and "human review" in held[0]["blocked_by"][0]["decision"]
+    assert "never blocks wording a person kept" in held[0]["note"]
+    assert s["counts"]["archived_flagged"] >= 5 and "No action" in s["evidence_rule"]
+    # resolving the reviewed mail (archiving it too) unlocks the suggestion
+    assert client.post(f"/cases/{reviewed}/complete", headers=SUP).status_code == 200
+    s2 = _suggestions()
+    assert any("bitcoin investment" in x["bucket"] and x["count"] == 6 for x in s2["items"])
