@@ -17,6 +17,9 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Optional
+import logging
+
+log = logging.getLogger("novaship.pipeline")
 
 from app.ai.anomaly import detect_anomalies
 from app.ai.assistant import detect_language
@@ -107,8 +110,12 @@ class Pipeline:
             data = attachment_bytes.get(path, b"")
             validate_file_size(len(data))
             rr = read_document(name, data)
-            pointer = f"{provider}/{eid}/{name}"
-            self.repo.save_blob(pointer, data)
+            pointer: Optional[str] = f"{provider}/{eid}/{name}"
+            try:
+                self.repo.save_blob(pointer, data)
+            except Exception as exc:  # storage bucket missing/unauthorised: keep the parsed text, lose only the original download
+                log.warning("original of %s not stored (%s); the case still processes from the bytes in hand", name, type(exc).__name__)
+                pointer = None
             dup_att = self.repo.find_attachment_by_checksum(rr.checksum) if data else None
             atts.append(AttachmentMeta(
                 id=f"att_{eid}_{name.rsplit('.',1)[0].split('_')[-1]}_{rr.checksum[:8]}", source_email_id=eid, file_name=name, file_type=rr.file_type,

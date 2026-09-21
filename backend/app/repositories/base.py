@@ -153,6 +153,10 @@ class BaseRepository(ABC):
     def list_mailboxes(self) -> list[UserMailbox]:
         return list(self.__dict__.setdefault("_mailboxes", {}).values())
 
+    def mailbox_storage_ready(self) -> bool:
+        """Whether connected mailboxes can be stored (a migration gate on Supabase; always true elsewhere)."""
+        return True
+
     def save_mailbox(self, mailbox: UserMailbox) -> None:
         self.__dict__.setdefault("_mailboxes", {})[mailbox.user_id] = mailbox
 

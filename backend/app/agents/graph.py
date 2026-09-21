@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import atexit
 import os
+import time
+from datetime import datetime
 from contextlib import ExitStack
 from functools import lru_cache
 from typing import Any, Optional
@@ -27,6 +29,7 @@ from langgraph.types import Command
 
 from app.agents.nodes import Nodes
 from app.agents.state import GraphState
+from app.contracts.schemas import ActorType, AgentRunInfo
 from app.repositories.base import BaseRepository
 
 
@@ -114,17 +117,55 @@ class CaseAgent:
     def _cfg(self, case_id: str) -> dict[str, Any]:
         return {"configurable": {"thread_id": case_id}}
 
-    def run(self, case_id: str, actor_id: str = "agent") -> dict[str, Any]:
+    def run(self, case_id: str, actor_id: str = "agent", mode: str = "single") -> dict[str, Any]:
         case = self.repo.get_case(case_id)
         if case is None:
             raise ValueError(f"unknown case {case_id}")
         init: GraphState = {"case_id": case_id, "email_id": case.source_email_id, "actor_id": actor_id, "trace": [], "errors": [], "rag_context": [], "notified": False}
-        self.graph.invoke(init, config=self._cfg(case_id))
-        return self.state(case_id)
+        t0 = time.time()
+        try:
+            self.graph.invoke(init, config=self._cfg(case_id))
+        except Exception as exc:
+            self._record_run(case_id, actor_id, mode, t0, "AGENT_RUN", error=exc)
+            raise
+        st = self.state(case_id)
+        st["agent_run"] = self._record_run(case_id, actor_id, mode, t0, "AGENT_RUN", paused=bool(st["paused"]))
+        return st
 
     def resume(self, case_id: str, decision: dict[str, Any]) -> dict[str, Any]:
-        self.graph.invoke(Command(resume=decision), config=self._cfg(case_id))
-        return self.state(case_id)
+        actor_id = str(decision.get("user_id") or "agent")
+        t0 = time.time()
+        try:
+            self.graph.invoke(Command(resume=decision), config=self._cfg(case_id))
+        except Exception as exc:
+            self._record_run(case_id, actor_id, "single", t0, "AGENT_RESUMED", error=exc, decision=str(decision.get("action") or ""))
+            raise
+        st = self.state(case_id)
+        st["agent_run"] = self._record_run(case_id, actor_id, "single", t0, "AGENT_RESUMED", paused=bool(st["paused"]), decision=str(decision.get("action") or ""))
+        return st
+
+    def _record_run(self, case_id: str, actor_id: str, mode: str, t0: float, action: str, *, paused: bool = False,
+                    error: Optional[Exception] = None, decision: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """Persist the outcome on the case (pending -> paused/completed/error) and audit it. Never raises."""
+        try:
+            case = self.repo.get_case(case_id)   # re-read: the nodes saved the case while the graph ran
+            if case is None:
+                return None
+            prev = case.agent_run
+            info = AgentRunInfo(
+                runs=(prev.runs + 1) if prev else 1, last_run_at=datetime.utcnow(), last_run_by=actor_id,
+                result="error" if error else ("paused" if paused else "completed"), status_after=case.status,
+                ms=int((time.time() - t0) * 1000), mode=mode if mode in ("single", "batch") else "single",
+                decision=decision or (prev.decision if prev and not error else None), error=type(error).__name__ if error else None,
+            )
+            case.agent_run = info
+            self.repo.save_case(case)
+            from app.pipeline.orchestrator import Pipeline
+
+            Pipeline(self.repo).audit(case_id, ActorType.USER if actor_id not in ("agent", "scheduler") else ActorType.SYSTEM, actor_id, action, after=info.summary())
+            return info.summary()
+        except Exception:  # bookkeeping must never mask the run result
+            return None
 
     def state(self, case_id: str) -> dict[str, Any]:
         snap = self.graph.get_state(self._cfg(case_id))

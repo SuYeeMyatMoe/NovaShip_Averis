@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { AUTH_PATHS, api, getSession, logout, redirectToLogin, type NotificationItem } from "@/lib/api";
+import { AUTH_PATHS, api, getSession, logout, redirectToLogin, type NewMailItem, type NotificationFeed, type NotificationItem } from "@/lib/api";
 import { ROLE_LABELS } from "@/components/auth";
 
 type Me = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; mailbox?: { connected: boolean; address?: string; status?: string; provider?: string } };
@@ -14,6 +14,7 @@ const NAV: { href: string; label: string; icon: string; perm?: string }[] = [
   { href: "/verification", label: "Seven fields", icon: "check" },
   { href: "/security", label: "Security", icon: "shield" },
   { href: "/agent", label: "AI agent", icon: "spark" },
+  { href: "/history", label: "History", icon: "history" },
   { href: "/audit", label: "Audit", icon: "audit", perm: "view_audit" },
   { href: "/policies", label: "Policies", icon: "policy", perm: "view_policy" },
   { href: "/welcome", label: "Guide", icon: "guide" },
@@ -98,29 +99,55 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
 function NotificationBell() {
   const [items, setItems] = useState<NotificationItem[]>([]);
+  const [mail, setMail] = useState<NewMailItem[]>([]);
   const [open, setOpen] = useState(false);
   const [seen, setSeen] = useState<Set<string>>(new Set());
+  const [closed, setClosed] = useState<Set<string>>(new Set());
+  const [prevMailIds, setPrevMailIds] = useState<Set<string> | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem("novaship.seenNotifications");
       if (raw) setSeen(new Set(JSON.parse(raw) as string[]));
+      const rawClosed = localStorage.getItem("novaship.closedNewMail");
+      if (rawClosed) setClosed(new Set(JSON.parse(rawClosed) as string[]));
     } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
-    const load = () => { api<{ items: NotificationItem[] }>("/me/notifications").then((d) => setItems(d.items || [])).catch(() => {}); };
+    const load = () => {
+      api<NotificationFeed>("/me/notifications").then((d) => {
+        setItems(d.items || []);
+        const incoming = d.new_mail || [];
+        setMail(incoming);
+        // a mail that was not in the previous poll -> short toast, so the arrival is visible even with the bell closed
+        setPrevMailIds((prev) => {
+          if (prev) {
+            const fresh = incoming.filter((m) => !prev.has(m.case_id));
+            if (fresh.length) { setFlash(`${fresh.length} new mail in ${fresh[0].mailbox || "your mailbox"}: ${fresh[0].subject}`); window.setTimeout(() => setFlash(null), 8000); }
+          }
+          return new Set(incoming.map((m) => m.case_id));
+        });
+      }).catch(() => {});
+    };
     load();
     const t = window.setInterval(load, 30000);
     return () => window.clearInterval(t);
   }, []);
 
   const keyOf = (n: NotificationItem) => `${n.case_id}:${n.updated_at}`;
-  const unseen = items.filter((n) => !seen.has(keyOf(n))).length;
+  const visibleMail = mail.filter((m) => !closed.has(m.case_id));
+  const unseen = items.filter((n) => !seen.has(keyOf(n))).length + visibleMail.length;
 
   const persistSeen = (next: Set<string>) => {
     setSeen(next);
     try { localStorage.setItem("novaship.seenNotifications", JSON.stringify([...next])); } catch { /* ignore */ }
+  };
+  const closeMail = (ids: string[]) => {
+    const next = new Set([...closed, ...ids]);
+    setClosed(next);
+    try { localStorage.setItem("novaship.closedNewMail", JSON.stringify([...next].slice(-500))); } catch { /* ignore */ }
   };
 
   const toggle = () => {
@@ -129,19 +156,49 @@ function NotificationBell() {
       return !was;
     });
   };
+  const when = (iso: string) => { try { return new Date(iso).toLocaleString(undefined, { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" }); } catch { return iso; } };
 
   return (
     <div className="relative lg:w-full">
-      <button type="button" onClick={toggle} aria-expanded={open} aria-label={unseen ? `${unseen} notifications needing a person` : "Notifications"} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-ink-700 transition hover:border-accent hover:text-accent-fg lg:w-full lg:justify-center">
+      <button type="button" onClick={toggle} aria-expanded={open} aria-label={unseen ? `${unseen} notifications` : "Notifications"} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-ink-700 transition hover:border-accent hover:text-accent-fg lg:w-full lg:justify-center">
         <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M6 8a6 6 0 1 1 12 0c0 7 3 7 3 9H3s3-2 3-9" /><path d="M10 21a2 2 0 0 0 4 0" /></svg>
         <span className="hidden sm:inline">Alerts</span>
         {unseen > 0 && <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-white">{unseen > 9 ? "9+" : unseen}</span>}
       </button>
+      {flash && !open && (
+        <div role="status" className="fixed bottom-4 right-4 z-50 max-w-[22rem] rounded-xl border border-orange-200 bg-white px-3 py-2 text-xs text-ink-800 shadow-lg">
+          <span className="font-semibold text-accent">New mail</span> · {flash}
+          <button type="button" onClick={() => setFlash(null)} className="ml-2 text-ink-400 hover:text-ink-800" aria-label="Dismiss">×</button>
+        </div>
+      )}
       {open && (
         <div className="absolute right-0 z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-ink-200 bg-white shadow-lg lg:bottom-full lg:right-auto lg:left-0 lg:mb-2 lg:mt-0 lg:w-full">
-          <div className="border-b border-ink-100 px-3 py-2 text-[11px] font-semibold text-ink-800">Needs a person</div>
+          <div className="flex items-center justify-between border-b border-ink-100 px-3 py-2 text-[11px] font-semibold text-ink-800">
+            <span>New mail{visibleMail.length ? ` (${visibleMail.length})` : ""}</span>
+            {visibleMail.length > 0 && (
+              <span className="flex gap-2">
+                <Link href={`/cases/${visibleMail[0].case_id}`} onClick={() => { closeMail([visibleMail[0].case_id]); setOpen(false); }} className="font-semibold text-accent-fg hover:underline">Open latest</Link>
+                <button type="button" onClick={() => closeMail(visibleMail.map((m) => m.case_id))} className="text-ink-500 hover:text-ink-800">Clear all</button>
+              </span>
+            )}
+          </div>
+          {visibleMail.length === 0 ? <p className="px-3 py-3 text-center text-[11px] text-ink-500">No new mail in your mailbox.</p> : (
+            <ul className="max-h-56 overflow-y-auto">
+              {visibleMail.map((m) => (
+                <li key={m.case_id} className="flex items-stretch border-b border-ink-50">
+                  <Link href={`/cases/${m.case_id}`} onClick={() => { closeMail([m.case_id]); setOpen(false); }} className="min-w-0 flex-1 px-3 py-2 hover:bg-accent-bg">
+                    <div className="truncate text-xs font-semibold text-ink-900">{m.subject}</div>
+                    <div className="truncate text-[10px] text-ink-500">{m.sender} · {when(m.received_at)}</div>
+                    <div className="text-[10px] text-ink-500">{m.status.replace(/_/g, " ")}{m.action_required ? " · needs a person" : ""}</div>
+                  </Link>
+                  <button type="button" onClick={() => closeMail([m.case_id])} className="px-2 text-ink-400 hover:bg-ink-50 hover:text-ink-800" aria-label="Close notification" title="Close">×</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="border-b border-t border-ink-100 px-3 py-2 text-[11px] font-semibold text-ink-800">Needs a person</div>
           {items.length === 0 ? <p className="px-3 py-6 text-center text-xs text-ink-500">Queue is clear.</p> : (
-            <ul className="max-h-80 overflow-y-auto">
+            <ul className="max-h-64 overflow-y-auto">
               {items.map((n) => (
                 <li key={keyOf(n)}>
                   <Link href={`/cases/${n.case_id}`} onClick={() => setOpen(false)} className="block border-b border-ink-50 px-3 py-2 hover:bg-accent-bg">
@@ -181,6 +238,7 @@ function NavIcon({ name }: { name: string }) {
     shield: <path d="M12 3 19 6v5c0 4.7-3 7.9-7 10-4-2.1-7-5.3-7-10V6l7-3Z" />,
     spark: <path d="m12 2 1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9L12 2Zm7 14 .8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16Z" />,
     audit: <><path d="M6 3h9l3 3v15H6z" /><path d="M9 11h6M9 15h6M9 19h4" /></>,
+    history: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /><path d="M3.5 12H6" /></>,
     policy: <><path d="M12 3 4 6v5c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V6l-8-3Z" /><path d="m9 12 2 2 4-4" /></>,
     guide: <><circle cx="12" cy="12" r="8" /><path d="M12 10v5M12 7h.01" /></>,
   };

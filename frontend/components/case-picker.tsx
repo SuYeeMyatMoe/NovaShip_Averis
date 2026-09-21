@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { StatusBadge } from "@/components/ui";
 
-export type CaseSuggestion = { id: string; subject: string; sender: string; status: string; priority: string; mismatch_count: number; mailbox: string | null };
+export type CaseSuggestion = { id: string; subject: string; sender: string; status: string; priority: string; mismatch_count: number; mailbox: string | null; agent?: "pending" | "paused" | "done" };
 
 function useSuggestions(query: string, open: boolean) {
   const [items, setItems] = useState<CaseSuggestion[]>([]);
@@ -30,6 +30,8 @@ function Row({ s, active, onPick }: { s: CaseSuggestion; active: boolean; onPick
       <span className="w-28 shrink-0 font-mono text-[11px] text-accent-fg">{s.id.replace("case_", "")}</span>
       <span className="min-w-0 flex-1 truncate text-ink-800">{s.subject || "(no subject)"} <span className="text-ink-400">· {s.sender}</span></span>
       {s.mismatch_count > 0 && <span className="rounded-full bg-mismatch-bg px-1.5 text-[10px] font-semibold text-mismatch-fg">{s.mismatch_count} mismatch</span>}
+      {s.agent && s.agent !== "pending" && <span className={`rounded-full px-1.5 text-[10px] font-semibold ${s.agent === "paused" ? "bg-review-bg text-review-fg" : "bg-match-bg text-match-fg"}`} title="AI-agent run state">{s.agent === "paused" ? "paused" : "processed"}</span>}
+      {(!s.agent || s.agent === "pending") && <span className="rounded-full bg-ink-100 px-1.5 text-[10px] font-semibold text-ink-600" title="the AI agent has not run this case yet">not run</span>}
       <StatusBadge status={s.status} />
     </li>
   );

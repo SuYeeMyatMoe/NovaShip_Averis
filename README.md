@@ -744,6 +744,17 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 
 ## 12. Persistence and Supabase
 
+### Applying migrations
+
+`supabase/migrations/*.sql` are applied in order. Either paste each file into Supabase → SQL editor, or set `SUPABASE_DB_URL` (Supabase → Connect → URI, session pooler, with the database password) and run:
+
+```bash
+docker compose exec api python scripts/apply_migrations.py --dry-run
+```
+
+`--dry-run` lists which migrations are applied / pending (hand-applied ones are recognised by probes and recorded in `schema_migrations`); without the flag every pending file runs in its own transaction. `GET /health` reports `migrations.user_mailboxes`; while it is `false`, *Connect Outlook / Gmail* is disabled in the UI with a banner instead of failing silently.
+
+
 ### Memory mode
 
 `REPO_BACKEND=memory` loads `supabase/seed/snapshot.json` at startup. This mode is fast, deterministic, and suitable for demos and tests. Changes, registered users, and revoked sessions are lost when the API process restarts.

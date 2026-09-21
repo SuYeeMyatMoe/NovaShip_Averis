@@ -113,3 +113,37 @@ def test_local_embedder_can_match_supabase_vector_dimension(monkeypatch):
     embedder = Embedder()
     assert embedder.dims == 768
     assert len(embedder.embed_query("shipping instruction")) == 768
+
+
+def test_agent_run_is_recorded_on_the_case_pending_paused_completed():
+    """A run leaves a durable AgentRunInfo on the case (the History page reads it) and an AGENT_RUN / AGENT_RESUMED audit row."""
+    repo = MemoryRepository()
+    _load(repo, "email_004")
+    _load(repo, "email_001")
+    assert repo.get_case("case_email_004").agent_run is None, "pending until the agent runs"
+    agent = CaseAgent(repo)
+    st = agent.run("case_email_004", actor_id="u_sup_1")
+    info = repo.get_case("case_email_004").agent_run
+    assert info and info.result == "paused" and info.runs == 1 and info.last_run_by == "u_sup_1" and info.mode == "single" and info.ms >= 0
+    assert st["agent_run"]["result"] == "paused"
+    agent.resume("case_email_004", {"action": "request_review", "user_id": "u_sup_1", "note": "check"})
+    info = repo.get_case("case_email_004").agent_run
+    assert info.result == "completed" and info.runs == 2 and info.decision == "request_review"
+    clean = agent.run("case_email_001", actor_id="u_ops_1", mode="batch")
+    assert clean["agent_run"]["result"] == "completed" and repo.get_case("case_email_001").agent_run.mode == "batch"
+    actions = [e.action for e in repo.list_audit("case_email_004")]
+    assert "AGENT_RUN" in actions and "AGENT_RESUMED" in actions
+
+    # a crashing graph records result=error and still raises
+    class Boom:
+        def invoke(self, *a, **k):
+            raise RuntimeError("graph exploded")
+    agent.graph = Boom()
+    try:
+        agent.run("case_email_001", actor_id="u_ops_1")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected the graph error to propagate")
+    err = repo.get_case("case_email_001").agent_run
+    assert err.result == "error" and err.error == "RuntimeError" and err.runs == 2

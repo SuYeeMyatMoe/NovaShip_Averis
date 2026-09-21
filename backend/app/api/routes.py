@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -101,7 +101,15 @@ def _case_row(c, e) -> dict[str, Any]:
         "confidence": c.confidence, "assigned_user_id": c.assigned_user_id, "shared_with": c.shared_with, "status": c.status.value, "updated_at": c.updated_at.isoformat(),
         "summary": c.summary.text if c.summary else "", "errors": len([x for x in c.errors if not x.resolved]), "drafts": len(c.drafts),
         "mailbox_user_id": e.mailbox_user_id if e else None, "mailbox": e.mailbox_address if e else None,
+        "agent_run": c.agent_run.summary() if c.agent_run else None,
     }
+
+
+def _agent_state(c) -> str:
+    """pending (never run or last run errored) | paused | done."""
+    if c.agent_run is None or c.agent_run.result == "error":
+        return "pending"
+    return "paused" if c.agent_run.result == "paused" else "done"
 
 
 from app.services.reporting import dashboard_metrics as _dashboard_metrics  # noqa: E402  (shared with the Excel report)
@@ -115,7 +123,16 @@ def health():
         "cases": len(repo.list_cases()),
         "emails": len(repo.list_emails()),
     }
-    return {"status": "ok", "backend": type(repo).__name__, **counts, "time": datetime.utcnow().isoformat(), "llm": llm_posture()}
+    return {"status": "ok", "backend": type(repo).__name__, **counts, "time": datetime.utcnow().isoformat(), "llm": llm_posture(), "migrations": migration_posture(repo)}
+
+
+def migration_posture(repo) -> dict[str, Any]:
+    """Which optional schema pieces the persistence layer has; the UI turns a missing one into a banner instead of a silent loop."""
+    try:
+        ready = bool(repo.mailbox_storage_ready())
+    except Exception:
+        ready = False
+    return {"user_mailboxes": ready, "apply_with": "python backend/scripts/apply_migrations.py"}
 
 
 def llm_posture() -> dict[str, Any]:
@@ -143,7 +160,12 @@ def mailbox_providers() -> dict[str, Any]:
     from app.api.microsoft_auth_routes import microsoft_sign_in_enabled
     from app.connectors.email_connectors import shared_mailbox_configured
 
-    return {"google": google_sign_in_enabled(), "microsoft": microsoft_sign_in_enabled(), "shared_mailbox_configured": shared_mailbox_configured()}
+    try:
+        storage_ready = bool(get_repo().mailbox_storage_ready())
+    except Exception:
+        storage_ready = False
+    return {"google": google_sign_in_enabled(), "microsoft": microsoft_sign_in_enabled(), "shared_mailbox_configured": shared_mailbox_configured(),
+            "mailbox_storage_ready": storage_ready}
 
 
 def mailbox_summary(user_id: str) -> dict[str, Any]:
@@ -214,6 +236,7 @@ def my_notifications(user: UserRecord = Depends(require("view_case")), limit: in
     total = len(candidates)
     cap = max(1, min(limit, 50))
     items = [{
+        "kind": "needs_person",
         "case_id": case.id,
         "subject": (case.summary.text if case.summary and case.summary.text else case.id),
         "status": case.status.value,
@@ -221,7 +244,31 @@ def my_notifications(user: UserRecord = Depends(require("view_case")), limit: in
         "reason": _notification_reason(case, user.id),
         "updated_at": case.updated_at.isoformat(),
     } for case in candidates[:cap]]
-    return {"items": items, "total": total}
+    new_mail = _new_mail_notifications(repo, user.id, cap)
+    return {"items": items, "total": total, "new_mail": new_mail, "new_mail_total": len(new_mail)}
+
+
+NEW_MAIL_WINDOW_H = 48
+
+
+def _new_mail_notifications(repo, user_id: str, cap: int) -> list[dict[str, Any]]:
+    """Cases that arrived through the caller's own connected mailbox (Outlook/Gmail) in the last 48 h, newest first.
+    The bell shows them as 'New mail'; the browser remembers which ones were closed."""
+    since = datetime.utcnow() - timedelta(hours=NEW_MAIL_WINDOW_H)
+    recent = sorted((c for c in repo.list_cases() if c.created_at >= since), key=lambda c: c.created_at, reverse=True)
+    out: list[dict[str, Any]] = []
+    for case in recent:
+        email = repo.get_email(case.source_email_id)
+        if not email or email.mailbox_user_id != user_id:
+            continue
+        out.append({
+            "kind": "new_mail", "case_id": case.id, "email_id": email.id, "mailbox": email.mailbox_address,
+            "subject": email.subject or case.id, "sender": email.sender, "status": case.status.value, "priority": case.priority.value,
+            "action_required": bool(case.action_required), "received_at": email.received_at.isoformat(), "created_at": case.created_at.isoformat(),
+        })
+        if len(out) >= cap:
+            break
+    return out
 
 
 @router.get("/users")
@@ -377,16 +424,20 @@ def list_cases(
     sender: Optional[str] = None, q: Optional[str] = None, min_confidence: Optional[float] = None, security: Optional[str] = None,
     date_from: Optional[str] = None, date_to: Optional[str] = None, attention: Optional[str] = Query(default=None, description="yes to restrict to human-needed cases"),
     mailbox: Optional[str] = Query(default=None, description="user id of a connected mailbox, 'me', or 'shared'"),
+    agent: Optional[str] = Query(default=None, description="pending (not run by the AI agent yet) | paused | done | any"),
     limit: int = 100, offset: int = 0, sort: str = "updated_desc",
     user: UserRecord = Depends(require("view_case")),
 ):
     if mailbox == "me":
         mailbox = user.id
+    agent = (agent or "any").lower()
     repo = get_repo()
     emails = {e.id: e for e in repo.list_emails()}
     rows = []
     for c in repo.list_cases():
         e = emails.get(c.source_email_id)
+        if agent in ("pending", "paused", "done") and _agent_state(c) != agent:
+            continue
         if status and c.status.value != status:
             continue
         if priority and c.priority.value != priority:
@@ -424,7 +475,8 @@ def list_cases(
             if q.lower() not in hay:
                 continue
         rows.append(_case_row(c, e))
-    key = {"updated_desc": (lambda r: r["updated_at"], True), "received_desc": (lambda r: r["received_at"] or "", True), "priority": (lambda r: {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}[r["priority"]], False), "confidence": (lambda r: r["confidence"], False)}.get(sort, (lambda r: r["updated_at"], True))
+    key = {"updated_desc": (lambda r: r["updated_at"], True), "received_desc": (lambda r: r["received_at"] or "", True), "priority": (lambda r: {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}[r["priority"]], False), "confidence": (lambda r: r["confidence"], False),
+           "run_desc": (lambda r: (r["agent_run"] or {}).get("last_run_at") or "", True)}.get(sort, (lambda r: r["updated_at"], True))
     rows.sort(key=key[0], reverse=key[1])
     return {"total": len(rows), "items": rows[offset: offset + limit]}
 
@@ -454,7 +506,8 @@ def suggest_cases(q: str = "", limit: int = 10, user: UserRecord = Depends(requi
         else:
             rank = 3
         scored.append((rank, c.updated_at.isoformat(), {"id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "status": c.status.value,
-                                                        "priority": c.priority.value, "mismatch_count": c.mismatch_count, "mailbox": e.mailbox_address if e else None}))
+                                                        "priority": c.priority.value, "mismatch_count": c.mismatch_count, "mailbox": e.mailbox_address if e else None,
+                                                        "agent": _agent_state(c)}))
     ranked = sorted(scored, key=lambda t: t[1], reverse=True)          # newest first ...
     ranked.sort(key=lambda t: t[0])                                       # ... within rank (stable)
     return {"items": [row for _rank, _ts, row in ranked[:cap]], "total": len(ranked)}
@@ -523,7 +576,7 @@ def get_document(case_id: str, attachment_id: str, user: UserRecord = Depends(re
     a = next((a for a in e.attachments if a.id == attachment_id), None)
     if not a:
         raise HTTPException(404, detail={"error": "attachment not found", "category": "ATTACHMENT_DOWNLOAD_ERROR"})
-    signed = getattr(s.repo, "signed_url", lambda *_: None)(a.storage_pointer, 300)
+    signed = getattr(s.repo, "signed_url", lambda *_: None)(a.storage_pointer, 300) if a.storage_pointer else None
     return {**a.model_dump(mode="json"), "signed_url": signed, "expires_in_s": 300 if signed else None}
 
 
@@ -535,13 +588,16 @@ def get_document_raw(case_id: str, attachment_id: str, user: UserRecord = Depend
     a = next((a for a in e.attachments if a.id == attachment_id), None)
     if not a:
         raise HTTPException(404, detail={"error": "attachment not found", "category": "ATTACHMENT_DOWNLOAD_ERROR"})
-    data = s.repo.get_blob(a.storage_pointer)
+    data = s.repo.get_blob(a.storage_pointer) if a.storage_pointer else None
     if data is None:
         try:
             f = resolve_bundle_attachment(BUNDLE_DIR, f"attachments/{safe_filename(a.file_name)}")
         except UnsafeUpload as exc:
             raise HTTPException(400, detail={"error": str(exc), "category": "ATTACHMENT_DOWNLOAD_ERROR"})
-        data = f.read_bytes() if f.exists() else b""
+        data = f.read_bytes() if f.exists() else None
+    if data is None:
+        raise HTTPException(404, detail={"error": "the original file is not stored for this attachment (storage bucket unavailable when it arrived); the extracted text is still available",
+                                         "category": "ATTACHMENT_DOWNLOAD_ERROR", "recovery": "Check SUPABASE_STORAGE_BUCKET and /health.storage, then fetch the mail again"})
     media = {"pdf": "application/pdf", "txt": "text/plain; charset=utf-8", "md": "text/plain; charset=utf-8", "csv": "text/csv; charset=utf-8", "tsv": "text/tab-separated-values; charset=utf-8",
              "html": "text/plain; charset=utf-8", "htm": "text/plain; charset=utf-8", "eml": "message/rfc822", "rtf": "application/rtf",
              "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -729,6 +785,55 @@ def batch(req: BatchRequest, user: UserRecord = Depends(require("batch"))):
 @router.get("/export/cases.csv", response_class=PlainTextResponse)
 def export_csv(user: UserRecord = Depends(require("export_data"))):
     return svc().export_csv()
+
+
+# ---------------------------------------------------------------- agent-run history
+def history_rows(repo, user_id: str, *, result: str = "done", run_by: Optional[str] = None, date_from: Optional[str] = None,
+                 date_to: Optional[str] = None, q: Optional[str] = None) -> list[dict[str, Any]]:
+    """Cases the AI agent has run, newest run first. `result`: done | paused | error | all."""
+    from app.services.reporting import history_rows as _rows
+
+    return _rows(repo, user_id, result=result, run_by=run_by, date_from=date_from, date_to=date_to, q=q)
+
+
+@router.get("/history")
+def agent_history(result: str = "done", run_by: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None,
+                  q: Optional[str] = None, limit: int = 50, offset: int = 0, user: UserRecord = Depends(require("view_case"))):
+    """Processed cases: every case the AI agent has run (default: finished runs), each row opens the case."""
+    rows = history_rows(get_repo(), user.id, result=result, run_by=run_by, date_from=date_from, date_to=date_to, q=q)
+    cap = max(1, min(limit, 500))
+    counts = {"done": 0, "paused": 0, "error": 0}
+    for c in get_repo().list_cases():
+        if c.agent_run:
+            counts["done" if c.agent_run.result == "completed" else c.agent_run.result] += 1
+    return {"total": len(rows), "items": rows[offset: offset + cap], "counts": counts}
+
+
+@router.get("/export/history.xlsx")
+def export_history_xlsx(result: str = "all", run_by: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None,
+                        q: Optional[str] = None, user: UserRecord = Depends(require("export_data"))):
+    from app.services.reporting import build_history_xlsx
+
+    rows = history_rows(get_repo(), user.id, result=result, run_by=run_by, date_from=date_from, date_to=date_to, q=q)
+    return Response(content=build_history_xlsx(rows, generated_by=user.id), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename=novaship-history.xlsx"})
+
+
+@router.get("/export/history.csv", response_class=PlainTextResponse)
+def export_history_csv(result: str = "all", run_by: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None,
+                       q: Optional[str] = None, user: UserRecord = Depends(require("export_data"))):
+    import csv
+    import io
+
+    from app.services.reporting import HISTORY_COLUMNS
+
+    rows = history_rows(get_repo(), user.id, result=result, run_by=run_by, date_from=date_from, date_to=date_to, q=q)
+    out = io.StringIO()
+    w = csv.DictWriter(out, fieldnames=HISTORY_COLUMNS, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow(r)
+    return out.getvalue()
 
 
 @router.get("/export/cases.xlsx")

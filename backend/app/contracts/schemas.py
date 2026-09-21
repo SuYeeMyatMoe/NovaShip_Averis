@@ -385,7 +385,7 @@ class AttachmentMeta(BaseModel):
     file_type: str
     size_bytes: int = 0
     checksum: str = ""
-    storage_pointer: str = ""
+    storage_pointer: Optional[str] = None   # None when the original could not be stored (bucket unavailable); the text was still parsed
     detected_type: DocumentType = DocumentType.UNKNOWN_DOCUMENT
     detection_confidence: float = 0.0
     extraction_status: ExtractionStatus = ExtractionStatus.PENDING
@@ -430,6 +430,23 @@ class ProcessingError(BaseModel):
     resolved: bool = False
 
 
+class AgentRunInfo(BaseModel):
+    """Durable record of the last LangGraph agent run on a case (the checkpoint alone is not queryable)."""
+    runs: int = 1
+    last_run_at: datetime = Field(default_factory=datetime.utcnow)
+    last_run_by: str = "agent"
+    result: Literal["completed", "paused", "error"] = "completed"
+    status_after: CaseStatus = CaseStatus.RECEIVED
+    ms: int = 0
+    mode: Literal["single", "batch"] = "single"
+    decision: Optional[str] = None      # human decision that finished a paused run
+    error: Optional[str] = None         # exception name when result == "error"
+
+    def summary(self) -> dict[str, Any]:
+        return {"result": self.result, "last_run_at": self.last_run_at.isoformat(), "last_run_by": self.last_run_by, "runs": self.runs,
+                "ms": self.ms, "mode": self.mode, "status_after": self.status_after.value, "decision": self.decision, "error": self.error}
+
+
 class CaseRecord(BaseModel):
     id: str
     source_email_id: str
@@ -462,6 +479,7 @@ class CaseRecord(BaseModel):
     errors: list[ProcessingError] = Field(default_factory=list)
     trace: list[DecisionTrace] = Field(default_factory=list)
     processing_ms: int = 0
+    agent_run: Optional[AgentRunInfo] = None   # None = the AI agent has not run on this case yet ("pending")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

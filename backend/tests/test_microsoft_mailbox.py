@@ -230,3 +230,25 @@ def test_outlook_mailbox_fetch_tags_case_and_reply_leaves_from_outlook(monkeypat
     assert graph.sent and graph.sent[0]["message"]["toRecipients"][0]["emailAddress"]["address"] == "docs@vitalsolutions.sg"
     sent_event = [e for e in repo.list_audit(case.id) if e.action == "NOTIFICATION_SENT"][-1]
     assert sent_event.after["from"] == "ops@contoso.com" and sent_event.after["mode"] == "gmail"
+
+
+def test_connect_storage_failure_returns_to_the_page_not_login(monkeypatch):
+    """A failed Connect must not bounce a signed-in user through /login (where the error was never shown)."""
+    _ms_env(monkeypatch)
+    token = _login(monkeypatch, email="storage@contoso.com")
+    start = client.get("/auth/microsoft/start", params={"intent": "connect", "next": "/welcome"}, headers={"Authorization": f"Bearer {token}"}).json()
+    state = parse_qs(urlparse(start["url"]).query)["state"][0]
+    _fake_ms(monkeypatch, email="storage@contoso.com", scopes="Mail.Read Mail.Send offline_access User.Read", refresh="rt")
+    from app.repositories.supabase_repo import MailboxStorageMissing
+
+    def boom(self, mailbox):
+        raise MailboxStorageMissing("user_mailboxes table missing")
+    monkeypatch.setattr(type(get_repo()), "save_mailbox", boom)
+    r = client.get("/auth/microsoft/callback", params={"code": "c", "state": state})
+    assert r.status_code == 302 and r.headers["location"] == "http://localhost:3000/welcome?mailbox_error=mailbox_table_missing"
+    # a *login* failure still lands on /login
+    state2 = parse_qs(urlparse(client.get("/auth/microsoft/start", params={"intent": "login"}).json()["url"]).query)["state"][0]
+    monkeypatch.setattr(ms_auth, "_exchange_code", lambda code: (_ for _ in ()).throw(RuntimeError("no")))
+    assert client.get("/auth/microsoft/callback", params={"code": "c", "state": state2}).headers["location"].endswith("/login?error=exchange_failed")
+    assert client.get("/auth/config").json()["mailbox_storage_ready"] is True
+    assert client.get("/health").json()["migrations"]["user_mailboxes"] is True

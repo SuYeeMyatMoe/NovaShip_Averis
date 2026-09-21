@@ -34,6 +34,7 @@ Required for the existing live backend:
 |---|---|
 | `REPO_BACKEND` | `supabase` |
 | `TENANT_ID` | `tenant_april` |
+| `SUPABASE_DB_URL` | Postgres URI for `backend/scripts/apply_migrations.py` (not needed at runtime; keep it out of Vercel) |
 | `SUPABASE_URL` | existing project URL |
 | `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` | server-only Supabase credential |
 | `SUPABASE_STORAGE_BUCKET` | `documents` |

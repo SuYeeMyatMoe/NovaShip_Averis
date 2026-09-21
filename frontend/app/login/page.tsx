@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import { GOOGLE_ERRORS, api, getSession, login, startGoogle, startMicrosoft } from "@/lib/api";
+import { CONNECT_ERROR_CODES, GOOGLE_ERRORS, api, getSession, login, startGoogle, startMicrosoft } from "@/lib/api";
 import { AuthError, AuthLayout, Field, GoogleButton, MicrosoftButton, OrDivider, PasswordInput, ROLE_LABELS, SubmitButton, inputClass } from "@/components/auth";
 
 type DemoAccount = { email: string; display_name: string; roles: string[] };
@@ -26,8 +26,12 @@ function LoginForm() {
   const [msBusy, setMsBusy] = useState(false);
 
   useEffect(() => {
-    if (getSession()) { router.replace(next); return; }
     const code = sp.get("error");
+    if (getSession()) {
+      // still signed in: a mailbox-connect failure must be read, not bounced past
+      if (code && CONNECT_ERROR_CODES.has(code)) { router.replace(`/welcome?mailbox_error=${encodeURIComponent(code)}`); return; }
+      router.replace(next); return;
+    }
     if (code) setErr(GOOGLE_ERRORS[code] || `Sign-in failed (${code}).`);
     api<AuthConfig>("/auth/config", {}, { auth: false }).then(setCfg).catch(() => setCfg(null));
   }, [router, next, sp]);

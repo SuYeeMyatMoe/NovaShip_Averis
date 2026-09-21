@@ -151,7 +151,14 @@ def google_start(role: Optional[str] = None, next: str = "/welcome", authorizati
     return {"url": f"{AUTH_URI}?{query}", "redirect_uri": redirect_uri(), "connect": bool(connect_user_id)}
 
 
-def _fail(reason: str) -> RedirectResponse:
+def _fail(reason: str, st: Optional[dict[str, Any]] = None) -> RedirectResponse:
+    """Login failures land on /login; a failed *connect* goes back to the page the signed-in user came from, with the reason."""
+    if st and st.get("connect"):
+        nxt = st.get("next") or "/welcome"
+        if not nxt.startswith("/") or nxt.startswith("//"):
+            nxt = "/welcome"
+        sep = "&" if "?" in nxt else "?"
+        return RedirectResponse(f"{frontend_url()}{nxt}{sep}mailbox_error={quote(reason)}", status_code=302)
     return RedirectResponse(f"{frontend_url()}/login?error={quote(reason)}", status_code=302)
 
 
@@ -168,17 +175,17 @@ def google_callback(code: Optional[str] = None, state: Optional[str] = None, err
     try:
         tokens = _exchange_code(code)
     except Exception:
-        return _fail("exchange_failed")
+        return _fail("exchange_failed", st)
     refresh_token = (tokens.get("refresh_token") or "").strip()
     if not refresh_token:
-        return _fail("no_refresh_token")  # the grant was reused without consent; Google only issues it on prompt=consent
+        return _fail("no_refresh_token", st)  # the grant was reused without consent; Google only issues it on prompt=consent
     try:
         info = _fetch_userinfo(tokens.get("access_token") or "")
     except Exception:
-        return _fail("userinfo_failed")
+        return _fail("userinfo_failed", st)
     address = (info.get("email") or "").strip().lower()
     if not address or not info.get("email_verified", False):
-        return _fail("email_unverified")
+        return _fail("email_unverified", st)
     granted = [s for s in (tokens.get("scope") or "").split() if s]
 
     repo = get_repo()
@@ -186,7 +193,7 @@ def google_callback(code: Optional[str] = None, state: Optional[str] = None, err
     if st.get("connect"):
         user = repo.get_user(str(st["connect"]))
         if not user:
-            return _fail("unknown_user")
+            return _fail("unknown_user", st)
     else:
         user = repo.get_user_by_email(address)
         if not user:
@@ -209,9 +216,11 @@ def google_callback(code: Optional[str] = None, state: Optional[str] = None, err
                           refresh_token_enc=encrypt_token(refresh_token), scopes=granted, status="active", connected_at=datetime.utcnow())
     try:
         repo.save_mailbox(mailbox)
-    except Exception:  # e.g. migration 0007 not applied yet; the account (if created) stays usable with a password reset by an admin
+    except Exception as exc:  # e.g. migration 0007 not applied yet; the account (if created) stays usable with a password reset by an admin
         log.exception("could not persist the connected mailbox for %s", user.id)
-        return _fail("storage_failed")
+        if type(exc).__name__ == "MailboxStorageMissing":
+            return _fail("mailbox_table_missing", st)
+        return _fail("storage_failed", st)
     _audit(user.id, "MAILBOX_CONNECTED", {"address": address, "scopes": granted, "can_send": mailbox.can_send()})
     if not st.get("connect"):
         _audit(user.id, "LOGIN", {"email": user.email, "roles": [r.value for r in user.roles], "method": "google"})

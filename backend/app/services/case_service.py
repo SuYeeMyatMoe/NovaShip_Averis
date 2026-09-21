@@ -205,13 +205,23 @@ class CaseService:
         return mode, {**(result or {}), "from": getattr(connector, "address", None)}
 
     def _delivery_failure(self, case: CaseRecord, user: UserRecord, item_id: str, exc: Exception) -> None:
+        from app.config import ConfigurationError
+
+        if isinstance(exc, NoMailboxCanSend):
+            message = "No mailbox can send this reply: the case did not arrive through a connected Outlook/Gmail and no shared mailbox is configured."
+            recovery = "Connect your mailbox on the Guide page and fetch the mail through it, then Approve again (or set EMAIL_SEND_MODE=simulate to rehearse)."
+        elif isinstance(exc, ConfigurationError):
+            message = "Outbound mailbox configuration is invalid; nothing was sent."
+            recovery = "Fix the mailbox/provider settings named in the API log (Reconnect the mailbox if its permission was withdrawn), then Approve again."
+        else:
+            message = "Outbound email provider rejected or could not accept the message."
+            recovery = "Check the configured email provider credentials/network and retry the approved item."
         err = ProcessingError(id=_id("err_notify"), case_id=case.id, category=ErrorCategory.NOTIFICATION_ERROR, step="outbound_email",
-                              message="Outbound email provider rejected or could not accept the message.", safe_details=type(exc).__name__,
-                              recovery="Check the configured email provider credentials/network and retry the approved item.", retryable=True)
+                              message=message, safe_details=type(exc).__name__, recovery=recovery, retryable=True)
         case.errors.append(err)
         self.repo.save_error(err)
         self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", "NOTIFICATION_FAILED",
-                        after={"item_id": item_id, "provider": os.environ.get("EMAIL_SEND_MODE", "simulate"), "error_type": type(exc).__name__, "retryable": True})
+                        after={"item_id": item_id, "provider": send_mode(), "error_type": type(exc).__name__, "reason": message, "retryable": True})
 
     def _delivery_unknown(self, case: CaseRecord, item_id: str, exc: Exception) -> None:
         cause = exc.__cause__ or exc

@@ -88,3 +88,45 @@ def test_agent_run_batch_reports_paused_and_errors_per_case_and_bulk_resume():
     assert client.post("/agent/run-batch", json={"case_ids": []}, headers=SUP).status_code == 400
     audit = client.get("/audit", params={"action": "AGENT_BATCH_RUN"}, headers=SUP).json()["events"]
     assert any((e.get("after") or {}).get("paused") == 1 and (e.get("after") or {}).get("failed") == 1 for e in audit)
+
+
+def test_history_lists_agent_runs_and_inbox_filters_pending_paused_done():
+    """Inbox 'Not run yet' hides finished runs; History lists them (openable rows) and exports to Excel/CSV."""
+    paused_id = _ingest("wb_hist_001")
+    clean_id = _ingest("wb_hist_002", bl=BL_OK)
+    never_id = _ingest("wb_hist_003", bl=BL_OK)
+    pending_before = client.get("/cases", params={"agent": "pending", "limit": 500}, headers=SUP).json()
+    assert {paused_id, clean_id, never_id} <= {r["id"] for r in pending_before["items"]}
+    out = client.post("/agent/run-batch", json={"case_ids": [paused_id, clean_id], "parallel": 2}, headers=SUP).json()
+    assert out["results"][clean_id]["agent_run"]["result"] == "completed" and out["results"][paused_id]["agent_run"]["result"] == "paused"
+
+    pending = {r["id"] for r in client.get("/cases", params={"agent": "pending", "limit": 500}, headers=SUP).json()["items"]}
+    assert never_id in pending and clean_id not in pending and paused_id not in pending
+    paused = client.get("/cases", params={"agent": "paused", "limit": 500}, headers=SUP).json()["items"]
+    assert [r["id"] for r in paused if r["id"] == paused_id] and paused[0]["agent_run"]["result"] == "paused"
+    done = {r["id"] for r in client.get("/cases", params={"agent": "done", "sort": "run_desc", "limit": 500}, headers=SUP).json()["items"]}
+    assert clean_id in done and paused_id not in done
+    assert client.get("/cases/suggest", params={"q": "wb_hist_002"}, headers=SUP).json()["items"][0]["agent"] == "done"
+
+    hist = client.get("/history", headers=SUP).json()
+    row = next(r for r in hist["items"] if r["case_id"] == clean_id)
+    assert row["result"] == "done" and row["run_by"] == "u_sup_1" and row["run_by_name"] and row["status_after"] == "DRAFT_READY" and row["mode"] == "batch"
+    assert all(r["case_id"] != paused_id for r in hist["items"]), "paused runs are not in the default (done) history"
+    assert any(r["case_id"] == paused_id for r in client.get("/history", params={"result": "paused"}, headers=SUP).json()["items"])
+    assert hist["counts"]["done"] >= 1 and hist["counts"]["paused"] >= 1
+    mine = client.get("/history", params={"run_by": "me"}, headers=SUP).json()["items"]
+    assert all(r["run_by"] == "u_sup_1" for r in mine)
+    assert client.get("/history", params={"q": "wb_hist_002"}, headers=SUP).json()["total"] >= 1
+
+    import io
+    import openpyxl
+    x = client.get("/export/history.xlsx", headers=SUP)
+    assert x.status_code == 200 and "novaship-history.xlsx" in x.headers["content-disposition"]
+    wb = openpyxl.load_workbook(io.BytesIO(x.content))
+    assert wb.sheetnames == ["Agent runs", "Summary"]
+    runs = list(wb["Agent runs"].iter_rows(values_only=True))
+    assert runs[0][:3] == ("run_at", "case_id", "subject") and any(r[1] == clean_id for r in runs[1:])
+    csv_text = client.get("/export/history.csv", headers=SUP).text
+    assert csv_text.startswith("run_at,case_id") and clean_id in csv_text
+    report = openpyxl.load_workbook(io.BytesIO(client.get("/export/report.xlsx", headers=SUP).content))
+    assert "Agent runs" in report.sheetnames

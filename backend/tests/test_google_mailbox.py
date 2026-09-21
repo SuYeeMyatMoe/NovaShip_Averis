@@ -367,9 +367,31 @@ def test_individual_mailboxes_only_no_shared_mailbox_configured(monkeypatch):
     assert seeded.drafts, "a missing-document request draft is generated"
     r = client.post(f"/cases/{seeded.id}/approve", json={"draft_id": seeded.drafts[0].id}, headers={"X-User-Id": "u_sup_1"})
     assert r.status_code == 502 and "no mailbox can send" in r.json()["detail"]["error"] and r.json()["detail"]["retryable"] is True
-    assert repo.get_case(seeded.id).drafts[0].status == DraftStatus.SEND_FAILED
+    failed = repo.get_case(seeded.id)
+    assert failed.drafts[0].status == DraftStatus.SEND_FAILED
+    assert failed.errors and failed.errors[-1].message.startswith("No mailbox can send this reply") and "Connect your mailbox" in failed.errors[-1].recovery
     cfg = client.get("/auth/config").json()
     assert cfg["shared_mailbox_configured"] is False and cfg["google_enabled"] is True and cfg["microsoft_enabled"] is False
     assert client.get("/me", headers={"X-User-Id": "u_ops_4"}).json()["mailbox"]["providers"]["shared_mailbox_configured"] is False
     repo.delete_mailbox("u_ops_4")
     assert client.post("/connectors/poll", headers={"X-User-Id": "u_ops_4"}).json()["detail"]["code"] == "NO_MAILBOX_CONNECTED"
+
+
+def test_new_mail_notifications_list_only_the_callers_mailbox_cases(monkeypatch):
+    """The bell's 'New mail' section: cases that arrived through the caller's connected mailbox, newest first; nobody else's."""
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "web-client-id")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "web-client-secret")
+    repo = get_repo()
+    repo.save_mailbox(_mailbox(user_id="u_ops_3", address="bell.box@gmail.com"))
+    conn = _Conn([_inbound("bell-1"), _inbound("bell-2")], address="bell.box@gmail.com")
+    monkeypatch.setattr(GmailConnector, "from_mailbox", classmethod(lambda cls, mb: conn))
+    created = client.post("/connectors/poll?limit=5", headers={"X-User-Id": "u_ops_3"}).json()["created"]
+    assert len(created) == 2
+    feed = client.get("/me/notifications", headers={"X-User-Id": "u_ops_3"}).json()
+    mine = [m for m in feed["new_mail"] if m["case_id"] in created]   # earlier tests also fetched into this user's mailbox
+    assert len(mine) == 2 and feed["new_mail"].index(mine[0]) < feed["new_mail"].index(mine[1]) and mine[0]["case_id"] == created[-1], "newest first"
+    assert all(m["kind"] == "new_mail" and m["mailbox"] == "bell.box@gmail.com" and m["sender"] == "customer@example.com" for m in mine)
+    assert feed["new_mail_total"] == len(feed["new_mail"]) and mine[0]["subject"].startswith("REQUEST BL DRAFT")
+    other = client.get("/me/notifications", headers={"X-User-Id": "u_admin_1"}).json()
+    assert not {m["case_id"] for m in other["new_mail"]} & set(created), "another user's mailbox never appears as my new mail"
+    repo.delete_mailbox("u_ops_3")

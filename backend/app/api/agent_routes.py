@@ -32,7 +32,10 @@ def agent_run(case_id: str, user: UserRecord = Depends(require("compare"))):
 
 @router.get("/agent/state/{case_id}")
 def agent_state(case_id: str, user: UserRecord = Depends(require("view_case"))):
-    return get_agent().state(case_id)
+    st = get_agent().state(case_id)
+    case = get_repo().get_case(case_id)
+    st["agent_run"] = case.agent_run.summary() if case and case.agent_run else None
+    return st
 
 
 @router.post("/agent/resume/{case_id}")
@@ -74,9 +77,9 @@ def agent_run_batch(body: dict[str, Any], user: UserRecord = Depends(require("co
     def one(case_id: str) -> dict[str, Any]:
         t0 = time.time()
         try:
-            st = agent.run(case_id, actor_id=user.id)
+            st = agent.run(case_id, actor_id=user.id, mode="batch")
             return {"ok": True, "paused": bool(st.get("paused")), "next": st.get("next") or [], "status": st.get("status"),
-                    "interrupt": st.get("interrupt"), "ms": int((time.time() - t0) * 1000)}
+                    "interrupt": st.get("interrupt"), "agent_run": st.get("agent_run"), "ms": int((time.time() - t0) * 1000)}
         except ValueError as exc:
             return {"ok": False, "error": {"category": "DATABASE_ERROR", "message": str(exc), "retryable": False}, "ms": int((time.time() - t0) * 1000)}
         except Exception as exc:  # per-case isolation; the agent already audits pipeline errors

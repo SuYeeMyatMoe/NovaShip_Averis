@@ -17,7 +17,7 @@ export const FIELD_LABELS: Record<string, string> = {
 };
 
 // ------------------------------------------------------------------ session
-export type MailboxProviders = { google: boolean; microsoft: boolean; shared_mailbox_configured: boolean };
+export type MailboxProviders = { google: boolean; microsoft: boolean; shared_mailbox_configured: boolean; mailbox_storage_ready?: boolean };
 export type Mailbox = { connected: boolean; provider?: string; address?: string; scopes?: string[]; status?: string; can_send?: boolean; can_read?: boolean; connected_at?: string; last_polled_at?: string | null; last_error?: string | null; providers?: MailboxProviders };
 export type SessionUser = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; team_id?: string | null; mailbox?: Mailbox };
 export type Session = { token: string; expires_at: string; user: SessionUser };
@@ -97,6 +97,22 @@ export async function adoptSessionFromFragment(fragment: string): Promise<Fragme
   return { session, next, isNew: p.get("new") === "1", mailbox: p.get("mailbox") || "", provider: p.get("provider") || "google", connectedOnly: false };
 }
 export const getMailbox = () => api<Mailbox>("/me/mailbox");
+/** The original attachment bytes, fetched with the session (a plain link would arrive without the Authorization header). */
+export async function fetchDocumentBlob(caseId: string, attachmentId: string): Promise<{ blob: Blob; filename: string; mediaType: string }> {
+  const session = getSession();
+  const headers: Record<string, string> = session ? { Authorization: `Bearer ${session.token}` } : {};
+  const res = await fetch(`${API_BASE}/cases/${caseId}/documents/${attachmentId}/raw`, { headers, cache: "no-store" });
+  if (res.status === 401) { clearSession(); redirectToLogin(); }
+  if (!res.ok) {
+    let detail: any = null;
+    try { detail = (await res.json())?.detail; } catch {}
+    throw new ApiError(res.status, detail || { error: `download failed (${res.status})` });
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+  return { blob, filename: m ? decodeURIComponent(m[1]) : "attachment", mediaType: res.headers.get("Content-Type") || blob.type || "application/octet-stream" };
+}
 export const disconnectMailbox = () => api<{ ok: boolean; address: string; provider: string; google_revoked: boolean; note?: string | null }>("/me/mailbox", { method: "DELETE" });
 export const GOOGLE_ERRORS: Record<string, string> = {
   google_denied: "Google sign-in was cancelled.",
@@ -114,7 +130,9 @@ export const GOOGLE_ERRORS: Record<string, string> = {
   microsoft_denied: "Microsoft sign-in was cancelled.",
   microsoft_disabled: "Microsoft sign-in is disabled in this authentication mode.",
   mail_permission_missing: "Outlook was not connected: the mail permissions were not granted. Try again and accept 'Read your mail' and 'Send mail as you'.",
+  mailbox_table_missing: "Mailbox storage is not set up on the server (migration 0007). Run `python backend/scripts/apply_migrations.py` with SUPABASE_DB_URL set, then connect again.",
 };
+export const CONNECT_ERROR_CODES = new Set(["storage_failed", "mailbox_table_missing", "mail_permission_missing", "unknown_user", "exchange_failed", "userinfo_failed", "no_refresh_token", "bad_state", "microsoft_denied", "google_denied"]);
 
 export async function logout(): Promise<void> {
   try { await api("/auth/logout", { method: "POST" }, { redirectOn401: false }); } catch {}
@@ -171,6 +189,31 @@ export type CaseRow = {
   si_available: boolean; bl_available: boolean; attachments: number; mismatch_count: number; comparison_status: string | null; review_reason: string | null; confidence: number;
   assigned_user_id: string | null; shared_with: string[]; status: string; updated_at: string; summary: string; errors: number; drafts: number;
   mailbox_user_id?: string | null; mailbox?: string | null;
+  agent_run?: AgentRunSummary | null;
 };
+/** Last AI-agent run on a case; absent = the agent has not run it yet ("pending"). */
+export type AgentRunSummary = { result: "completed" | "paused" | "error"; last_run_at: string; last_run_by: string; runs: number; ms: number; mode: "single" | "batch"; status_after: string; decision?: string | null; error?: string | null };
+export type HistoryRow = { run_at: string; case_id: string; subject: string; sender: string; mailbox: string; run_by: string; run_by_name: string; result: "done" | "paused" | "error"; status_after: string; status: string; mismatch_count: number; comparison_status: string; decision: string; ms: number; runs: number; mode: string; priority: string; error: string };
+export const agentStateOf = (r: { agent_run?: AgentRunSummary | null }): "pending" | "paused" | "done" => !r.agent_run || r.agent_run.result === "error" ? "pending" : r.agent_run.result === "paused" ? "paused" : "done";
+/** Download an authenticated file (Excel/CSV exports) with the session header; a plain link would arrive without it. */
+export async function downloadFile(path: string, fallbackName: string): Promise<void> {
+  const session = getSession();
+  const headers: Record<string, string> = session ? { Authorization: `Bearer ${session.token}` } : {};
+  const res = await fetch(`${API_BASE}${path}`, { headers, cache: "no-store" });
+  if (res.status === 401) { clearSession(); redirectToLogin(); }
+  if (!res.ok) {
+    let detail: any = null;
+    try { detail = (await res.json())?.detail; } catch {}
+    throw new ApiError(res.status, detail || { error: `download failed (${res.status})` });
+  }
+  const blob = await res.blob();
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(res.headers.get("Content-Disposition") || "");
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = m ? decodeURIComponent(m[1]) : fallbackName; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
 export type Metrics = Record<string, any>;
-export type NotificationItem = { case_id: string; subject: string; status: string; priority: string; reason: string; updated_at: string };
+export type NotificationItem = { kind?: "needs_person"; case_id: string; subject: string; status: string; priority: string; reason: string; updated_at: string };
+/** A case that arrived through the signed-in user's own mailbox (Outlook/Gmail) in the last 48 h. */
+export type NewMailItem = { kind: "new_mail"; case_id: string; email_id: string; mailbox?: string | null; subject: string; sender: string; status: string; priority: string; action_required: boolean; received_at: string; created_at: string };
+export type NotificationFeed = { items: NotificationItem[]; total: number; new_mail?: NewMailItem[]; new_mail_total?: number };

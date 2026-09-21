@@ -2,14 +2,15 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, post, getSession, ApiError, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
+import { agentStateOf, api, post, getSession, ApiError, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
 import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
 import { MailboxCard } from "@/components/mailbox-card";
 import { useOperatorWarning } from "@/lib/operator-warning";
 
 const STATUSES = ["RECEIVED","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","WAITING_DOCUMENTS","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const INTENTS = ["DOCUMENT_VERIFICATION","DOCUMENT_CORRECTION","PREPARE_SHIPPING_INSTRUCTION","INVOICE_QUERY","OPERATIONAL_UPDATE","GENERAL_ENQUIRY","INFORMATION_ONLY","NO_ACTION_REQUIRED","UNKNOWN_REVIEW"];
-const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "", mailbox: "" };
+const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "", mailbox: "", agent: "pending" };
+const AGENT_LABELS: Record<string, string> = { pending: "Not run yet", paused: "Paused – waiting for you", done: "Processed", any: "All (incl. processed)" };
 const STATUS_ORDER = ["RECEIVED","SECURITY_CHECK","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","DOCUMENTS_DETECTED","WAITING_DOCUMENTS","EXTRACTING","COMPARING","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const STATUS_TONE: Record<string, string> = { HUMAN_REVIEW: "bg-review", MISMATCH_DETECTED: "bg-mismatch", SECURITY_REVIEW: "bg-mismatch", ERROR: "bg-mismatch", WAITING_DOCUMENTS: "bg-review", NO_MISMATCH_DETECTED: "bg-match", COMPLETED: "bg-match", NO_ACTION_INFO: "bg-ink-300" };
 
@@ -86,6 +87,17 @@ export default function Dashboard() {
       say(`${action}: ${ok}/${sel.size} succeeded`); setSel(new Set()); load(); loadWidgets();
       warn.notice(r);
     } catch (e: any) { if (!warn.notice(e)) say(e.message, "err"); } finally { setBusy(false); }
+  };
+  const [running, setRunning] = useState<string | null>(null);
+  const runAgent = async (id: string) => {
+    setRunning(id);
+    try {
+      const st = await post<{ paused: boolean; status?: string; interrupt?: { summary?: string } }>(`/agent/run/${id}`);
+      if (st.paused) { say(`Agent paused on ${id.replace("case_", "")}: it needs your decision`, "ok"); router.push(`/cases/${id}?tab=agent`); }
+      else say(`Agent finished ${id.replace("case_", "")} (${(st.status || "").replace(/_/g, " ")}) — now in History`);
+      load(); loadWidgets();
+    } catch (e: any) { if (!warn.notice(e)) say(e.message, "err"); }
+    finally { setRunning(null); }
   };
   const quick = async (id: string, path: string, body?: any) => { try { const r = await post(`/cases/${id}${path}`, body); if (!warn.notice(r)) say("Done"); load(); loadWidgets(); } catch (e: any) { if (!warn.notice(e)) say(e.message, "err"); } };
 
@@ -216,9 +228,13 @@ export default function Dashboard() {
           <span className="mr-1 text-sm font-semibold text-ink-800">All cases</span>
           {canIngest && (myMailbox || sharedMailbox) && <Button kind="primary" disabled={fetching} onClick={fetchInbox} title={myMailbox ? `Polls ${myMailbox}` : "Polls the shared desk mailbox"}>{fetching ? "Fetching…" : myMailbox ? "Fetch my inbox" : "Fetch Inbox"}</Button>}
           {canIngest && !myMailbox && !sharedMailbox && <Button kind="primary" onClick={() => router.push("/welcome")} title="No mailbox is connected yet">Connect a mailbox</Button>}
-          <Button kind={f.attention === "yes" ? "primary" : "ghost"} onClick={() => applyPreset({ attention: "yes", sort: "priority" })}>Needs human</Button>
-          {me?.id && <Button kind={f.assigned === me.id ? "primary" : "ghost"} onClick={() => applyPreset({ assigned: me.id, sort: "updated_desc" })}>Needs me</Button>}
-          {myMailbox && <Button kind={f.mailbox === "me" ? "primary" : "ghost"} onClick={() => applyPreset({ mailbox: "me", sort: "received_desc" })} title={myMailbox}>My mailbox</Button>}
+          <Button kind={f.attention === "yes" ? "primary" : "ghost"} onClick={() => applyPreset({ attention: "yes", sort: "priority", agent: f.agent })}>Needs human</Button>
+          {me?.id && <Button kind={f.assigned === me.id ? "primary" : "ghost"} onClick={() => applyPreset({ assigned: me.id, sort: "updated_desc", agent: f.agent })}>Needs me</Button>}
+          {myMailbox && <Button kind={f.mailbox === "me" ? "primary" : "ghost"} onClick={() => applyPreset({ mailbox: "me", sort: "received_desc", agent: f.agent })} title={myMailbox}>My mailbox</Button>}
+          <Sel v={f.agent} on={(v) => setFilter("agent", v || "any")} opts={["pending","paused","done","any"]} ph="Agent run" labels={AGENT_LABELS} />
+          <label className="flex items-center gap-1 text-[11px] text-ink-600" title="Processed = the AI agent finished a run on the case; they live on the History page">
+            <input type="checkbox" checked={f.agent === "any"} onChange={(e) => setFilter("agent", e.target.checked ? "any" : "pending")} /> Show processed
+          </label>
           <input placeholder="Search case, subject, sender, summary" value={f.q} onChange={(e) => setFilter("q", e.target.value)} className="w-full rounded-md border border-ink-200 px-2 py-1.5 text-sm sm:w-60" aria-label="Search" />
           <Sel v={f.status} on={(v) => setFilter("status", v)} opts={STATUSES} ph="Status" />
           <Sel v={f.priority} on={(v) => setFilter("priority", v)} opts={["CRITICAL","HIGH","MEDIUM","LOW"]} ph="Priority" />
@@ -231,7 +247,7 @@ export default function Dashboard() {
           <input type="number" step="0.05" min="0" max="1" placeholder="Min conf" value={f.min_confidence} onChange={(e) => setFilter("min_confidence", e.target.value)} className="w-24 rounded-md border border-ink-200 px-2 py-1.5 text-sm" aria-label="Minimum confidence" />
           <input type="date" value={f.date_from} onChange={(e) => setFilter("date_from", e.target.value)} className="rounded-md border border-ink-200 px-2 py-1 text-sm" title="Received from" aria-label="Received from" />
           <input type="date" value={f.date_to.slice(0, 10)} onChange={(e) => setFilter("date_to", e.target.value ? e.target.value + "T23:59:59" : "")} className="rounded-md border border-ink-200 px-2 py-1 text-sm" title="Received to" aria-label="Received to" />
-          <Sel v={f.sort} on={(v) => setFilter("sort", v)} opts={["updated_desc","received_desc","priority","confidence"]} ph="Sort" labels={{ updated_desc: "Last update", received_desc: "Received", priority: "Priority", confidence: "Confidence, low first" }} />
+          <Sel v={f.sort} on={(v) => setFilter("sort", v)} opts={["updated_desc","received_desc","priority","confidence","run_desc"]} ph="Sort" labels={{ updated_desc: "Last update", received_desc: "Received", priority: "Priority", confidence: "Confidence, low first", run_desc: "Last agent run" }} />
           <Button kind="ghost" onClick={() => { setF(EMPTY_FILTERS); setPage(0); }}>Clear</Button>
           <span className="ml-auto text-xs text-ink-500">{total} cases</span>
         </div>
@@ -260,13 +276,13 @@ export default function Dashboard() {
                 <th className="px-2 py-2"><input type="checkbox" aria-label="Select all on page" checked={!!rows?.length && rows.every((r) => sel.has(r.id))} onChange={(e) => setSel(e.target.checked ? new Set((rows || []).map((r) => r.id)) : new Set())} /></th>
                 <th className="px-2 py-2">Case</th><th className="px-2 py-2">Subject / sender</th><th className="px-2 py-2">Intent</th><th className="px-2 py-2">Security</th>
                 <th className="px-2 py-2">Action</th><th className="px-2 py-2">Priority</th><th className="px-2 py-2">SI / BL</th><th className="px-2 py-2">Mismatch</th>
-                <th className="px-2 py-2">Confidence</th><th className="px-2 py-2">Assigned</th><th className="px-2 py-2">Shared</th><th className="px-2 py-2">Status</th><th className="px-2 py-2">Updated</th><th className="px-2 py-2">Actions</th>
+                <th className="px-2 py-2">Confidence</th><th className="px-2 py-2">Assigned</th><th className="px-2 py-2">Shared</th><th className="px-2 py-2">Status</th><th className="px-2 py-2" title="Last AI-agent run">Run</th><th className="px-2 py-2">Updated</th><th className="px-2 py-2">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {rows === null && Array.from({ length: 6 }, (_, i) => <tr key={i} className="border-t border-ink-100"><td colSpan={15} className="px-2 py-2"><div className="h-6 animate-pulse rounded bg-ink-100" /></td></tr>)}
+              {rows === null && Array.from({ length: 6 }, (_, i) => <tr key={i} className="border-t border-ink-100"><td colSpan={16} className="px-2 py-2"><div className="h-6 animate-pulse rounded bg-ink-100" /></td></tr>)}
               {rows?.map((r) => (
-                <tr key={r.id} className={`border-t border-ink-100 align-top transition hover:bg-accent-bg/30 ${sel.has(r.id) ? "bg-accent-bg/40" : ""}`}>
+                <tr key={r.id} className={`border-t border-ink-100 align-top transition hover:bg-accent-bg/30 ${sel.has(r.id) ? "bg-accent-bg/40" : ""} ${agentStateOf(r) === "done" ? "opacity-70" : ""}`}>
                   <td className="px-2 py-2"><input type="checkbox" aria-label={`Select ${r.id}`} checked={sel.has(r.id)} onChange={() => toggle(r.id)} /></td>
                   <td className="px-2 py-2 font-mono text-[11px]"><Link href={`/cases/${r.id}`} className="text-accent hover:underline">{r.id.replace("case_", "")}</Link></td>
                   <td className="max-w-[360px] px-2 py-2">
@@ -286,10 +302,12 @@ export default function Dashboard() {
                   <td className="px-2 py-2 text-[11px]">{users.find((u) => u.id === r.assigned_user_id)?.display_name || <span className="text-ink-400">-</span>}</td>
                   <td className="px-2 py-2 text-[11px]">{r.shared_with.length ? `${r.shared_with.length} recipient(s)` : <span className="text-ink-400">-</span>}</td>
                   <td className="px-2 py-2"><StatusBadge status={r.status} />{r.errors > 0 && <div className="mt-0.5 text-[10px] text-mismatch">{r.errors} error(s)</div>}</td>
+                  <td className="whitespace-nowrap px-2 py-2 text-[11px]"><RunCell r={r} /></td>
                   <td className="whitespace-nowrap px-2 py-2 text-[11px] text-ink-500">{fmtDate(r.updated_at)}</td>
                   <td className="px-2 py-2">
                     <div className="table-row-action flex flex-nowrap gap-1">
                       <Button kind="primary" onClick={() => router.push(`/cases/${r.id}`)}>Open</Button>
+                      {agentStateOf(r) !== "done" && <Button disabled={running === r.id} onClick={() => runAgent(r.id)} title="Run the AI agent on this case (pauses for you when a decision is needed)">{running === r.id ? "Running…" : agentStateOf(r) === "paused" ? "Resume" : "Run agent"}</Button>}
                       <Button onClick={() => quick(r.id, "/compare")} title="Re-run extraction and the deterministic comparison">Compare</Button>
                       <Button onClick={() => router.push(`/cases/${r.id}?tab=ask`)}>Ask AI</Button>
                       <Button onClick={() => router.push(`/cases/${r.id}?tab=collab`)}>Share</Button>
@@ -299,7 +317,7 @@ export default function Dashboard() {
                   </td>
                 </tr>
               ))}
-              {rows?.length === 0 && <tr><td colSpan={15} className="px-4 py-10 text-center text-sm text-ink-500">{apiDown ? "The API is offline. Start the backend on port 8000 and refresh." : "No cases match these filters."}</td></tr>}
+              {rows?.length === 0 && <tr><td colSpan={16} className="px-4 py-10 text-center text-sm text-ink-500">{apiDown ? "The API is offline. Start the backend on port 8000 and refresh." : f.agent === "pending" ? <span>Every case in this view has been run by the agent — see <Link href="/history" className="font-semibold text-accent-fg hover:underline">History</Link> or tick <em>Show processed</em>.</span> : "No cases match these filters."}</td></tr>}
             </tbody>
           </table>
         </div>
@@ -353,4 +371,13 @@ function Sel({ v, on, opts, ph, labels }: { v: string; on: (v: string) => void; 
 }
 function Dot({ ok, label }: { ok: boolean; label: string }) {
   return <span className={`inline-flex items-center gap-1 ${ok ? "text-match-fg" : "text-ink-400"}`}><span className={`h-2 w-2 rounded-full ${ok ? "bg-match" : "bg-ink-200"}`} aria-hidden />{label}</span>;
+}
+
+
+/** "—" (never run) / paused · when / done · when · by — the Inbox's view of the last AI-agent run. */
+function RunCell({ r }: { r: CaseRow }) {
+  const a = r.agent_run;
+  if (!a || a.result === "error") return <span className="text-ink-400" title={a?.error ? `last run failed: ${a.error}` : "the AI agent has not run this case yet"}>{a?.error ? "error · retry" : "—"}</span>;
+  if (a.result === "paused") return <span className="rounded-full bg-review-bg px-1.5 py-px text-[10px] font-bold uppercase text-review-fg" title={`paused ${fmtDate(a.last_run_at)} · waiting for a decision`}>paused</span>;
+  return <span className="text-ink-600" title={`run ${a.runs}× · last by ${a.last_run_by} · ${a.ms} ms`}><span className="rounded-full bg-match-bg px-1.5 py-px text-[10px] font-bold uppercase text-match-fg">done</span> {fmtDate(a.last_run_at)}</span>;
 }

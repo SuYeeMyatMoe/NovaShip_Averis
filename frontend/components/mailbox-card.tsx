@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { disconnectMailbox, getMailbox, getSession, post, startGoogle, startMicrosoft, type Mailbox } from "@/lib/api";
+import { GOOGLE_ERRORS, disconnectMailbox, getMailbox, getSession, post, startGoogle, startMicrosoft, type Mailbox } from "@/lib/api";
 import { Button, fmtDate } from "@/components/ui";
 
 const PROVIDER_LABEL: Record<string, string> = { gmail: "Gmail", outlook: "Outlook" };
@@ -17,8 +17,20 @@ export function MailboxCard({ compact = false, onFetched }: { compact?: boolean;
   const me = getSession()?.user;
   const canIngest = me?.permissions.includes("ingest") ?? false;
 
+  const [connectError, setConnectError] = useState<string | null>(null);
   const load = useCallback(() => { getMailbox().then(setMb).catch(() => setMb({ connected: false })); }, []);
   useEffect(() => { load(); }, [load]);
+  // a failed Connect comes back to this page as ?mailbox_error=<code>; show it once and clean the URL
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const code = url.searchParams.get("mailbox_error");
+      if (!code) return;
+      setConnectError(GOOGLE_ERRORS[code] || `Mailbox could not be connected (${code}).`);
+      url.searchParams.delete("mailbox_error");
+      window.history.replaceState(null, "", url.pathname + (url.search || "") + url.hash);
+    } catch { /* ignore */ }
+  }, []);
 
   const say = (m: string) => { setNote(m); setTimeout(() => setNote(null), 6000); };
   const here = () => window.location.pathname || "/welcome";
@@ -52,13 +64,25 @@ export function MailboxCard({ compact = false, onFetched }: { compact?: boolean;
   };
 
   if (mb === null) return compact ? null : <div className="h-20 animate-pulse rounded-2xl bg-ink-100" aria-busy />;
-  const providers = mb.providers || { google: true, microsoft: false, shared_mailbox_configured: true };
+  const providers = mb.providers || { google: true, microsoft: false, shared_mailbox_configured: true, mailbox_storage_ready: true };
   const anyProvider = providers.google || providers.microsoft;
+  const storageReady = providers.mailbox_storage_ready !== false;
   const label = PROVIDER_LABEL[mb.provider || ""] || "mailbox";
+  const storageWarning = !storageReady && (
+    <div role="alert" className="w-full rounded-lg border border-mismatch/40 bg-mismatch-bg px-3 py-2 text-[11px] text-mismatch-fg">
+      <span className="font-semibold">Mailbox storage is not set up on the server</span> — connected mailboxes cannot be saved yet (Supabase migration 0007). Put <span className="font-mono">SUPABASE_DB_URL</span> in <span className="font-mono">.env</span> and run <span className="font-mono">python backend/scripts/apply_migrations.py</span>, then come back and connect.
+    </div>
+  );
+  const errorLine = connectError && (
+    <div role="alert" className="flex w-full items-start gap-2 rounded-lg border border-mismatch/40 bg-mismatch-bg px-3 py-2 text-[11px] text-mismatch-fg">
+      <span className="flex-1"><span className="font-semibold">Connect failed:</span> {connectError}</span>
+      <button type="button" onClick={() => setConnectError(null)} className="text-ink-400 hover:text-ink-800" aria-label="Dismiss">×</button>
+    </div>
+  );
   const connectButtons = (
     <>
-      {providers.microsoft && <Button kind="primary" disabled={!!busy} onClick={connectMicrosoft}>{busy === "microsoft" ? "Opening Microsoft…" : "Connect Outlook"}</Button>}
-      {providers.google && <Button kind={providers.microsoft ? "ghost" : "primary"} disabled={!!busy} onClick={connectGoogle}>{busy === "google" ? "Opening Google…" : "Connect Gmail"}</Button>}
+      {providers.microsoft && <Button kind="primary" disabled={!!busy || !storageReady} onClick={connectMicrosoft}>{busy === "microsoft" ? "Opening Microsoft…" : "Connect Outlook"}</Button>}
+      {providers.google && <Button kind={providers.microsoft ? "ghost" : "primary"} disabled={!!busy || !storageReady} onClick={connectGoogle}>{busy === "google" ? "Opening Google…" : "Connect Gmail"}</Button>}
       {!anyProvider && <span className="text-[11px] text-ink-500">No mailbox provider is configured on this deployment (MICROSOFT_* or GOOGLE_OAUTH_* in .env).</span>}
     </>
   );
@@ -70,6 +94,8 @@ export function MailboxCard({ compact = false, onFetched }: { compact?: boolean;
         <span className="font-semibold">Your mailbox is not connected.</span>
         <span className="text-ink-500">{providers.shared_mailbox_configured ? "Connect it and the desk reads your inbox and answers from your address." : "The desk only reads connected mailboxes: connect yours to fetch mail and reply from your address."}</span>
         <span className="ml-auto flex gap-2">{connectButtons}</span>
+        {storageWarning}
+        {errorLine}
         {note && <span className="w-full text-[11px] text-mismatch-fg">{note}</span>}
       </div>
     );
@@ -107,8 +133,10 @@ export function MailboxCard({ compact = false, onFetched }: { compact?: boolean;
             {!providers.shared_mailbox_configured && anyProvider ? " Nothing is read until a mailbox is connected." : ""}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">{connectButtons}</div>
+          {storageWarning && <div className="mt-3">{storageWarning}</div>}
         </>
       )}
+      {errorLine && <div className="mt-3">{errorLine}</div>}
       {note && <div className="mt-3 rounded-lg bg-ink-50 px-3 py-1.5 text-xs text-ink-700">{note}</div>}
     </div>
   );

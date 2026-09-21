@@ -96,7 +96,8 @@ def auth_config():
     enabled = registration_enabled()
     providers = mailbox_providers()
     out: dict[str, Any] = {"register_roles": allowed_register_roles() if enabled else [], "min_password_length": 8, "auth_mode": mode, "registration_enabled": enabled,
-                           "google_enabled": providers["google"], "microsoft_enabled": providers["microsoft"], "shared_mailbox_configured": providers["shared_mailbox_configured"]}
+                           "google_enabled": providers["google"], "microsoft_enabled": providers["microsoft"], "shared_mailbox_configured": providers["shared_mailbox_configured"],
+                           "mailbox_storage_ready": providers["mailbox_storage_ready"]}
     if mode == "demo":
         out["demo_password"] = DEMO_PASSWORD
         out["demo_accounts"] = [{"email": u.email, "display_name": u.display_name, "roles": [r.value for r in u.roles]}

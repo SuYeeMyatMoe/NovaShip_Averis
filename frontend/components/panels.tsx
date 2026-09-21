@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { api, post, API_BASE, type CaseView, type Draft } from "@/lib/api";
+import { api, fetchDocumentBlob, post, type CaseView, type Draft } from "@/lib/api";
 import { Badge, Button, Card, Empty, KV, fmtDate } from "@/components/ui";
 
 // ------------------------------------------------------------------ Drafts (human-in-the-loop)
@@ -248,6 +248,35 @@ export function AttachmentsPanel({ c, onChange, say }: { c: CaseView; onChange: 
     const fd = new FormData(); fd.append("file", f); fd.append("kind", kind);
     try { await api(`/cases/${c.id}/upload`, { method: "POST", body: fd }); say("Uploaded — pipeline re-run"); onChange(); } catch (e: any) { say(e.message, "err"); }
   };
+  type Viewer = { id: string; name: string; url: string; mediaType: string; text?: string; note?: string };
+  const [viewer, setViewer] = useState<Viewer | null>(null);
+  const [loadingDoc, setLoadingDoc] = useState<string | null>(null);
+  useEffect(() => () => { if (viewer?.url) URL.revokeObjectURL(viewer.url); }, [viewer]);
+  const isText = (mt: string, name: string) => /^text\/|\/csv|rfc822|\/rtf|tab-separated/.test(mt) || /\.(txt|csv|tsv|md|eml|rtf|html?)$/i.test(name);
+  const download = (blob: Blob, name: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+  const openOriginal = async (id: string, mode: "view" | "download") => {
+    if (mode === "view" && viewer?.id === id) { setViewer(null); return; }
+    setLoadingDoc(id);
+    try {
+      const { blob, filename, mediaType } = await fetchDocumentBlob(c.id, id);
+      const name = filename === "attachment" ? (atts.find((a) => a.id === id)?.file_name || filename) : filename;
+      if (mode === "download") { download(blob, name); return; }
+      const mt = mediaType.split(";")[0].trim();
+      if (mt === "application/pdf" || mt.startsWith("image/")) {
+        setViewer({ id, name, url: URL.createObjectURL(blob), mediaType: mt });
+      } else if (isText(mt, name)) {
+        setViewer({ id, name, url: URL.createObjectURL(blob), mediaType: "text/plain", text: await blob.text() });
+      } else {
+        download(blob, name);
+        setViewer({ id, name, url: "", mediaType: mt, note: "Office files open in your desktop app — the download has started. The extracted text is available with 'Extracted text'." });
+      }
+    } catch (e: any) { say(e?.detail?.error || e.message || "Could not load the original file", "err"); }
+    finally { setLoadingDoc(null); }
+  };
   const viewText = async (id: string) => {
     if (open === id) { setOpen(null); return; }
     setOpen(id);
@@ -272,10 +301,30 @@ export function AttachmentsPanel({ c, onChange, say }: { c: CaseView; onChange: 
             <td>{a.detected_type.replace(/_/g, " ")} <span className="text-ink-400">({a.detection_confidence.toFixed(2)})</span></td>
             <td><Badge className={a.extraction_status === "EXTRACTED" ? "bg-match-bg text-match-fg" : "bg-mismatch-bg text-mismatch-fg"}>{a.extraction_status}</Badge> {a.extraction_confidence > 0 && <span className="text-ink-400">{a.extraction_confidence.toFixed(2)}</span>}{a.ocr && <div className="text-[10px] text-review" title={a.reader_note || ""}>text via OCR (lower confidence)</div>}{!a.ocr && a.reader_note && a.extraction_status !== "EXTRACTED" && <div className="text-[10px] text-ink-500">{a.reader_note}</div>}{a.is_duplicate_of && <div className="text-[10px] text-review">duplicate of {a.is_duplicate_of}</div>}</td>
             <td className="font-mono text-[10px] text-ink-500">{a.size_bytes} B · {a.checksum.slice(0, 12)}…</td>
-            <td className="whitespace-nowrap"><Button kind="ghost" onClick={() => viewText(a.id)}>{open === a.id ? "Hide text" : "View text"}</Button> <a className="text-accent hover:underline" href={`${API_BASE}/cases/${c.id}/documents/${a.id}/raw`} target="_blank" rel="noreferrer">original ↗</a></td>
+            <td className="whitespace-nowrap">
+              <Button kind="primary" disabled={loadingDoc === a.id} onClick={() => openOriginal(a.id, "view")}>{loadingDoc === a.id ? "Loading…" : viewer?.id === a.id ? "Close" : "Open"}</Button>{" "}
+              <Button kind="ghost" disabled={loadingDoc === a.id} onClick={() => openOriginal(a.id, "download")}>Download</Button>{" "}
+              <Button kind="ghost" onClick={() => viewText(a.id)}>{open === a.id ? "Hide extracted text" : "Extracted text"}</Button>
+            </td>
           </tr>
         ))}</tbody>
       </table></div>
+      {viewer && (
+        <div className="overflow-hidden rounded-xl border border-ink-200 bg-white">
+          <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 bg-ink-50 px-3 py-2 text-xs">
+            <span className="font-mono font-semibold text-ink-900">{viewer.name}</span>
+            <span className="text-ink-500">{viewer.mediaType}</span>
+            <span className="ml-auto flex gap-2">
+              {viewer.url && viewer.mediaType !== "text/plain" && <a className="text-accent-fg hover:underline" href={viewer.url} target="_blank" rel="noreferrer">Open in new tab ↗</a>}
+              <button type="button" className="text-ink-500 hover:text-ink-900" onClick={() => setViewer(null)}>Close ×</button>
+            </span>
+          </div>
+          {viewer.mediaType === "application/pdf" && <iframe title={viewer.name} src={viewer.url} className="h-[70vh] w-full bg-ink-100" />}
+          {viewer.mediaType.startsWith("image/") && <div className="max-h-[70vh] overflow-auto bg-ink-100 p-3 text-center"><img src={viewer.url} alt={viewer.name} className="mx-auto max-w-full" /></div>}
+          {viewer.text !== undefined && <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap p-3 font-mono text-[11px] scrollbar-thin">{viewer.text || "(empty file)"}</pre>}
+          {viewer.note && <p className="px-3 py-3 text-xs text-ink-600">{viewer.note}</p>}
+        </div>
+      )}
       {open && <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-ink-200 bg-ink-50 p-3 font-mono text-[11px] scrollbar-thin">{texts[open] || atts.find((a) => a.id === open)?.raw_text || "(no extractable text — unreadable / image-only / empty)"}</pre>}
       <Card title="Upload / re-link a missing document">
         <div className="flex flex-wrap items-center gap-2 text-xs">

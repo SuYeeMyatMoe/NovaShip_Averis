@@ -54,6 +54,10 @@ def _storage_failure(operation: str, exc: Exception, *, allow_not_found: bool = 
     raise StorageProviderError(f"Supabase Storage {operation} failed ({type(exc).__name__})") from exc
 
 
+class MailboxStorageMissing(RuntimeError):
+    """Migration 0007 (user_mailboxes) has not been applied to this database."""
+
+
 class SupabaseRepository(BaseRepository):
     def __init__(self) -> None:
         from supabase import create_client
@@ -522,11 +526,30 @@ class SupabaseRepository(BaseRepository):
             raise
         return [self._mailbox_from_row(r) for r in res.data]
 
+    def mailbox_storage_ready(self) -> bool:
+        """True when migration 0007 (user_mailboxes) is applied; cached per process because it never flips back."""
+        cached = getattr(self, "_mailbox_storage_ready", None)
+        if cached:
+            return True
+        try:
+            self._t("user_mailboxes").select("user_id").limit(0).execute()
+        except Exception as exc:
+            if self._missing_table(exc):
+                return False
+            raise
+        self._mailbox_storage_ready = True
+        return True
+
     def save_mailbox(self, mailbox: UserMailbox) -> None:
         row = mailbox.model_dump(mode="json")
         row["tenant_id"] = self.tenant
         row["updated_at"] = datetime.utcnow().isoformat()
-        self._t("user_mailboxes").upsert(row).execute()
+        try:
+            self._t("user_mailboxes").upsert(row).execute()
+        except Exception as exc:
+            if self._missing_table(exc):
+                raise MailboxStorageMissing("user_mailboxes table missing; run backend/scripts/apply_migrations.py (migration 0007)") from exc
+            raise
 
     def delete_mailbox(self, user_id: str) -> None:
         self._t("user_mailboxes").delete().eq("tenant_id", self.tenant).eq("user_id", user_id).execute()

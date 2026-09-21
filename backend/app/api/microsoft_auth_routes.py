@@ -79,7 +79,14 @@ def _granted_scopes(tokens: dict[str, Any]) -> list[str]:
     return [s.rsplit("/", 1)[-1] if s.startswith("https://graph.microsoft.com/") else s for s in (tokens.get("scope") or "").split() if s]
 
 
-def _fail(reason: str) -> RedirectResponse:
+def _fail(reason: str, st: Optional[dict[str, Any]] = None) -> RedirectResponse:
+    """Login failures land on /login; a failed *connect* goes back to the page the signed-in user came from, with the reason."""
+    if st and st.get("intent") == "connect":
+        nxt = st.get("next") or "/welcome"
+        if not nxt.startswith("/") or nxt.startswith("//"):
+            nxt = "/welcome"
+        sep = "&" if "?" in nxt else "?"
+        return RedirectResponse(f"{frontend_url()}{nxt}{sep}mailbox_error={quote(reason)}", status_code=302)
     return RedirectResponse(f"{frontend_url()}/login?error={quote(reason)}", status_code=302)
 
 
@@ -131,14 +138,14 @@ def microsoft_callback(code: Optional[str] = None, state: Optional[str] = None, 
     try:
         tokens = _exchange_code(code)
     except Exception:
-        return _fail("exchange_failed")
+        return _fail("exchange_failed", st)
     try:
         me = _fetch_me(tokens.get("access_token") or "")
     except Exception:
-        return _fail("userinfo_failed")
+        return _fail("userinfo_failed", st)
     address = (me.get("mail") or me.get("userPrincipalName") or "").strip().lower()
     if not address or "@" not in address:
-        return _fail("email_unverified")
+        return _fail("email_unverified", st)
     granted = _granted_scopes(tokens)
     refresh_token = (tokens.get("refresh_token") or "").strip()
     repo = get_repo()
@@ -147,16 +154,19 @@ def microsoft_callback(code: Optional[str] = None, state: Optional[str] = None, 
     if intent == "connect":
         user = repo.get_user(str(st.get("connect") or ""))
         if not user:
-            return _fail("unknown_user")
+            return _fail("unknown_user", st)
         if not refresh_token or not ({"Mail.Read", "Mail.ReadWrite"} & set(granted)):
-            return _fail("mail_permission_missing")
+            return _fail("mail_permission_missing", st)
         mailbox = UserMailbox(user_id=user.id, tenant_id=user.tenant_id, provider="outlook", address=address, google_sub=me.get("id"),
                               refresh_token_enc=encrypt_token(refresh_token), scopes=granted, status="active", connected_at=datetime.utcnow())
         try:
             repo.save_mailbox(mailbox)
-        except Exception:
+        except Exception as exc:
+            if type(exc).__name__ == "MailboxStorageMissing":
+                log.error("Outlook connect for %s lost: %s", user.id, exc)
+                return _fail("mailbox_table_missing", st)
             log.exception("could not persist the connected Outlook mailbox for %s", user.id)
-            return _fail("storage_failed")
+            return _fail("storage_failed", st)
         _audit(user.id, "MAILBOX_CONNECTED", {"address": address, "provider": "outlook", "scopes": granted, "can_send": mailbox.can_send()})
         fragment = urlencode({"connected": "outlook", "mailbox": address, "next": st.get("next") or "/welcome"})
         return RedirectResponse(f"{frontend_url()}/auth/callback#{fragment}", status_code=302)

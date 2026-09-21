@@ -78,7 +78,91 @@ def count_by(items, key) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------- Excel report
-REPORT_SHEETS = ["Overview", "Seven fields", "Cases", "Field results", "Security", "Drafts & delivery", "Operator activity", "Mailboxes", "Errors"]
+REPORT_SHEETS = ["Overview", "Seven fields", "Cases", "Field results", "Security", "Drafts & delivery", "Operator activity", "Mailboxes", "Errors", "Agent runs"]
+
+
+HISTORY_COLUMNS = ["run_at", "case_id", "subject", "sender", "mailbox", "run_by", "run_by_name", "result", "status_after", "mismatch_count",
+                   "comparison_status", "decision", "ms", "runs", "mode", "priority", "error"]
+
+
+def history_rows(repo, user_id: str, *, result: str = "done", run_by: Optional[str] = None, date_from: Optional[str] = None,
+                 date_to: Optional[str] = None, q: Optional[str] = None) -> list[dict[str, Any]]:
+    """One row per case the AI agent has run (its latest run), newest first. `result`: done | paused | error | all."""
+    result = (result or "done").lower()
+    want = {"done": {"completed"}, "paused": {"paused"}, "error": {"error"}, "all": {"completed", "paused", "error"}}.get(result, {"completed"})
+    if run_by == "me":
+        run_by = user_id
+    names = {u.id: u.display_name for u in repo.list_users()}
+    emails = {e.id: e for e in repo.list_emails()}
+    rows: list[dict[str, Any]] = []
+    for c in repo.list_cases():
+        a = c.agent_run
+        if not a or a.result not in want:
+            continue
+        if run_by and a.last_run_by != run_by:
+            continue
+        stamp = a.last_run_at.isoformat()
+        if date_from and stamp < date_from:
+            continue
+        if date_to and stamp[:10] > date_to[:10]:
+            continue
+        e = emails.get(c.source_email_id)
+        if q:
+            hay = f"{c.id} {e.subject if e else ''} {e.sender if e else ''} {a.last_run_by} {a.decision or ''}".lower()
+            if q.lower() not in hay:
+                continue
+        rows.append({
+            "run_at": stamp, "case_id": c.id, "subject": e.subject if e else "", "sender": e.sender if e else "", "mailbox": (e.mailbox_address if e else None) or "",
+            "run_by": a.last_run_by, "run_by_name": names.get(a.last_run_by, a.last_run_by), "result": "done" if a.result == "completed" else a.result,
+            "status_after": a.status_after.value, "status": c.status.value, "mismatch_count": c.mismatch_count,
+            "comparison_status": c.comparison_status.value if c.comparison_status else "", "decision": a.decision or "", "ms": a.ms, "runs": a.runs,
+            "mode": a.mode, "priority": c.priority.value, "error": a.error or "",
+        })
+    rows.sort(key=lambda r: r["run_at"], reverse=True)
+    return rows
+
+
+def _styled_sheet(wb, title: str, headers: list[str], widths: Optional[list[int]] = None):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    ws = wb.active if wb.active.title == "Sheet" else wb.create_sheet()
+    ws.title = title
+    ws.append(headers)
+    for i, cell in enumerate(ws[1], start=1):
+        cell.font, cell.fill, cell.alignment = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="C2410C"), Alignment(vertical="center")
+        ws.column_dimensions[get_column_letter(i)].width = (widths[i - 1] if widths and i - 1 < len(widths) else max(14, min(48, len(headers[i - 1]) + 6)))
+    ws.freeze_panes = "A2"
+    return ws
+
+
+def build_history_xlsx(rows: list[dict[str, Any]], *, generated_by: str = "system", now: Optional[datetime] = None) -> bytes:
+    """Agent-run history workbook: one row per processed case + a summary sheet."""
+    import io
+
+    import openpyxl
+
+    stamp = now or datetime.utcnow()
+    wb = openpyxl.Workbook()
+    ws = _styled_sheet(wb, "Agent runs", HISTORY_COLUMNS, [22, 26, 48, 30, 26, 16, 22, 10, 20, 10, 20, 16, 8, 6, 8, 10, 18])
+    for r in rows:
+        ws.append([r.get(k, "") for k in HISTORY_COLUMNS])
+    sm = _styled_sheet(wb, "Summary", ["metric", "value"], [36, 24])
+    sm.append(["generated_at_utc", stamp.replace(microsecond=0).isoformat()])
+    sm.append(["generated_by", generated_by])
+    sm.append(["runs_listed", len(rows)])
+    for key, label in (("result", "by_result"), ("run_by_name", "by_operator"), ("mode", "by_mode"), ("decision", "by_decision")):
+        for k, v in sorted(count_by(rows, lambda r, key=key: str(r.get(key) or "")).items()):
+            if k:
+                sm.append([f"{label}:{k}", v])
+    for day, v in sorted(count_by(rows, lambda r: r["run_at"][:10]).items()):
+        sm.append([f"by_day:{day}", v])
+    with_mm = [r for r in rows if r["mismatch_count"]]
+    sm.append(["with_mismatch", len(with_mm)])
+    sm.append(["avg_ms", int(sum(r["ms"] for r in rows) / len(rows)) if rows else 0])
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 def build_report_xlsx(repo, case_ids: Optional[list[str]] = None, *, generated_by: str = "system", now: Optional[datetime] = None) -> bytes:
@@ -218,6 +302,12 @@ def build_report_xlsx(repo, case_ids: Optional[list[str]] = None, *, generated_b
     for c in cases:
         for x in c.errors:
             er.append([c.id, x.category.value, x.step, x.message, x.recovery, x.retryable, x.resolved])
+
+    # 10. Agent runs (the History page)
+    hr = sheet("Agent runs", HISTORY_COLUMNS, [22, 26, 48, 30, 26, 16, 22, 10, 20, 10, 20, 16, 8, 6, 8, 10, 18])
+    for r in history_rows(repo, generated_by, result="all"):
+        if not wanted or r["case_id"] in case_ids_set:
+            hr.append([r.get(k, "") for k in HISTORY_COLUMNS])
 
     out = io.BytesIO()
     wb.save(out)
