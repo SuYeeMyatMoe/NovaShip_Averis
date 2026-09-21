@@ -19,3 +19,6 @@ th { font-weight: 600; }
 .table-row-action { opacity: .3; transition: opacity .18s ease; }
 tr:hover .table-row-action, tr:focus-within .table-row-action { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+
+/* indeterminate progress sweep (Workbench batch loading); disabled by motion-reduce utilities */
+@keyframes sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }

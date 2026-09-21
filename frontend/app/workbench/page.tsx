@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import { api, post, getSession, downloadFile } from "@/lib/api";
 import { Badge, Button, Card, Empty, KV, StatusBadge, Toast } from "@/components/ui";
 import { CaseMultiPicker } from "@/components/case-picker";
-import { EvaluationCard } from "@/components/evaluation-card";
 import { useOperatorWarning } from "@/lib/operator-warning";
 
 function downloadBase64Xlsx(b64: string, filename: string) {
@@ -70,6 +69,11 @@ export default function WorkbenchPage() {
   const loadRag = useCallback(() => { api("/rag/info").then(setRag).catch(() => {}); }, []);
   // serverless hosts (Vercel) cap one request: batches are fanned out per case from the browser
   const [runtime, setRuntime] = useState<{ runtime: string; max_request_s: number } | null>(null);
+  // live progress of the batch that is running now: drives the loading UI in the Graph state card
+  type CaseProgress = "queued" | "running" | "done" | "paused" | "error";
+  const [progress, setProgress] = useState<{ mode: "fan-out" | "server"; parallel: number; startedAt: number; cases: Record<string, CaseProgress> } | null>(null);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { if (!progress) return; const t = window.setInterval(() => setNow(Date.now()), 500); return () => window.clearInterval(t); }, [progress]);
   useEffect(() => { api<{ runtime: string; max_request_s: number }>("/health", {}, { auth: false }).then((h) => setRuntime({ runtime: h.runtime, max_request_s: h.max_request_s })).catch(() => {}); }, []);
   const serverless = runtime?.runtime === "vercel";
   useEffect(() => { loadRag(); }, [loadRag]);
@@ -124,46 +128,71 @@ export default function WorkbenchPage() {
   const runAgentFanOut = async (targets: string[], only?: string[]) => {
     setLastAction("agent");
     setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(targets.map((id) => [id, { action: "agent", ok: true, status: "RUNNING", running: true } as RunRow])) }));
+    const workers = Math.max(1, Math.min(parallel, targets.length));
+    setProgress({ mode: "fan-out", parallel: workers, startedAt: Date.now(), cases: Object.fromEntries(targets.map((id) => [id, "queued" as CaseProgress])) });
+    const mark = (id: string, state: CaseProgress) => setProgress((p) => (p ? { ...p, cases: { ...p.cases, [id]: state } } : p));
     const queue = [...targets];
     let okCount = 0, failed = 0, paused = 0;
     const worker = async () => {
       while (queue.length) {
         const id = queue.shift()!;
         const t0 = Date.now();
+        mark(id, "running");
         try {
           const st = await post(`/agent/run/${id}?mode=batch`);
           const row: RunRow = { action: "agent", ok: true, paused: !!st.paused, next: st.next || [], status: st.status, interrupt: st.interrupt, agent_run: st.agent_run, ms: Date.now() - t0 };
           okCount += 1; if (row.paused) paused += 1;
           setRows((prev) => ({ ...prev, [id]: row }));
+          mark(id, row.paused ? "paused" : "done");
         } catch (e: any) {
           failed += 1;
           setRows((prev) => ({ ...prev, [id]: { action: "agent", ok: false, error: { message: e?.detail?.error || e.message || "run failed", category: e?.detail?.category || "COMPARISON_ERROR", retryable: true }, ms: Date.now() - t0 } }));
+          mark(id, "error");
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(parallel, targets.length)) }, worker));
+    await Promise.all(Array.from({ length: workers }, worker));
     try { await post("/agent/batch-audit", { count: targets.length, ok: okCount, failed, paused, parallel }); } catch { /* audit is best effort */ }
-    say(`agent: ${okCount}/${targets.length} ran · ${paused} waiting for a person · ${Math.min(parallel, targets.length)} in parallel (one request per case)`, failed ? "err" : "ok");
+    say(`agent: ${okCount}/${targets.length} ran · ${paused} waiting for a person · ${workers} in parallel (one request per case)`, failed ? "err" : "ok");
+  };
+  /** After a batch: show the first case that needs a person (else the first case) in the Graph state card, so the result is visible without scrolling. */
+  const showFirstResult = async (targets: string[], results: Record<string, any>) => {
+    const pick = targets.find((id) => results[id]?.ok && results[id]?.paused) || targets.find((id) => results[id]?.ok) || targets[0];
+    if (pick) await inspect(pick);
   };
   const runAgentBatch = async (only?: string[]) => {
     const targets = only ?? ids;
     if (!targets.length) return say("Add at least one case", "err");
     setBusy(true);
+    setSt(null);
+    let finalRows: Record<string, any> = {};
     try {
-      if (serverless) { await runAgentFanOut(targets, only); return; }
-      try {
-        const r = await post("/agent/run-batch", { case_ids: targets, parallel });
-        const results = (r.results || {}) as Record<string, any>;
-        setLastAction("agent");
-        setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(Object.entries(results).map(([id, x]) => [id, { action: "agent", ...x }])) }));
-        say(`agent: ${Object.keys(results).length - r.failed_ids.length}/${Object.keys(results).length} ran · ${r.paused_ids.length} waiting for a person · ${r.parallel} in parallel`, r.failed_ids.length ? "err" : "ok");
-      } catch (e: any) {
-        // the whole-batch request died (gateway timeout / network): fall back to one request per case
-        if (!e?.status || e.status >= 500 || e.status === 408 || e.status === 504) { say("Batch request timed out — running one case per request instead", "err"); await runAgentFanOut(targets, only); }
-        else throw e;
+      if (serverless) {
+        await runAgentFanOut(targets, only);
+      } else {
+        try {
+          const workers = Math.max(1, Math.min(parallel, targets.length));
+          setProgress({ mode: "server", parallel: workers, startedAt: Date.now(), cases: Object.fromEntries(targets.map((id) => [id, "running" as CaseProgress])) });
+          setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(targets.map((id) => [id, { action: "agent", ok: true, status: "RUNNING", running: true } as RunRow])) }));
+          const r = await post("/agent/run-batch", { case_ids: targets, parallel });
+          const results = (r.results || {}) as Record<string, any>;
+          finalRows = results;
+          setLastAction("agent");
+          setRows((prev) => ({ ...prev, ...Object.fromEntries(Object.entries(results).map(([id, x]) => [id, { action: "agent", ...x }])) }));
+          say(`agent: ${Object.keys(results).length - r.failed_ids.length}/${Object.keys(results).length} ran · ${r.paused_ids.length} waiting for a person · ${r.parallel} in parallel`, r.failed_ids.length ? "err" : "ok");
+        } catch (e: any) {
+          // the whole-batch request died (gateway timeout / network): fall back to one request per case
+          if (!e?.status || e.status >= 500 || e.status === 408 || e.status === 504) { say("Batch request timed out - running one case per request instead", "err"); await runAgentFanOut(targets, only); }
+          else throw e;
+        }
       }
     } catch (e: any) { say(e?.detail?.error || e.message, "err"); }
-    finally { setBusy(false); }
+    finally {
+      setBusy(false);
+      setProgress(null);
+      setRows((cur) => { finalRows = Object.keys(finalRows).length ? finalRows : cur; return cur; });
+      window.setTimeout(() => showFirstResult(targets, finalRows), 0);
+    }
   };
   const resumeBatch = async (action: string) => {
     if (!pausedIds.length) return say("No paused cases in the last run", "err");
@@ -268,8 +297,9 @@ export default function WorkbenchPage() {
           </Card>
 
           <div id="graph-state" className="scroll-mt-16" />
-          <Card title="Graph state" className="border-orange-200">
-            {!st ? <Empty text="Run the agent on selected cases, then press Inspect on a row to see its graph state here." /> : (
+          <Card title={progress ? "Graph state · running" : "Graph state"} className="border-orange-200"
+            right={progress && <span className="text-[11px] text-ink-500" aria-live="polite">{Math.round((now - progress.startedAt) / 1000)} s elapsed</span>}>
+            {progress ? <BatchProgress progress={progress} /> : !st ? <Empty text="Run the agent on selected cases, then press Inspect on a row to see its graph state here." /> : (
               <div className="space-y-2 text-sm">
                 <KV k="Paused" v={st.paused ? <Badge className="bg-review text-white">waiting for human</Badge> : <Badge className="bg-match-bg text-match-fg">not paused</Badge>} />
                 <KV k="Next node" v={<span className="font-mono text-xs">{st.next?.join(", ") || "END"}</span>} />
@@ -302,7 +332,6 @@ export default function WorkbenchPage() {
         </div>
       </div>
 
-      <EvaluationCard canExport={canExport} say={say} />
 
       {rowList.length > 0 && (
         <Card title={`Last run · ${lastAction === "agent" ? "agent" : lastAction} · ${rowList.length} case(s)`} className="border-orange-200"
@@ -347,6 +376,47 @@ export default function WorkbenchPage() {
           <p className="mt-2 text-[11px] text-ink-500">Every row is isolated: one failing case never stops the others. Bulk resume allows only non-sending decisions; approve stays per case.</p>
         </Card>
       )}
+    </div>
+  );
+}
+
+/**
+ * Loading UI for the Graph state card while a batch runs: a real progress bar (fan-out reports each case;
+ * the Docker batch is one request, so it shows an indeterminate sweep), per-case chips and a skeleton in the
+ * shape of the state rows that will replace it. Motion is gated by prefers-reduced-motion.
+ */
+function BatchProgress({ progress }: { progress: { mode: "fan-out" | "server"; parallel: number; cases: Record<string, "queued" | "running" | "done" | "paused" | "error"> } }) {
+  const entries = Object.entries(progress.cases);
+  const finished = entries.filter(([, s]) => s === "done" || s === "paused" || s === "error").length;
+  const running = entries.filter(([, s]) => s === "running").length;
+  const determinate = progress.mode === "fan-out";
+  const pct = determinate ? Math.round((finished / Math.max(entries.length, 1)) * 100) : 0;
+  const chip: Record<string, string> = { queued: "bg-ink-100 text-ink-500", running: "bg-accent-bg text-accent-fg", done: "bg-match-bg text-match-fg", paused: "bg-review-bg text-review-fg", error: "bg-mismatch-bg text-mismatch-fg" };
+  return (
+    <div className="space-y-3" role="status" aria-busy="true" aria-label={`Agent running on ${entries.length} case(s)`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-ink-700">
+        <span className="font-semibold">{determinate ? `${finished} of ${entries.length} finished` : `${entries.length} case(s) running on the server`}</span>
+        <span className="text-ink-500">{running} running · {progress.parallel} in parallel{determinate ? " · one request per case" : ""}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-ink-100" aria-hidden>
+        {determinate
+          ? <div className="h-full rounded-full bg-accent transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
+          : <div className="h-full w-1/3 rounded-full bg-accent motion-safe:animate-[sweep_1.6s_ease-in-out_infinite] motion-reduce:w-full motion-reduce:opacity-50" />}
+      </div>
+      <ul className="flex flex-wrap gap-1.5">
+        {entries.map(([id, state]) => (
+          <li key={id} className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${chip[state]}`}>{id.replace("case_", "")} · {state}</li>
+        ))}
+      </ul>
+      <div className="space-y-2 pt-1" aria-hidden>
+        {["w-2/5", "w-3/5", "w-1/3", "w-1/2", "w-2/3"].map((w, i) => (
+          <div key={i} className="grid grid-cols-[7rem_1fr] items-center gap-3">
+            <div className="h-3 rounded bg-ink-100 motion-safe:animate-pulse" />
+            <div className={`h-3 rounded bg-ink-100 motion-safe:animate-pulse ${w}`} style={{ animationDelay: `${i * 120}ms` }} />
+          </div>
+        ))}
+      </div>
+      <p className="text-[11px] text-ink-500">Each case takes roughly 20-45 s (security, classification, extraction, comparison, draft). The first finished case opens here automatically.</p>
     </div>
   );
 }
