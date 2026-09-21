@@ -216,7 +216,7 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
 export type Metrics = Record<string, any>;
 /** A policy change the desk learned from security-gate decisions; only an Admin can turn it into a policy version. */
 export type PolicySuggestion = { id: string; recipe: string; bucket: string; count: number; needed: number; title: string; rationale: string; section: string; key: string; from_value: any; to_value: any; proposed_section: Record<string, any>; evidence: { case_id: string; subject: string; sender: string; outcome: string; status: string; when: string; by: string }[] };
-export type PolicySuggestions = { items: PolicySuggestion[]; total: number; progress: { recipe: string; bucket: string; count: number; needed: number }[]; settings: Record<string, any> };
+export type PolicySuggestions = { items: PolicySuggestion[]; total: number; progress: { recipe: string; kind?: string; label?: string; bucket: string; count: number; needed: number }[]; settings: Record<string, any> };
 export type NotificationItem = { kind?: "needs_person"; case_id: string; subject: string; status: string; priority: string; reason: string; updated_at: string };
 /** A case that arrived through the signed-in user's own mailbox (Outlook/Gmail) in the last 48 h. */
 export type NewMailItem = { kind: "new_mail"; case_id: string; email_id: string; mailbox?: string | null; subject: string; sender: string; status: string; priority: string; action_required: boolean; received_at: string; created_at: string };

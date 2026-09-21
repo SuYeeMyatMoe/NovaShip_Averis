@@ -41,6 +41,7 @@ DEFAULT_POLICY: dict[str, Any] = {
         "trusted_domains": ["aprilasia.com", "april.com.my"],
         "partner_domains": ["fujitogrp.com", "safqa.co.ke", "psabdp.com", "roxcel.at", "ifpla.com", "algurg.ae", "vitalsolutions.sg"],
         "blocked_senders": [],          # addresses or domains classified SPAM at the gate; learned from archived mail, saved by an Admin
+        "blocked_phrases": [],          # normalised subject/body wording classified SPAM at the gate; learned from archived mail, saved by an Admin
     },
     # Learning from the security gate: after N flagged mails from one sender are archived, Policies proposes blocking it. Never applied by itself.
     "learning": {
@@ -119,8 +120,10 @@ def explain_policy(policy: dict[str, Any]) -> list[str]:
 def _explain_learning(policy: dict[str, Any]) -> str:
     s, l = policy.get("security") or {}, policy.get("learning") or {}
     blocked = s.get("blocked_senders") or []
-    base = f"Learning: after {l.get('min_archives', 3)} flagged mails from one sender are archived without action, Policies proposes blocking that sender; nothing changes until an Admin saves it, and auto-send is never enabled."
-    return base + (f" {len(blocked)} sender(s) are currently blocked at the gate." if blocked else "")
+    phrases = s.get("blocked_phrases") or []
+    base = f"Learning: after {l.get('min_archives', 3)} archived flagged mails share a pattern (same wording, same sender, same word in the sender's domain), Policies proposes a rule; nothing changes until an Admin saves it, and auto-send is never enabled."
+    learned = [x for x in (f"{len(blocked)} sender(s)" if blocked else "", f"{len(phrases)} phrase(s)" if phrases else "") if x]
+    return base + (f" Currently blocked at the gate: {', '.join(learned)}." if learned else "")
 
 
 def _explain_operator_guard(g: dict[str, Any]) -> str:

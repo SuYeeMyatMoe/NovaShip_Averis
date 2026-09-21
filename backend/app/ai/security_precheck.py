@@ -42,6 +42,17 @@ def _domain(addr: str) -> str:
     return addr.split("@")[-1].lower().strip() if "@" in addr else addr.lower()
 
 
+_TAG_RE = re.compile(r"^\s*\[[^\]]*\]\s*")
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def normalise_text(text: str) -> str:
+    """Lowercase words only: a leading [tag] and pure numbers are dropped, tokens of 1-2 characters too.
+    The same function normalises learned `blocked_phrases` and the mail they are matched against."""
+    body = _TAG_RE.sub("", (text or "").lower())
+    return " ".join(w for w in _WORD_RE.findall(body) if not w.isdigit() and len(w) > 2)
+
+
 def assess_security(email: EmailMessage, attachments: Iterable[AttachmentMeta], policy: dict | None = None) -> SecurityAssessment:
     policy = policy or {}
     blocked_ext = set(policy.get("blocked_attachment_types", [])) | BLOCKED_EXTENSIONS
@@ -49,6 +60,8 @@ def assess_security(email: EmailMessage, attachments: Iterable[AttachmentMeta], 
     trusted = TRUSTED_DOMAINS | set(policy.get("trusted_domains", []))
     partners = KNOWN_PARTNER_DOMAINS | set(policy.get("partner_domains", []))
     blocked = {str(x).strip().lower() for x in policy.get("blocked_senders", []) if x}
+    blocked_phrases = [normalise_text(str(x)) for x in policy.get("blocked_phrases", []) if str(x).strip()]
+    lure_words = tuple(SUSPICIOUS_DOMAIN_WORDS) + tuple(str(w).lower() for w in policy.get("suspicious_domain_words", []) if w)
 
     text = f"{email.subject}\n{email.body}".lower()
     signals: list[SecuritySignal] = []
@@ -69,7 +82,7 @@ def assess_security(email: EmailMessage, attachments: Iterable[AttachmentMeta], 
     elif dom in partners:
         pass
     else:
-        if any(w in dom for w in SUSPICIOUS_DOMAIN_WORDS):
+        if any(w in dom for w in lure_words):
             score += 0.35
             signals.append(SecuritySignal(
                 signal="SUSPICIOUS_SENDER_DOMAIN", severity="MEDIUM",
@@ -155,6 +168,17 @@ def assess_security(email: EmailMessage, attachments: Iterable[AttachmentMeta], 
             evidence=f"Sender '{sender_lc}' is on the desk's blocked list (learned from archived mail).",
             recommended_action="Treat as spam; no action needed.",
         ))
+    if blocked_phrases:
+        normalised = f" {normalise_text(email.subject)} {normalise_text(email.body)} "
+        hit = next((p for p in blocked_phrases if p and f" {p} " in normalised), None)
+        if hit:
+            is_blocked = True
+            score = max(score, 1.0)
+            signals.append(SecuritySignal(
+                signal="BLOCKED_PHRASE", severity="HIGH",
+                evidence=f"Wording matches a phrase the desk learned to archive: '{hit[:80]}'.",
+                recommended_action="Treat as spam; no action needed.",
+            ))
 
     score = max(0.0, min(1.0, score))
     if is_blocked:

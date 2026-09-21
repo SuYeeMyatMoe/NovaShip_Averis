@@ -59,7 +59,7 @@ def field_stats(cases) -> list[dict[str, Any]]:
 def gate_state_of(c, marked_no_action: Optional[set[str]] = None) -> str:
     """open = still waiting at the security gate; archived / reviewing / no_action = a person handled it.
     NO_ACTION_INFO alone is not enough (the pipeline sets it for informational mail): `no_action` needs a person's MARKED_NO_ACTION."""
-    if any(sig.signal == "BLOCKED_SENDER" for sig in c.security.signals):
+    if any(sig.signal in ("BLOCKED_SENDER", "BLOCKED_PHRASE") for sig in c.security.signals):
         return "blocked"   # learned block list: spam at the gate, nobody needs to look at it
     if c.status == CaseStatus.COMPLETED:
         return "archived"

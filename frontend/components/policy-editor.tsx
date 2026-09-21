@@ -59,14 +59,15 @@ export const POLICY_SCHEMA: Record<string, SectionSpec> = {
       trusted_domains: { label: "Trusted domains", kind: "list", help: "Internal / first-party sender domains." },
       partner_domains: { label: "Partner domains", kind: "list", help: "Known forwarders, consignees and notify parties." },
       blocked_senders: { label: "Blocked senders", kind: "list", help: "Addresses or domains classified SPAM at the gate. Filled by accepting a learned suggestion; you can also edit it here." },
+      blocked_phrases: { label: "Blocked phrases", kind: "list", help: "Normalised subject/body wording classified SPAM at the gate, whoever sends it. Filled by accepting a learned suggestion." },
     },
   },
   learning: {
     title: "Learning from the security gate",
-    blurb: "After enough flagged mail from one sender is archived, Policies proposes blocking it. Suggestions are never applied by themselves and never enable auto-send.",
+    blurb: "After enough archived flagged mail shares a pattern (subject wording, sender, sender-domain word), Policies proposes a rule. Suggestions are never applied by themselves and never enable auto-send.",
     fields: {
       enabled: { label: "Propose changes", kind: "boolean", help: "Off = no suggestions are computed." },
-      min_archives: { label: "Archives before a suggestion", kind: "integer", min: 2, max: 20, step: 1, help: "Flagged mails from one sender a person must archive first." },
+      min_archives: { label: "Archives before a suggestion", kind: "integer", min: 2, max: 20, step: 1, help: "Archived flagged mails that must share the pattern first." },
       window_days: { label: "Look back (days)", kind: "integer", min: 7, max: 365, step: 1 },
     },
   },

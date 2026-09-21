@@ -156,8 +156,8 @@ function OperatorProfileCard({ suggestions, accepted, canEdit, onAccept, onDismi
         </div>
         {!current ? (
           <div className="mt-2 text-xs text-ink-600">
-            <p>Nothing learned yet. After {suggestions?.settings?.min_archives ?? 3} flagged mails from one sender are archived without action, a suggestion appears here.</p>
-            {suggestions?.progress?.length ? <ul className="mt-1.5 space-y-0.5 text-[11px] text-ink-500">{suggestions.progress.map((p) => <li key={p.bucket} className="flex justify-between"><span className="truncate">{p.bucket}</span><span className="font-mono">{p.count} / {p.needed}</span></li>)}</ul> : null}
+            <p>Nothing learned yet. After {suggestions?.settings?.min_archives ?? 3} archived mails share a pattern (the same subject wording, the same sender, or the same word in the sender&apos;s domain) a suggestion appears here.</p>
+            {suggestions?.progress?.length ? <ul className="mt-1.5 space-y-0.5 text-[11px] text-ink-500">{suggestions.progress.map((p) => <li key={`${p.recipe}:${p.bucket}`} className="flex justify-between gap-2"><span className="truncate" title={p.bucket}>{p.label || p.bucket}</span><span className="shrink-0 font-mono">{p.count} / {p.needed}</span></li>)}</ul> : null}
           </div>
         ) : (
           <div className="mt-2 rounded-xl border border-orange-200 bg-[#fffaf5] p-3 text-xs">

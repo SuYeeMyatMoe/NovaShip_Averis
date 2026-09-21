@@ -13,7 +13,8 @@ os.environ.setdefault("LLM_PROVIDER", "none")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.ai.policy_learning import sender_bucket  # noqa: E402
+from app.ai.policy_learning import domain_words, sender_bucket  # noqa: E402
+from app.ai.security_precheck import normalise_text  # noqa: E402
 from app.ai.security_precheck import assess_security  # noqa: E402
 from app.config import get_repo  # noqa: E402
 from app.contracts.schemas import EmailMessage  # noqa: E402
@@ -29,7 +30,7 @@ LURE_SENDER = "deals@prize-claim.net"          # lure keyword in the domain -> S
 _counter = {"n": 0}
 
 
-def _ingest(sender: str, subject: str = "Container schedule update", body: str = "Please see the updated schedule for your booking.", atts: dict[str, str] | None = None) -> str:
+def _ingest(sender: str, subject: str = "Booking update", body: str = "Please see the updated schedule for your booking.", atts: dict[str, str] | None = None) -> str:
     _counter["n"] += 1
     payload = {"email_id": f"learn_{_counter['n']:03d}", "from": sender, "subject": f"{subject} {_counter['n']}", "body": body, "provider": "test",
                "attachments": [{"name": n, "content_base64": __import__("base64").b64encode(t.encode()).decode()} for n, t in (atts or {}).items()]}
@@ -82,7 +83,7 @@ def test_three_archives_open_a_block_sender_suggestion_and_two_only_show_progres
     sug = next(x for x in s["items"] if x["bucket"] == "crypto-parcel.io")
     assert sug["recipe"] == "block_sender" and sug["count"] == 3 and sug["section"] == "security" and sug["key"] == "blocked_senders"
     assert "crypto-parcel.io" in sug["to_value"] and "crypto-parcel.io" in sug["proposed_section"]["blocked_senders"]
-    assert len(sug["evidence"]) == 3 and all(e["outcome"] == "SUSPICIOUS" for e in sug["evidence"])
+    assert len(sug["evidence"]) == 3 and all(e["outcome"] in ("SUSPICIOUS", "SPAM") for e in sug["evidence"])
     assert sug["proposed_section"]["partner_domains"] == DEFAULT_POLICY["security"]["partner_domains"], "the whole section is proposed, nothing else changed"
     # operations staff may read suggestions (view_policy) but not decide
     assert client.get("/policies/suggestions", headers=OPS).status_code == 200
@@ -166,3 +167,90 @@ def test_assess_security_blocked_list_forces_spam_and_defaults_are_unchanged():
     by_address = assess_security(clean, [], {**policy, "blocked_senders": ["OPS@vitalsolutions.sg"]})
     assert by_address.outcome.value == "SPAM" and any(s.signal == "BLOCKED_SENDER" for s in by_address.signals)
     assert assess_security(clean, [], {**policy, "blocked_senders": ["someone-else.com"]}).outcome.value == "SAFE"
+
+
+def test_archived_spam_counts_too():
+    """Spam that still reaches the queue and gets archived teaches the desk as well (it is what people spend time on)."""
+    sender = "offers@bulk-deals.xyz"
+    for _ in range(3):
+        cid = _ingest(sender, body="Congratulations, you have won a gift card. Claim now at http://bit.ly/prize-claim")
+        assert _case(cid)["security"]["outcome"] == "SPAM"
+        assert client.post(f"/cases/{cid}/complete", headers=SUP).status_code == 200
+    assert any(x["bucket"] == "bulk-deals.xyz" and x["count"] == 3 for x in _suggestions()["items"])
+
+
+CAMPAIGN = "Exclusive offer: 90% OFF premium logistics software this week only"
+CAMPAIGN_NORM = "exclusive offer off premium logistics software this week only"
+
+
+def test_normalise_text_and_domain_words():
+    assert normalise_text("[NS-TEST 05] Increase your shipping revenue with this ONE weird trick") == "increase your shipping revenue with this one weird trick"
+    assert normalise_text(CAMPAIGN) == CAMPAIGN_NORM
+    assert domain_words("logistics-deals.biz") == {"logistics", "deals"} and domain_words("mail.bulk-offers.co.uk") == {"mail", "bulk", "offers"}
+
+
+def test_shared_subject_wording_becomes_a_phrase_suggestion_across_senders():
+    """Three archived mails, three senders, one campaign subject -> one rule that stops the campaign, not three sender rules."""
+    senders = ["a@offer-mill-one.net", "b@offer-mill-two.org", "c@offer-mill-three.biz"]
+    for sender in senders[:2]:
+        cid = _ingest(sender, subject=CAMPAIGN, body="Buy now and save big on freight software.")
+        assert client.post(f"/cases/{cid}/complete", headers=SUP).status_code == 200
+    s = _suggestions()
+    assert all(x["recipe"] != "block_phrase" or CAMPAIGN_NORM not in x["bucket"] for x in s["items"])
+    assert any(p["kind"] == "phrase" and p["bucket"] == CAMPAIGN_NORM and p["count"] == 2 and p["label"].startswith('subject "') for p in s["progress"])
+
+    cid = _ingest(senders[2], subject=CAMPAIGN, body="Buy now and save big on freight software.")
+    assert client.post(f"/cases/{cid}/complete", headers=SUP).status_code == 200
+    s = _suggestions()
+    sug = next(x for x in s["items"] if x["recipe"] == "block_phrase" and x["bucket"] == CAMPAIGN_NORM)
+    assert sug["count"] == 3 and sug["key"] == "blocked_phrases" and CAMPAIGN_NORM in sug["to_value"] and len(sug["evidence"]) == 3
+    assert "3 different senders" in sug["rationale"]
+    assert all(not (x["recipe"] == "block_sender" and x["bucket"].startswith("offer-mill")) for x in s["items"]), "each sender only has one archive"
+    assert all(not (x["recipe"] == "block_phrase" and x["bucket"] != CAMPAIGN_NORM and x["bucket"] in CAMPAIGN_NORM) for x in s["items"]), "shorter sub-phrases are not proposed separately"
+
+
+def test_wording_also_used_by_legitimate_mail_is_never_proposed():
+    phrase = "Container booking confirmation for your shipment"
+    _ingest("ops@vitalsolutions.sg", subject=phrase, body="Attached is the booking confirmation.")   # partner, SAFE -> legitimate wording
+    for sender in ("x@spam-mill-one.net", "y@spam-mill-two.org", "z@spam-mill-three.biz"):
+        cid = _ingest(sender, subject=phrase, body="Claim now, you have been selected for a gift card.")
+        assert client.post(f"/cases/{cid}/complete", headers=SUP).status_code == 200
+    assert all(x["recipe"] != "block_phrase" or "container booking confirmation" not in x["bucket"] for x in _suggestions()["items"])
+
+
+def test_domain_word_pattern_and_accepting_it_flags_new_senders():
+    try:
+        for sender in ("promo@bulkmail-x.net", "news@bulkmail-y.org", "hi@bulkmail-z.biz"):
+            cid = _ingest(sender, subject=f"Weekly deals from {sender.split('@')[1]}", body="Congratulations, claim your voucher now.")
+            assert client.post(f"/cases/{cid}/complete", headers=SUP).status_code == 200
+        sug = next(x for x in _suggestions()["items"] if x["recipe"] == "flag_domain_word" and x["bucket"] == "bulkmail")
+        assert sug["key"] == "suspicious_domain_words" and "bulkmail" in sug["to_value"] and sug["count"] == 3
+        r = client.put("/policies", json={"security": sug["proposed_section"], "change_note": "learned", "accepted_suggestions": [sug["id"]]}, headers=ADM)
+        assert r.status_code == 200
+        cid = _ingest("info@bulkmail-q.info", subject="Your invoice", body="Please find the invoice attached for your booking.")
+        case = _case(cid)
+        assert case["security"]["outcome"] in ("SUSPICIOUS", "SPAM") and any(s["signal"] == "SUSPICIOUS_SENDER_DOMAIN" for s in case["security"]["signals"])
+        assert all(x["bucket"] != "bulkmail" for x in _suggestions()["items"])
+    finally:
+        _reset_policy()
+
+
+def test_accepting_a_phrase_blocks_the_campaign_from_any_new_sender():
+    try:
+        subject = "Limited time freight rebate program enrollment"
+        for sender in ("p@rebate-one.net", "q@rebate-two.org", "r@rebate-three.biz"):
+            cid = _ingest(sender, subject=subject, body="You have been selected, claim now.")
+            assert client.post(f"/cases/{cid}/complete", headers=SUP).status_code == 200
+        sug = next(x for x in _suggestions()["items"] if x["recipe"] == "block_phrase" and x["bucket"] == normalise_text(subject))
+        r = client.put("/policies", json={"security": sug["proposed_section"], "change_note": f"Learned: {sug['title']}", "accepted_suggestions": [sug["id"]]}, headers=ADM)
+        assert r.status_code == 200
+        cid = _ingest("brand.new@fresh-sender.com", subject=f"RE: {subject}", body="See details below.")
+        case = _case(cid)
+        assert case["security"]["outcome"] == "SPAM" and any(s["signal"] == "BLOCKED_PHRASE" for s in case["security"]["signals"])
+        assert case["status"] == "NO_ACTION_INFO"
+        assert cid not in {r["case_id"] for r in client.get("/security/queue", headers=SUP).json()["items"]}
+        other = _ingest("brand.new@fresh-sender.com", subject="Booking update", body="Please see the updated schedule for your booking.")
+        assert _case(other)["security"]["outcome"] == "SAFE"
+        assert all(x["bucket"] != normalise_text(subject) for x in _suggestions()["items"])
+    finally:
+        _reset_policy()
