@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { api, fetchDocumentBlob, post, type CaseView, type Draft } from "@/lib/api";
+import { api, fetchDocumentBlob, post, type CaseView, type DeliveryInfo, type Draft } from "@/lib/api";
 import { Badge, Button, Card, Empty, KV, fmtDate } from "@/components/ui";
 
 // ------------------------------------------------------------------ Drafts (human-in-the-loop)
@@ -11,6 +11,16 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
   const [lang, setLang] = useState("en");
   const [busy, setBusy] = useState(false);
   const canApprove = perms.includes("approve_send");
+  // whether approving on this server really sends (EMAIL_SEND_MODE) — the button and badges must say so
+  const [sendMode, setSendMode] = useState<"live" | "simulate" | null>(null);
+  useEffect(() => { api<{ email?: { send_mode: "live" | "simulate" } }>("/health", {}, { auth: false }).then((h) => setSendMode(h.email?.send_mode || null)).catch(() => {}); }, []);
+  const [verifying, setVerifying] = useState<string | null>(null);
+  const verify = async (d: Draft) => {
+    setVerifying(d.id);
+    try { const r = await post<DeliveryInfo>(`/cases/${c.id}/drafts/${d.id}/verify-delivery`); say(r.verified === true ? "Found in the sender's Sent Items" : r.verified === false ? (r.bounce ? "Undeliverable notice found" : r.note || "Not sent") : r.note || "Not verified yet", r.verified === false && r.bounce ? "err" : "ok"); onChange(); }
+    catch (e: any) { say(e?.detail?.error || e.message, "err"); }
+    finally { setVerifying(null); }
+  };
 
   const gen = async () => { setBusy(true); try { await post(`/cases/${c.id}/draft`, { language: lang }); say("Draft generated (not sent)"); onChange(); } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); } };
   const act = async (path: string, d: Draft, extra: any = {}) => { setBusy(true); try { await post(`/cases/${c.id}/${path}`, { draft_id: d.id, ...extra }); say("Done"); setEditing(null); onChange(); } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); } };
@@ -23,6 +33,11 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
         <span className="text-ink-500">AI proposes → you review/edit → {canApprove ? "you approve" : "a supervisor approves"} → send. Nothing is auto-sent.</span>
         {!c.action_required && <Badge className="bg-ink-100 text-ink-700">No reply needed</Badge>}
       </div>
+      {sendMode === "simulate" && (
+        <div role="note" className="rounded-xl border border-review bg-review-bg/50 px-3 py-2 text-xs text-review-fg">
+          <span className="font-semibold">Sending is simulated on this server</span> (<span className="font-mono">EMAIL_SEND_MODE=simulate</span>): approving records the decision in the audit log, but no e-mail leaves the desk. Set <span className="font-mono">EMAIL_SEND_MODE=live</span> to send replies from the connected mailbox.
+        </div>
+      )}
       {c.drafts.length === 0 && <Empty text={c.action_required ? "No draft yet. Click Generate draft." : "Informational case — no reply needed. Generate a draft only if you want to respond."} />}
       {[...c.drafts].reverse().map((d) => (
         <Card key={d.id} title={<span>{d.draft_type.replace(/_/g, " ")} · v{d.version} <Badge className={{ PROPOSED: "bg-accent-bg text-accent-fg", EDITED: "bg-review-bg text-review-fg", APPROVED: "bg-match-bg text-match-fg", DELIVERING: "bg-review-bg text-review-fg", DELIVERY_UNKNOWN: "bg-mismatch-bg text-mismatch-fg", SENT: "bg-match text-white", SIMULATED: "bg-match-bg text-match-fg", SEND_FAILED: "bg-mismatch-bg text-mismatch-fg", REJECTED: "bg-mismatch-bg text-mismatch-fg" }[d.status] || ""}>{d.status}</Badge></span>}
@@ -41,15 +56,40 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
               <pre className="mt-1 whitespace-pre-wrap rounded-md bg-ink-50 p-3 font-mono text-[11px]">{d.body}</pre>
             </div>
           )}
+          {(d.status === "SENT" || d.status === "SIMULATED" || d.status === "DELIVERY_UNKNOWN") && <DeliveryBlock d={d} verifying={verifying === d.id} onVerify={() => verify(d)} />}
           {d.status !== "SENT" && d.status !== "SIMULATED" && d.status !== "REJECTED" && editing?.id !== d.id && (
             <div className="mt-2 flex flex-wrap gap-2">
               <Button onClick={() => { setEditing(d); setSubject(d.subject); setBody(d.body); }}>Edit</Button>
-              <Button kind="success" disabled={!canApprove || busy} title={canApprove ? "Approve and send" : "Requires SUPERVISOR/ADMIN"} onClick={() => act("approve", d)}>Approve & send</Button>
+              <Button kind="success" disabled={!canApprove || busy} title={canApprove ? (sendMode === "simulate" ? "Approve: recorded only, nothing is sent in simulate mode" : "Approve and send from the connected mailbox") : "Requires SUPERVISOR/ADMIN"} onClick={() => act("approve", d)}>{sendMode === "simulate" ? "Approve (simulated)" : "Approve & send"}</Button>
               <Button kind="danger" disabled={busy} onClick={() => act("reject", d, { note: "Rejected by reviewer" })}>Reject</Button>
             </div>
           )}
         </Card>
       ))}
+    </div>
+  );
+}
+
+/** What left the desk for this draft and what the sending mailbox says about it. */
+function DeliveryBlock({ d, verifying, onVerify }: { d: Draft; verifying: boolean; onVerify: () => void }) {
+  const info = d.delivery;
+  const providerName: Record<string, string> = { outlook: "Microsoft Graph (Outlook)", gmail: "Gmail API", shared: "the shared desk mailbox", simulate: "nobody" };
+  if (d.status === "SIMULATED" || info?.mode === "simulate") {
+    return <div className="mt-2 rounded-lg border border-review bg-review-bg/40 px-3 py-2 text-xs text-review-fg"><span className="font-semibold">No e-mail was sent (simulated).</span> The approval is recorded; the server was in <span className="font-mono">EMAIL_SEND_MODE=simulate</span> at the time.</div>;
+  }
+  const tone = info?.verified === true ? "border-match bg-match-bg/40 text-match-fg" : info?.verified === false ? "border-mismatch bg-mismatch-bg/40 text-mismatch-fg" : "border-ink-200 bg-ink-50 text-ink-700";
+  return (
+    <div className={`mt-2 rounded-lg border px-3 py-2 text-xs ${tone}`}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="font-semibold">Delivery</span>
+        {info ? <span>sent from <span className="font-mono">{info.from_address || "?"}</span> via {providerName[info.provider] || info.provider} · {fmtDate(info.sent_at)}{info.provider_id ? <> · id <span className="font-mono">{info.provider_id}</span></> : null}</span> : <span>sent before delivery records existed; verification uses the current mailbox.</span>}
+        <Button kind="ghost" disabled={verifying} onClick={onVerify}>{verifying ? "Checking…" : info?.verified_at ? "Verify again" : "Verify delivery"}</Button>
+      </div>
+      {info?.verified === true && <p className="mt-1">✓ In the sender&apos;s Sent Items{info.internet_message_id ? <> (message id <span className="font-mono">{info.internet_message_id}</span>)</> : null}. The provider handed it over: if the recipient cannot see it, it is in their <b>Spam / Junk</b> folder — personal outlook.com senders are often filtered on first contact. Ask them to mark it &quot;not spam&quot; once.</p>}
+      {info?.verified === false && info.bounce && <p className="mt-1">✗ The provider returned an undeliverable notice{info.bounce.subject ? <>: <i>{info.bounce.subject}</i></> : null}. {info.bounce.snippet}</p>}
+      {info?.verified === false && !info.bounce && <p className="mt-1">{info.note}</p>}
+      {info?.verified == null && info?.note && <p className="mt-1 text-ink-500">{info.note}</p>}
+      {info?.verified_at && <p className="mt-1 text-[10px] text-ink-500">checked {fmtDate(info.verified_at)}</p>}
     </div>
   );
 }

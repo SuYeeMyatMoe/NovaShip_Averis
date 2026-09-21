@@ -118,6 +118,8 @@ class _Graph:
     def __init__(self, *, rotate_to: str | None = "ms-rt-2", fail_send: bool = False):
         self.rotate_to = rotate_to
         self.fail_send = fail_send
+        self.sent_items: list[dict] = []          # what /me/mailFolders/sentitems returns
+        self.bounce: dict | None = None            # an undeliverable notice to serve from the inbox
         self.sent: list[dict] = []
         self.token_calls = 0
         self.attachment = base64.b64encode(b"SHIPPING INSTRUCTION\nShipper: APRIL FAR EAST (M) SDN BHD\n").decode()
@@ -132,6 +134,10 @@ class _Graph:
             return httpx.Response(200, json=body)
         if request.headers.get("Authorization") != f"Bearer access-{self.token_calls}":
             return httpx.Response(401, json={"error": "expired"})
+        if path.endswith("/me/mailFolders/sentitems/messages"):
+            return httpx.Response(200, json={"value": self.sent_items})
+        if path.endswith("/me/mailFolders/inbox/messages") and self.bounce is not None:
+            return httpx.Response(200, json={"value": [self.bounce]})
         if path.endswith("/me/mailFolders/inbox/messages"):
             return httpx.Response(200, json={"value": [{
                 "id": "AAMk1", "internetMessageId": "<abc-123@contoso.com>", "conversationId": "conv-1",
@@ -228,6 +234,22 @@ def test_outlook_mailbox_fetch_tags_case_and_reply_leaves_from_outlook(monkeypat
     assert case.drafts, "SI without BL -> missing-document request draft"
     approved = service.approve_draft(case.id, DraftDecision(draft_id=case.drafts[0].id), repo.get_user("u_sup_1"))
     assert approved.drafts[0].status == DraftStatus.SENT
+    delivery = approved.drafts[0].delivery
+    assert delivery and delivery.mode == "live" and delivery.provider == "outlook" and delivery.from_address == "ops@contoso.com" and delivery.provider_id == "req-77"
+    assert delivery.mailbox_user_id == "u_ops_1" and delivery.verified is None
+    # verify: nothing in Sent Items yet -> unverified; then the sent item appears -> verified with the internet message id; then a bounce -> false
+    sup = repo.get_user("u_sup_1")
+    subject = approved.drafts[0].subject
+    v0 = service.verify_delivery(case.id, approved.drafts[0].id, sup)
+    assert v0["verified"] is None and "Not in the sender" in v0["note"]
+    graph.sent_items = [{"id": "sent-1", "subject": subject, "internetMessageId": "<abc@contoso.com>", "sentDateTime": "2099-01-01T00:00:00Z", "toRecipients": [{"emailAddress": {"address": "docs@vitalsolutions.sg"}}]}]
+    v1 = service.verify_delivery(case.id, approved.drafts[0].id, sup)
+    assert v1["verified"] is True and v1["internet_message_id"] == "<abc@contoso.com>" and v1["sent_item_id"] == "sent-1"
+    graph.bounce = {"id": "ndr-1", "subject": f"Undeliverable: {subject}", "from": {"emailAddress": {"address": "postmaster@outlook.com"}}, "receivedDateTime": "2099-01-01T00:01:00Z", "bodyPreview": "550 5.7.1 Unfortunately, messages from ... weren't sent"}
+    v2 = service.verify_delivery(case.id, approved.drafts[0].id, sup)
+    assert v2["verified"] is False and v2["bounce"]["from"] == "postmaster@outlook.com" and "550" in v2["bounce"]["snippet"]
+    actions = [e.action for e in repo.list_audit(case.id)]
+    assert "DELIVERY_UNVERIFIED" in actions and "DELIVERY_VERIFIED" in actions and "DELIVERY_BOUNCED" in actions
     assert graph.sent and graph.sent[0]["message"]["toRecipients"][0]["emailAddress"]["address"] == "docs@vitalsolutions.sg"
     sent_event = [e for e in repo.list_audit(case.id) if e.action == "NOTIFICATION_SENT"][-1]
     assert sent_event.after["from"] == "ops@contoso.com" and sent_event.after["mode"] == "gmail"
@@ -253,3 +275,25 @@ def test_connect_storage_failure_returns_to_the_page_not_login(monkeypatch):
     assert client.get("/auth/microsoft/callback", params={"code": "c", "state": state2}).headers["location"].endswith("/login?error=exchange_failed")
     assert client.get("/auth/config").json()["mailbox_storage_ready"] is True
     assert client.get("/health").json()["migrations"]["user_mailboxes"] is True
+
+
+def test_simulated_approval_records_a_simulated_delivery_and_verification_never_calls_the_provider(monkeypatch):
+    _ms_env(monkeypatch)
+    monkeypatch.setenv("EMAIL_PROVIDER", "none")
+    monkeypatch.setenv("EMAIL_SEND_MODE", "simulate")
+    graph = _Graph()
+    _patch_httpx(monkeypatch, graph)
+    repo = MemoryRepository()
+    service = CaseService(repo)
+    mailbox = UserMailbox(user_id="u_ops_1", provider="outlook", address="ops@contoso.com", refresh_token_enc=encrypt_token("ms-rt-1"),
+                          scopes=["Mail.Read", "Mail.Send", "offline_access"], connected_at=datetime.utcnow())
+    repo.save_mailbox(mailbox)
+    result = poll_user_mailbox(service, mailbox, actor_id="u_ops_1", limit=5)
+    case = repo.get_case(result["created"][0])
+    approved = service.approve_draft(case.id, DraftDecision(draft_id=case.drafts[0].id), repo.get_user("u_sup_1"))
+    d = approved.drafts[0]
+    assert d.status == DraftStatus.SIMULATED and d.delivery.mode == "simulate" and d.delivery.provider == "simulate" and "no e-mail left" in d.delivery.note
+    calls_before = graph.token_calls
+    v = service.verify_delivery(case.id, d.id, repo.get_user("u_sup_1"))
+    assert v["verified"] is False and "Simulated" in v["note"] and graph.token_calls == calls_before and not graph.sent
+    assert client.get("/health").json()["email"]["send_mode"] == "simulate"

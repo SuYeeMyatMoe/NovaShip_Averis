@@ -31,6 +31,7 @@ from app.ai.operator_behaviour import (
 from app.ai.summary_draft import build_draft, polish_with_llm
 from app.auth.rbac import has_permission
 from app.contracts.schemas import (
+    DeliveryInfo,
     EXTERNAL_RECIPIENT_TYPES,
     ActorType,
     AssignRequest,
@@ -364,9 +365,17 @@ class CaseService:
         accepted = mode == "gmail"
         d.status = DraftStatus.SENT if accepted else DraftStatus.SIMULATED
         action = "NOTIFICATION_SENT" if accepted else "NOTIFICATION_SIMULATED"
+        outbound = self._outbound_mailbox(case)
+        d.delivery = DeliveryInfo(
+            mode="live" if accepted else "simulate",
+            provider=("simulate" if not accepted else (outbound.provider if outbound else "shared")),   # type: ignore[arg-type]
+            from_address=(provider_result or {}).get("from") or (outbound.address if outbound else os.environ.get("GMAIL_ADDRESS") or None),
+            to=list(d.to), provider_id=str((provider_result or {}).get("id") or "") or None, mailbox_user_id=outbound.user_id if outbound else None,
+            note=None if accepted else "Simulated: EMAIL_SEND_MODE=simulate on this server, no e-mail left the desk.",
+        )
         self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", action,
                         after={"channel": "email", "to": d.to, "subject": d.subject, "draft_id": d.id, "mode": mode, "provider_accepted": accepted,
-                               "from": (provider_result or {}).get("from") or os.environ.get("GMAIL_ADDRESS") or "shared"})
+                               "from": d.delivery.from_address or "shared", "provider": d.delivery.provider, "provider_id": d.delivery.provider_id})
         self._status(case, CaseStatus.AWAITING_RESPONSE, user)
         self.repo.save_case(case)
         return case
@@ -605,6 +614,60 @@ class CaseService:
                 },
             )
         return self._confirmed_share_response(confirmed_share)
+
+    def verify_delivery(self, case_id: str, draft_id: str, user: UserRecord) -> dict[str, Any]:
+        """Ask the mailbox that sent an approved draft whether the message is in its Sent Items, and whether an undeliverable
+        notice came back. Records the answer on the draft and in the audit log; never sends anything."""
+        from app.connectors.email_connectors import connector_for_mailbox, get_outbound_connector
+
+        case = self.get(case_id)
+        d = next((x for x in case.drafts if x.id == draft_id), None)
+        if d is None:
+            raise HTTPException(404, detail={"error": "draft not found", "category": "DATABASE_ERROR"})
+        if d.status not in {DraftStatus.SENT, DraftStatus.SIMULATED, DraftStatus.DELIVERY_UNKNOWN}:
+            raise HTTPException(409, detail={"error": f"draft is {d.status.value}; only sent drafts can be verified", "category": "NOTIFICATION_ERROR", "retryable": False})
+        info = d.delivery or DeliveryInfo(mode="live" if d.status == DraftStatus.SENT else "simulate", provider="shared" if d.status == DraftStatus.SENT else "simulate", to=list(d.to))
+        info.verified_at = datetime.utcnow()
+        if info.mode == "simulate" or d.status == DraftStatus.SIMULATED:
+            info.verified, info.note = False, "Simulated: nothing was sent, so there is nothing to find at the provider."
+            d.delivery = info
+            self.repo.save_case(case)
+            return info.model_dump(mode="json")
+        try:
+            mailbox = self.repo.get_mailbox(info.mailbox_user_id) if info.mailbox_user_id else None
+            connector = connector_for_mailbox(mailbox) if mailbox else get_outbound_connector(send_mode())
+        except Exception as exc:
+            info.verified, info.note = None, f"Cannot reach the sending mailbox to verify ({type(exc).__name__})."
+            d.delivery = info
+            self.repo.save_case(case)
+            return info.model_dump(mode="json")
+        since = info.sent_at or case.updated_at
+        sent, bounce, problems = None, None, []
+        try:
+            sent = connector.find_sent(d.subject, since) if connector else None
+        except Exception as exc:
+            problems.append(f"sent items: {type(exc).__name__}")
+        try:
+            bounce = connector.find_bounce(d.subject, since) if connector else None
+        except Exception as exc:
+            problems.append(f"bounce check: {type(exc).__name__}")
+        if bounce:
+            info.verified, info.bounce = False, bounce
+            info.note = "The provider returned an undeliverable notice: the message did not reach the recipient."
+            action = "DELIVERY_BOUNCED"
+        elif sent:
+            info.verified, info.sent_item_id, info.internet_message_id = True, sent.get("sent_item_id"), sent.get("internet_message_id")
+            info.note = "Found in the sender's Sent Items: the provider handed it over. If the recipient cannot see it, it is in their Spam/Junk folder."
+            action = "DELIVERY_VERIFIED"
+        else:
+            info.verified = None
+            info.note = ("Not in the sender's Sent Items yet; try again in a minute." if not problems else "Could not verify: " + "; ".join(problems))
+            action = "DELIVERY_UNVERIFIED"
+        d.delivery = info
+        self.repo.save_case(case)
+        self.pipe.audit(case.id, ActorType.USER, user.id, action, after={"draft_id": d.id, "verified": info.verified, "provider": info.provider, "from": info.from_address,
+                                                                        "internet_message_id": info.internet_message_id, "bounce": bool(bounce), "problems": problems})
+        return info.model_dump(mode="json")
 
     def confirm_share(self, case_id: str, share_id: str, user: UserRecord) -> dict[str, Any]:
         share = self.repo.get_share(share_id)

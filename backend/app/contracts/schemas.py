@@ -350,6 +350,23 @@ class ActionRecommendation(BaseModel):
     confidence: float
 
 
+class DeliveryInfo(BaseModel):
+    """What actually left the desk for a draft (or share), and what a later check found at the provider."""
+    mode: Literal["live", "simulate"] = "simulate"
+    provider: Literal["outlook", "gmail", "shared", "simulate"] = "simulate"
+    from_address: Optional[str] = None
+    to: list[str] = Field(default_factory=list)
+    provider_id: Optional[str] = None            # Graph request id / Gmail message id
+    sent_at: datetime = Field(default_factory=datetime.utcnow)
+    mailbox_user_id: Optional[str] = None
+    verified: Optional[bool] = None              # None = not checked yet; True = found in the sender's Sent Items; False = not found / bounced
+    verified_at: Optional[datetime] = None
+    sent_item_id: Optional[str] = None
+    internet_message_id: Optional[str] = None
+    bounce: Optional[dict[str, Any]] = None      # {subject, received_at, snippet} when the provider returned an undeliverable notice
+    note: Optional[str] = None
+
+
 class DraftAction(BaseModel):
     id: Optional[str] = None
     draft_type: str  # CORRECTION_REQUEST | MISSING_DOCUMENT_REQUEST | CONFIRMATION | INFO_REPLY | SHARE_MESSAGE
@@ -362,6 +379,7 @@ class DraftAction(BaseModel):
     version: int = 1
     requires_external_approval: bool = True
     generated_by: Literal["rule", "llm"] = "rule"
+    delivery: Optional[DeliveryInfo] = None      # filled when the draft is approved (sent or simulated)
 
 
 class DecisionTrace(BaseModel):

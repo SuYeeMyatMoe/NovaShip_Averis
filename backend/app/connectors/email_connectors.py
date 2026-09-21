@@ -15,7 +15,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import getaddresses, parseaddr
@@ -46,6 +46,26 @@ class BaseConnector:
 
     def send(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None) -> dict[str, Any]:  # pragma: no cover - interface
         raise NotImplementedError
+
+    def find_sent(self, subject: str, since: datetime) -> Optional[dict[str, Any]]:
+        """The sender's own Sent Items entry for a message (None = not found / not supported)."""
+        return None
+
+    def find_bounce(self, subject: str, since: datetime) -> Optional[dict[str, Any]]:
+        """An undeliverable / delivery-failure notice for that message in the sender's inbox (None = none / not supported)."""
+        return None
+
+
+BOUNCE_SENDERS = ("postmaster@", "mailer-daemon@", "mailer-daemon", "no-reply@microsoft", "microsoftexchange")
+BOUNCE_SUBJECTS = ("undeliverable", "delivery has failed", "delivery status notification", "mail delivery failed", "returned mail", "delivery failure")
+
+
+def _looks_like_bounce(sender: str, subject: str, original_subject: str) -> bool:
+    s, subj = (sender or "").lower(), (subject or "").lower()
+    sender_hit = any(s.startswith(p) or p in s for p in BOUNCE_SENDERS)
+    subject_hit = any(subj.startswith(p) or p in subj for p in BOUNCE_SUBJECTS)
+    mentions = original_subject.lower()[:60] in subj
+    return (sender_hit or subject_hit) and (mentions or subject_hit and sender_hit)
 
 
 class BundleConnector(BaseConnector):
@@ -237,6 +257,26 @@ class GmailConnector(BaseConnector):
                 received_at = datetime.fromtimestamp(int(message["internalDate"]) / 1000, tz=timezone.utc).replace(tzinfo=None)
             yield InboundMessage(raw=raw, blobs=blobs, received_at=received_at, provider="gmail")
 
+    def find_sent(self, subject: str, since: datetime) -> Optional[dict[str, Any]]:
+        q = f'in:sent subject:"{subject[:80]}" newer_than:2d'
+        listed = self._execute(lambda service: service.users().messages().list(userId="me", q=q, maxResults=5))
+        ids = [m["id"] for m in listed.get("messages") or []]
+        if not ids:
+            return None
+        msg = self._execute(lambda service: service.users().messages().get(userId="me", id=ids[0], format="metadata", metadataHeaders=["Message-ID", "Date", "To"]))
+        headers = {h["name"].lower(): h["value"] for h in (msg.get("payload") or {}).get("headers") or []}
+        return {"sent_item_id": ids[0], "internet_message_id": headers.get("message-id"), "sent_at": headers.get("date"), "to": headers.get("to")}
+
+    def find_bounce(self, subject: str, since: datetime) -> Optional[dict[str, Any]]:
+        q = f'from:mailer-daemon newer_than:2d "{subject[:60]}"'
+        listed = self._execute(lambda service: service.users().messages().list(userId="me", q=q, maxResults=3))
+        ids = [m["id"] for m in listed.get("messages") or []]
+        if not ids:
+            return None
+        msg = self._execute(lambda service: service.users().messages().get(userId="me", id=ids[0], format="metadata", metadataHeaders=["Subject", "Date"]))
+        headers = {h["name"].lower(): h["value"] for h in (msg.get("payload") or {}).get("headers") or []}
+        return {"subject": headers.get("subject"), "received_at": headers.get("date"), "snippet": msg.get("snippet")}
+
     def send(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None) -> dict[str, Any]:
         message = EmailMessage()
         message["From"] = self.address
@@ -372,6 +412,41 @@ class MicrosoftGraphConnector(BaseConnector):
                 except ValueError:
                     received_at = None
             yield InboundMessage(raw=raw, blobs=blobs, received_at=received_at, provider="outlook")
+
+    # ---- delivery checks
+    def find_sent(self, subject: str, since: datetime) -> Optional[dict[str, Any]]:
+        params = {"$top": "25", "$orderby": "sentDateTime desc", "$select": "id,subject,internetMessageId,sentDateTime,toRecipients"}
+        listed = self._request("GET", "/me/mailFolders/sentitems/messages", params=params).json()
+        want = subject.strip().lower()
+        floor = (since if since.tzinfo else since.replace(tzinfo=timezone.utc)) - timedelta(minutes=5)
+        for m in listed.get("value") or []:
+            if (m.get("subject") or "").strip().lower() != want:
+                continue
+            try:
+                sent_at = datetime.fromisoformat((m.get("sentDateTime") or "").replace("Z", "+00:00"))
+            except ValueError:
+                sent_at = None
+            if sent_at and sent_at < floor:
+                continue
+            return {"sent_item_id": m["id"], "internet_message_id": m.get("internetMessageId"), "sent_at": m.get("sentDateTime"),
+                    "to": ", ".join(r["emailAddress"]["address"] for r in m.get("toRecipients") or [] if r.get("emailAddress", {}).get("address"))}
+        return None
+
+    def find_bounce(self, subject: str, since: datetime) -> Optional[dict[str, Any]]:
+        params = {"$top": "25", "$orderby": "receivedDateTime desc", "$select": "id,subject,from,receivedDateTime,bodyPreview"}
+        listed = self._request("GET", "/me/mailFolders/inbox/messages", params=params).json()
+        floor = (since if since.tzinfo else since.replace(tzinfo=timezone.utc)) - timedelta(minutes=5)
+        for m in listed.get("value") or []:
+            sender = ((m.get("from") or {}).get("emailAddress") or {}).get("address") or ""
+            try:
+                received = datetime.fromisoformat((m.get("receivedDateTime") or "").replace("Z", "+00:00"))
+            except ValueError:
+                received = None
+            if received and received < floor:
+                continue
+            if _looks_like_bounce(sender, m.get("subject") or "", subject):
+                return {"subject": m.get("subject"), "received_at": m.get("receivedDateTime"), "snippet": (m.get("bodyPreview") or "")[:300], "from": sender}
+        return None
 
     # ---- outbound (only after human approval)
     def send(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None) -> dict[str, Any]:

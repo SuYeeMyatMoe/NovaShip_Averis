@@ -142,7 +142,10 @@ def runtime_posture() -> dict[str, Any]:
     on_vercel = bool(os.environ.get("VERCEL"))
     from app.services import evaluation as ev
 
+    from app.services.case_service import send_mode
+
     return {"runtime": "vercel" if on_vercel else "server", "max_request_s": int(os.environ.get("MAX_REQUEST_S", "300" if on_vercel else "0") or 0),
+            "email": {"send_mode": "simulate" if send_mode() == "simulate" else "live"},
             "evaluation": {"reference_on_server": ev.GROUND_TRUTH.exists(), "scorer": "file" if ev.SCORING.exists() else ("vendored" if ev.scoring_available() else "missing")}}
 
 
@@ -741,6 +744,12 @@ def approve(case_id: str, dec: DraftDecision, user: UserRecord = Depends(require
     s = svc()
     case = s.approve_draft(case_id, dec, user)
     return _mutation_view(s, case)
+
+
+@router.post("/cases/{case_id}/drafts/{draft_id}/verify-delivery")
+def verify_draft_delivery(case_id: str, draft_id: str, user: UserRecord = Depends(require("view_case"))):
+    """Check the sending mailbox's Sent Items (and inbox for an undeliverable notice) for an approved draft. Sends nothing."""
+    return svc().verify_delivery(case_id, draft_id, user)
 
 
 @router.post("/cases/{case_id}/reject")

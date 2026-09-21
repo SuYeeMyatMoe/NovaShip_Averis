@@ -170,7 +170,8 @@ export type ComparisonField = {
   si_evidence: Evidence; bl_evidence: Evidence;
 };
 export type Comparison = { comparison_status: string; mismatch_count: number; required_field_count: number; message: string; fields: ComparisonField[]; mismatch_fields: string[]; review_fields: string[]; review_reason: string | null; compared_at: string };
-export type Draft = { id: string; draft_type: string; to: string[]; cc: string[]; subject: string; body: string; status: string; version: number; requires_external_approval: boolean; generated_by: string; evidence_refs: string[] };
+export type DeliveryInfo = { mode: "live" | "simulate"; provider: "outlook" | "gmail" | "shared" | "simulate"; from_address?: string | null; to: string[]; provider_id?: string | null; sent_at: string; mailbox_user_id?: string | null; verified?: boolean | null; verified_at?: string | null; sent_item_id?: string | null; internet_message_id?: string | null; bounce?: { subject?: string; received_at?: string; snippet?: string; from?: string } | null; note?: string | null };
+export type Draft = { id: string; draft_type: string; to: string[]; cc: string[]; subject: string; body: string; status: string; version: number; requires_external_approval: boolean; generated_by: string; evidence_refs: string[]; delivery?: DeliveryInfo | null };
 export type Attachment = { id: string; file_name: string; file_type: string; size_bytes: number; checksum: string; detected_type: string; detection_confidence: number; extraction_status: string; extraction_confidence: number; raw_text: string | null; page_count: number | null; is_duplicate_of: string | null; reader_note?: string | null; ocr?: boolean };
 export type CaseView = {
   id: string; source_email_id: string; intent: string; hackathon_category: string; action_required: boolean; priority: string; status: string;
