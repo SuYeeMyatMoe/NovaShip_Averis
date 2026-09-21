@@ -75,6 +75,8 @@ class SupabaseRepository(BaseRepository):
         self._lock = threading.RLock()
         self._cases: Optional[list[CaseRecord]] = None
         self._cases_by_id: dict[str, CaseRecord] = {}
+        self._cases_refreshed_at: float = 0.0        # monotonic time of the last incremental refresh
+        self._cases_watermark: Optional[str] = None  # newest cases.updated_at seen (ISO); the refresh asks for rows after it
         self._emails: Optional[list[EmailMessage]] = None
         self._emails_by_id: dict[str, EmailMessage] = {}
         self._users: Optional[list[UserRecord]] = None
@@ -151,7 +153,73 @@ class SupabaseRepository(BaseRepository):
                 "raw_text": a.raw_text, "page_count": a.page_count, "is_duplicate_of": a.is_duplicate_of,
             }).execute()
 
+    # ------------------------------------------------------------- cross-instance freshness
+    def cache_ttl_s(self) -> float:
+        """How long the in-memory case cache may serve without asking the database for newer rows.
+        Several API instances (Vercel functions, Docker + Vercel) share one database; each keeps its own cache."""
+        try:
+            return float(os.environ.get("REPO_CACHE_TTL_S", "15"))
+        except ValueError:
+            return 15.0
+
+    def _refresh_cases_if_stale(self, force: bool = False) -> None:
+        """Pull cases whose `updated_at` is newer than the watermark (one small query per TTL) and merge them into the cache,
+        together with any e-mails they reference that the cache does not hold yet. No-op until the full list was loaded once."""
+        import time
+
+        ttl = self.cache_ttl_s()
+        with self._lock:
+            if self._cases is None:
+                return
+            now = time.monotonic()
+            refreshed_at = self.__dict__.setdefault("_cases_refreshed_at", 0.0)
+            if not force and (ttl <= 0 or now - refreshed_at < ttl):
+                return
+            self._cases_refreshed_at = now
+            watermark = self.__dict__.setdefault("_cases_watermark", None)
+        q = self._t("cases").select("payload").eq("tenant_id", self.tenant)
+        if watermark:
+            q = q.gt("updated_at", watermark)
+        try:
+            res = q.order("updated_at", desc=True).limit(500).execute()
+        except Exception as exc:  # never let a refresh break a read; the cache simply stays as it was
+            log.warning("case cache refresh skipped: %s", type(exc).__name__)
+            return
+        changed = [CaseRecord(**r["payload"]) for r in res.data or []]
+        if not changed:
+            return
+        with self._lock:
+            ids = {c.id for c in changed}
+            for c in changed:
+                self._cases_by_id[c.id] = c
+            self._cases = changed + [c for c in (self._cases or []) if c.id not in ids]
+            self._bump_watermark(changed)
+            missing = [c.source_email_id for c in changed if c.source_email_id and c.source_email_id not in self._emails_by_id]
+        if missing:
+            try:
+                rows = self._t("email_messages").select("payload").eq("tenant_id", self.tenant).in_("id", missing[:200]).execute().data or []
+            except Exception as exc:
+                log.warning("email cache refresh skipped: %s", type(exc).__name__)
+                rows = []
+            with self._lock:
+                for r in rows:
+                    e = EmailMessage(**r["payload"])
+                    self._emails_by_id[e.id] = e
+                    if self._emails is not None and all(x.id != e.id for x in self._emails):
+                        self._emails.append(e)
+
+    def _bump_watermark(self, cases: list[CaseRecord]) -> None:
+        newest = max((c.updated_at.isoformat() for c in cases), default=None)
+        current = self.__dict__.setdefault("_cases_watermark", None)
+        if newest and (current is None or newest > current):
+            self._cases_watermark = newest
+
+    def refresh_now(self) -> None:
+        """Force the incremental refresh (used by tests and after cross-instance writes we know about)."""
+        self._refresh_cases_if_stale(force=True)
+
     def get_email(self, email_id: str) -> Optional[EmailMessage]:
+        self._refresh_cases_if_stale()
         with self._lock:
             if email_id in self._emails_by_id:
                 return self._emails_by_id[email_id]
@@ -170,6 +238,7 @@ class SupabaseRepository(BaseRepository):
         return email
 
     def list_emails(self) -> list[EmailMessage]:
+        self._refresh_cases_if_stale()
         with self._lock:
             if self._emails is not None:
                 return list(self._emails)
@@ -251,6 +320,7 @@ class SupabaseRepository(BaseRepository):
             if self._cases is not None:
                 self._cases = [c for c in self._cases if c.id != case.id]
                 self._cases.insert(0, case)
+            self._bump_watermark([case])
 
     def _write_projections(self, case: CaseRecord) -> None:
         """Replace case-owned projections so they exactly mirror the canonical payload (7 deletes + up to ~8 upserts).
@@ -351,6 +421,7 @@ class SupabaseRepository(BaseRepository):
         return _ctx()
 
     def get_case(self, case_id: str) -> Optional[CaseRecord]:
+        self._refresh_cases_if_stale()
         with self._lock:
             if case_id in self._cases_by_id:
                 return self._cases_by_id[case_id]
@@ -369,6 +440,7 @@ class SupabaseRepository(BaseRepository):
         return case
 
     def get_case_by_email(self, email_id: str) -> Optional[CaseRecord]:
+        self._refresh_cases_if_stale()
         with self._lock:
             if self._cases is not None:
                 return next((c for c in self._cases if c.source_email_id == email_id), None)
@@ -387,12 +459,17 @@ class SupabaseRepository(BaseRepository):
         return case
 
     def list_cases(self) -> list[CaseRecord]:
+        self._refresh_cases_if_stale()
         with self._lock:
             if self._cases is not None:
                 return list(self._cases)
             res = self._t("cases").select("payload").eq("tenant_id", self.tenant).order("updated_at", desc=True).limit(2000).execute()
             self._cases = [CaseRecord(**r["payload"]) for r in res.data]
             self._cases_by_id = {c.id: c for c in self._cases}
+            self._bump_watermark(self._cases)
+            import time
+
+            self._cases_refreshed_at = time.monotonic()
             return list(self._cases)
 
     # ---- audit / errors / shares -----------------------------------------

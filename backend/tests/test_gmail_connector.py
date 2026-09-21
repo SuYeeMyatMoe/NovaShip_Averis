@@ -280,6 +280,27 @@ def test_simulation_never_calls_gmail(monkeypatch):
     monkeypatch.setattr(GmailConnector, "send", fail)
     result = service.approve_draft(case.id, DraftDecision(draft_id="draft_gmail"), supervisor)
     assert result.drafts[0].status == DraftStatus.SIMULATED
+    service.approve_draft(case.id, DraftDecision(draft_id="draft_gmail"), supervisor)
+    assert result.drafts[0].status == DraftStatus.SIMULATED
+
+
+def test_simulated_draft_sends_when_mode_switches_to_live(monkeypatch):
+    repo, service, case, supervisor = _service_with_draft()
+    monkeypatch.setenv("EMAIL_SEND_MODE", "simulate")
+    monkeypatch.setattr(GmailConnector, "send", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("network provider called")))
+    simulated = service.approve_draft(case.id, DraftDecision(draft_id="draft_gmail"), supervisor)
+    assert simulated.drafts[0].status == DraftStatus.SIMULATED
+
+    _gmail_env(monkeypatch, send=True)
+    calls: list[bool] = []
+    monkeypatch.setattr(GmailConnector, "send", lambda *_a, **_k: calls.append(True) or {"status": 200, "id": "sent"})
+    sent = service.approve_draft(case.id, DraftDecision(draft_id="draft_gmail"), supervisor)
+    assert sent.drafts[0].status == DraftStatus.SENT
+    assert sent.drafts[0].delivery and sent.drafts[0].delivery.mode == "live"
+    assert len(calls) == 1
+    service.approve_draft(case.id, DraftDecision(draft_id="draft_gmail"), supervisor)
+    assert len(calls) == 1
+    assert repo.get_case(case.id).drafts[0].status == DraftStatus.SENT
 
 
 def test_unknown_email_provider_modes_fail_configuration(monkeypatch):
