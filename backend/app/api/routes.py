@@ -133,7 +133,17 @@ def health():
         "cases": len(repo.list_cases()),
         "emails": len(repo.list_emails()),
     }
-    return {"status": "ok", "backend": type(repo).__name__, **counts, "time": datetime.utcnow().isoformat(), "llm": llm_posture(), "migrations": migration_posture(repo)}
+    return {"status": "ok", "backend": type(repo).__name__, **counts, "time": datetime.utcnow().isoformat(), "llm": llm_posture(), "migrations": migration_posture(repo),
+            **runtime_posture()}
+
+
+def runtime_posture() -> dict[str, Any]:
+    """Where the API runs: serverless functions have a per-request time limit, so the UI fans long batches out per case."""
+    on_vercel = bool(os.environ.get("VERCEL"))
+    from app.services import evaluation as ev
+
+    return {"runtime": "vercel" if on_vercel else "server", "max_request_s": int(os.environ.get("MAX_REQUEST_S", "300" if on_vercel else "0") or 0),
+            "evaluation": {"reference_on_server": ev.GROUND_TRUTH.exists(), "scorer": "file" if ev.SCORING.exists() else ("vendored" if ev.scoring_available() else "missing")}}
 
 
 def migration_posture(repo) -> dict[str, Any]:
@@ -901,9 +911,11 @@ def export_report_xlsx(user: UserRecord = Depends(require("export_data"))):
 def _evaluation_ready() -> None:
     from app.services import evaluation as ev
 
-    if not ev.GROUND_TRUTH.exists() or not ev.SCORING.exists():
-        raise HTTPException(404, detail={"error": "the hackathon reference is not available on this server (sdoc-hackathon-docker/data_v2/ground_truth.json + server/scoring.py)",
-                                         "category": "DATABASE_ERROR", "recovery": "Run the evaluation on a machine that has the docker bundle: python backend/scripts/evaluate.py", "retryable": False})
+    if not ev.scoring_available():
+        raise HTTPException(404, detail={"error": "the organiser's scorer is not available on this server", "category": "DATABASE_ERROR", "retryable": False})
+    if not ev.GROUND_TRUTH.exists():
+        raise HTTPException(404, detail={"error": "the reference (ground_truth.json) is not stored on this server", "code": "REFERENCE_NOT_ON_SERVER",
+                                         "category": "DATABASE_ERROR", "recovery": "Upload the judges' ground_truth.json in the Self-evaluation card, or run python backend/scripts/evaluate.py where the docker bundle is", "retryable": False})
 
 
 @router.get("/evaluate")
@@ -924,8 +936,8 @@ async def evaluate_desk_with_upload(ground_truth: UploadFile = File(...), server
     The file is scored in memory and never stored; the report Markdown is returned inline so no re-upload is needed."""
     from app.services import evaluation as ev
 
-    if not ev.SCORING.exists():
-        raise HTTPException(404, detail={"error": "the organiser's scoring.py is not available on this server", "category": "DATABASE_ERROR", "retryable": False})
+    if not ev.scoring_available():
+        raise HTTPException(404, detail={"error": "the organiser's scorer is not available on this server", "category": "DATABASE_ERROR", "retryable": False})
     raw = await ground_truth.read()
     if len(raw) > 2_000_000:
         raise HTTPException(400, detail={"error": "ground truth file too large (max 2 MB)", "category": "ATTACHMENT_UPLOAD_ERROR"})

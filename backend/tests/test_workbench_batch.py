@@ -178,3 +178,16 @@ def test_case_parked_for_a_person_shows_as_paused_in_history():
     assert paused["counts"]["paused"] >= 1
     # it still belongs to the Inbox (not run by the agent), so the default Inbox view keeps it
     assert cid in {r["id"] for r in client.get("/cases", params={"agent": "pending", "limit": 500}, headers=SUP).json()["items"]}
+
+
+def test_single_run_can_be_marked_batch_and_fan_out_audit_is_recorded():
+    """Serverless hosts cap one request: the Workbench runs a batch as N single requests (?mode=batch) + one audit call."""
+    cid = _ingest("wb_fan_001", bl=BL_OK)
+    st = client.post(f"/agent/run/{cid}", params={"mode": "batch"}, headers=SUP).json()
+    assert st["agent_run"]["mode"] == "batch" and st["agent_run"]["result"] == "completed"
+    r = client.post("/agent/batch-audit", json={"count": 3, "ok": 2, "failed": 1, "paused": 1, "parallel": 4}, headers=SUP)
+    assert r.status_code == 200 and r.json()["recorded"] is True and r.json()["audit"]["ok"] == 2
+    audit = client.get("/audit", params={"action": "AGENT_BATCH_RUN"}, headers=SUP).json()["events"]
+    assert any((e.get("after") or {}).get("fan_out") is True and (e.get("after") or {}).get("count") == 3 for e in audit)
+    assert client.post("/agent/batch-audit", json={}, headers=SUP).status_code == 400
+    assert client.get("/health").json()["max_request_s"] >= 0

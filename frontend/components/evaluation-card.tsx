@@ -24,6 +24,8 @@ export function EvaluationCard({ canExport, say }: { canExport: boolean; say: (m
   const [busy, setBusy] = useState(false);
   const [server, setServer] = useState("");
   const [unavailable, setUnavailable] = useState<string | null>(null);
+  const [referenceOnServer, setReferenceOnServer] = useState<boolean | null>(null);
+  useEffect(() => { api<{ evaluation?: { reference_on_server: boolean } }>("/health", {}, { auth: false }).then((h) => setReferenceOnServer(h.evaluation ? h.evaluation.reference_on_server : null)).catch(() => {}); }, []);
   const [collapsed, setCollapsed] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -76,7 +78,7 @@ export function EvaluationCard({ canExport, say }: { canExport: boolean; say: (m
       {!collapsed && <p className="text-xs text-ink-600">Scores the results the desk already holds for the 520 bundle emails with the organiser&apos;s <span className="font-mono">scoring.py</span> against <span className="font-mono">ground_truth.json</span>. Nothing is re-run; open any disagreement to check the source documents before changing a decision.</p>}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Button kind="primary" disabled={busy || !canExport} onClick={run}>{busy ? "Scoring…" : "Evaluate current results"}</Button>
-        <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-ink-200 bg-white px-2 py-1 text-xs text-ink-700 hover:border-accent" title="Deployed servers do not hold the private reference: choose the judges' ground_truth.json here. It is scored in memory and never stored.">
+        <label className={`inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-xs hover:border-accent ${referenceOnServer === false && !fileName ? "border-accent bg-accent-bg font-semibold text-accent-fg" : "border-ink-200 bg-white text-ink-700"}`} title="Deployed servers do not hold the private reference: choose the judges' ground_truth.json here. It is scored in memory and never stored.">
           <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => setFileName(e.target.files?.[0]?.name || null)} />
           {fileName ? `reference: ${fileName}` : "Upload ground_truth.json"}
         </label>
@@ -86,6 +88,7 @@ export function EvaluationCard({ canExport, say }: { canExport: boolean; say: (m
         {ev && canExport && <Button kind="ghost" disabled={busy} onClick={() => downloadFile("/evaluate/submission.json", "submission.json").then(() => say("submission.json downloaded")).catch((e) => say(e.message, "err"))}>Download submission.json</Button>}
       </div>
       {!canExport && <p className="mt-2 text-xs text-review-fg">Needs the export_data permission (Supervisor / Admin).</p>}
+      {referenceOnServer === false && !fileName && !ev && <p className="mt-2 text-[11px] text-ink-500">This server does not store the reference: choose the judges&apos; <span className="font-mono">ground_truth.json</span> first, then evaluate. The file is scored in memory and never saved.</p>}
       {unavailable && <p className="mt-2 rounded-lg bg-review-bg px-3 py-2 text-xs text-review-fg">{unavailable}. Upload the judges&apos; <span className="font-mono">ground_truth.json</span> above, or run <span className="font-mono">python backend/scripts/evaluate.py</span> on a machine that has the docker bundle.</p>}
       {ev && collapsed && (
         <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-ink-200 bg-white px-3 py-2 text-xs">

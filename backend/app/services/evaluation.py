@@ -56,16 +56,29 @@ def build_submission(repo, ids: list[str]) -> tuple[dict[str, dict[str, Any]], l
     return out, missing
 
 
-def load_scoring(path: Path = SCORING):
-    spec = importlib.util.spec_from_file_location("sdoc_scoring", str(path))
-    if spec is None or spec.loader is None:
-        raise FileNotFoundError(f"scoring module not found at {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def load_scoring(path: Optional[Path] = None):
+    """The organiser's scorer: the repo copy when it is on disk, else the vendored copy shipped inside the backend
+    (deployments such as Vercel bundle only backend/)."""
+    path = path or SCORING
+    if Path(path).exists():
+        spec = importlib.util.spec_from_file_location("sdoc_scoring_file", str(path))
+        if spec is not None and spec.loader is not None:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    from app.services import sdoc_scoring
+
+    return sdoc_scoring
 
 
-def score_locally(submission: dict[str, Any], truth: dict[str, Any], scoring_path: Path = SCORING) -> dict[str, Any]:
+def scoring_available() -> bool:
+    try:
+        return hasattr(load_scoring(), "score_all")
+    except Exception:
+        return False
+
+
+def score_locally(submission: dict[str, Any], truth: dict[str, Any], scoring_path: Optional[Path] = None) -> dict[str, Any]:
     """The organiser's scoreboard (stage1 / stage3 / reliability / end_to_end / final_score), computed offline."""
     return load_scoring(scoring_path).score_all(truth, submission)
 

@@ -144,3 +144,28 @@ def test_uploaded_reference_works_without_the_private_file(monkeypatch, tmp_path
     monkeypatch.setattr(ev, "BUNDLE_DIR", tmp_path / "no-bundle")
     r2 = client.post("/evaluate", files={"ground_truth": ("ground_truth.json", truth, "application/json")}, headers=SUP).json()
     assert r2["counts"]["bundle_emails"] == 1 and r2["counts"]["answered"] == 1
+
+
+def test_vendored_scorer_matches_the_organiser_file_and_serves_deployments_without_it(monkeypatch, tmp_path):
+    """backend/app/services/sdoc_scoring.py must stay byte-identical (below the marker) to the organiser's scoring.py,
+    and the evaluation must work when the repo folders are not shipped (Vercel bundles only backend/)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    original = (root / "sdoc-hackathon-docker" / "server" / "scoring.py").read_text(encoding="utf-8")
+    vendored = (root / "backend" / "app" / "services" / "sdoc_scoring.py").read_text(encoding="utf-8")
+    assert vendored.split("# --- ORIGINAL BELOW", 1)[1].split("\n", 1)[1] == original, "re-copy scoring.py into sdoc_scoring.py"
+
+    _ingest("ev_301")
+    monkeypatch.setattr(ev, "SCORING", tmp_path / "no-scoring.py")
+    monkeypatch.setattr(ev, "GROUND_TRUTH", tmp_path / "no-truth.json")
+    monkeypatch.setattr(ev, "BUNDLE_DIR", tmp_path / "no-bundle")
+    assert ev.scoring_available() is True
+    h = client.get("/health").json()
+    assert h["runtime"] in ("server", "vercel") and h["evaluation"] == {"reference_on_server": False, "scorer": "vendored"}
+    r = client.get("/evaluate", headers=SUP)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "REFERENCE_NOT_ON_SERVER"
+    truth = json.dumps({"ev_301": TRUTH["ev_001"]}).encode()
+    up = client.post("/evaluate", files={"ground_truth": ("ground_truth.json", truth, "application/json")}, headers=SUP)
+    assert up.status_code == 200, up.text
+    assert up.json()["scoreboard"]["end_to_end"]["rate"] == 1.0 and up.json()["counts"]["bundle_emails"] == 1

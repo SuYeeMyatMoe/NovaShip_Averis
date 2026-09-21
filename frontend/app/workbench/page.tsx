@@ -18,7 +18,7 @@ function downloadBase64Xlsx(b64: string, filename: string) {
   a.click();
 }
 
-type RunRow = { action: string; ok: boolean; status?: string; paused?: boolean; next?: string[]; interrupt?: any; ms?: number; error?: any; agent_run?: { result: string; last_run_at: string } | null };
+type RunRow = { action: string; ok: boolean; status?: string; paused?: boolean; next?: string[]; interrupt?: any; ms?: number; error?: any; agent_run?: { result: string; last_run_at: string } | null; running?: boolean };
 const LAST_RUN_KEY = "novaship.workbench.lastRun";
 type LlmPosture = { provider: string; model: string | null; privacy: "mask" | "off"; audit_provider_calls: boolean; vision_ocr: boolean; embeddings: string; calls: { total: number; masked: number; errors: number } };
 
@@ -68,6 +68,10 @@ export default function WorkbenchPage() {
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 4000); };
 
   const loadRag = useCallback(() => { api("/rag/info").then(setRag).catch(() => {}); }, []);
+  // serverless hosts (Vercel) cap one request: batches are fanned out per case from the browser
+  const [runtime, setRuntime] = useState<{ runtime: string; max_request_s: number } | null>(null);
+  useEffect(() => { api<{ runtime: string; max_request_s: number }>("/health", {}, { auth: false }).then((h) => setRuntime({ runtime: h.runtime, max_request_s: h.max_request_s })).catch(() => {}); }, []);
+  const serverless = runtime?.runtime === "vercel";
   useEffect(() => { loadRag(); }, [loadRag]);
 
   const inspect = async (id: string) => {
@@ -116,17 +120,49 @@ export default function WorkbenchPage() {
     finally { setBusy(false); }
   };
 
+  /** One request per case, at most `parallel` in flight: fits a serverless per-request limit and shows progress row by row. */
+  const runAgentFanOut = async (targets: string[], only?: string[]) => {
+    setLastAction("agent");
+    setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(targets.map((id) => [id, { action: "agent", ok: true, status: "RUNNING", running: true } as RunRow])) }));
+    const queue = [...targets];
+    let okCount = 0, failed = 0, paused = 0;
+    const worker = async () => {
+      while (queue.length) {
+        const id = queue.shift()!;
+        const t0 = Date.now();
+        try {
+          const st = await post(`/agent/run/${id}?mode=batch`);
+          const row: RunRow = { action: "agent", ok: true, paused: !!st.paused, next: st.next || [], status: st.status, interrupt: st.interrupt, agent_run: st.agent_run, ms: Date.now() - t0 };
+          okCount += 1; if (row.paused) paused += 1;
+          setRows((prev) => ({ ...prev, [id]: row }));
+        } catch (e: any) {
+          failed += 1;
+          setRows((prev) => ({ ...prev, [id]: { action: "agent", ok: false, error: { message: e?.detail?.error || e.message || "run failed", category: e?.detail?.category || "COMPARISON_ERROR", retryable: true }, ms: Date.now() - t0 } }));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(parallel, targets.length)) }, worker));
+    try { await post("/agent/batch-audit", { count: targets.length, ok: okCount, failed, paused, parallel }); } catch { /* audit is best effort */ }
+    say(`agent: ${okCount}/${targets.length} ran · ${paused} waiting for a person · ${Math.min(parallel, targets.length)} in parallel (one request per case)`, failed ? "err" : "ok");
+  };
   const runAgentBatch = async (only?: string[]) => {
     const targets = only ?? ids;
     if (!targets.length) return say("Add at least one case", "err");
     setBusy(true);
     try {
-      const r = await post("/agent/run-batch", { case_ids: targets, parallel });
-      const results = (r.results || {}) as Record<string, any>;
-      setLastAction("agent");
-      setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(Object.entries(results).map(([id, x]) => [id, { action: "agent", ...x }])) }));
-      say(`agent: ${Object.keys(results).length - r.failed_ids.length}/${Object.keys(results).length} ran · ${r.paused_ids.length} waiting for a person · ${r.parallel} in parallel`, r.failed_ids.length ? "err" : "ok");
-    } catch (e: any) { say(e.message, "err"); }
+      if (serverless) { await runAgentFanOut(targets, only); return; }
+      try {
+        const r = await post("/agent/run-batch", { case_ids: targets, parallel });
+        const results = (r.results || {}) as Record<string, any>;
+        setLastAction("agent");
+        setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(Object.entries(results).map(([id, x]) => [id, { action: "agent", ...x }])) }));
+        say(`agent: ${Object.keys(results).length - r.failed_ids.length}/${Object.keys(results).length} ran · ${r.paused_ids.length} waiting for a person · ${r.parallel} in parallel`, r.failed_ids.length ? "err" : "ok");
+      } catch (e: any) {
+        // the whole-batch request died (gateway timeout / network): fall back to one request per case
+        if (!e?.status || e.status >= 500 || e.status === 408 || e.status === 504) { say("Batch request timed out — running one case per request instead", "err"); await runAgentFanOut(targets, only); }
+        else throw e;
+      }
+    } catch (e: any) { say(e?.detail?.error || e.message, "err"); }
     finally { setBusy(false); }
   };
   const resumeBatch = async (action: string) => {
@@ -209,7 +245,7 @@ export default function WorkbenchPage() {
             <label className="text-xs font-semibold text-ink-600">Cases</label>
             <CaseMultiPicker ids={ids} onChange={setIds} className="mt-1" />
             <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-ink-500">
-              <span>{ids.length} selected · External sending is never batched.</span>
+              <span>{ids.length} selected · External sending is never batched.{serverless ? ` Serverless deployment: cases run one request each, ${parallel} at a time.` : ""}</span>
               <label className="inline-flex items-center gap-1">parallel
                 <select value={parallel} onChange={(e) => setParallel(Number(e.target.value))} className="rounded border border-ink-200 px-1 py-0.5 text-[11px]">
                   {[1, 2, 4, 8].map((n) => <option key={n} value={n}>{n}</option>)}
@@ -284,7 +320,7 @@ export default function WorkbenchPage() {
                   <tr key={id} className={`cursor-pointer border-t border-ink-100 hover:bg-accent-bg/30 ${!r.ok ? "bg-mismatch-bg/40" : r.paused ? "bg-review-bg/40" : ""}`}
                       onClick={(e) => { if ((e.target as HTMLElement).closest("button, a")) return; window.location.assign(`/cases/${id}`); }} title="Open the case">
                     <td className="px-2 py-1.5 font-mono"><Link href={`/cases/${id}`} className="text-accent hover:underline">{id.replace("case_", "")}</Link></td>
-                    <td className="px-2 py-1.5">{!r.ok ? <Badge className="bg-mismatch text-white">error</Badge> : r.paused ? <Badge className="bg-review-bg text-review-fg">needs a person</Badge> : <Badge className="bg-match-bg text-match-fg">ok</Badge>}</td>
+                    <td className="px-2 py-1.5">{r.running ? <Badge className="bg-ink-100 text-ink-600">running…</Badge> : !r.ok ? <Badge className="bg-mismatch text-white">error</Badge> : r.paused ? <Badge className="bg-review-bg text-review-fg">needs a person</Badge> : <Badge className="bg-match-bg text-match-fg">ok</Badge>}</td>
                     <td className="px-2 py-1.5">{r.status ? <StatusBadge status={r.status} /> : <span className="text-ink-400">-</span>}</td>
                     <td className="px-2 py-1.5 font-mono text-ink-500">{r.ms != null ? `${r.ms} ms` : "-"}</td>
                     <td className="max-w-[420px] px-2 py-1.5 text-ink-700">

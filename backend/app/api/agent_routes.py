@@ -22,12 +22,23 @@ def agent_graph(user: UserRecord = Depends(require("view_case"))):
 
 
 @router.post("/agent/run/{case_id}")
-def agent_run(case_id: str, user: UserRecord = Depends(require("compare"))):
-    """Run the LangGraph pipeline for a case. Pauses at human_review (interrupt) when a decision is needed."""
+def agent_run(case_id: str, mode: str = "single", user: UserRecord = Depends(require("compare"))):
+    """Run the LangGraph pipeline for a case. Pauses at human_review (interrupt) when a decision is needed.
+    `mode=batch` marks the run as part of a batch (the Workbench fans batches out per case on serverless hosts)."""
     try:
-        return get_agent().run(case_id, actor_id=user.id)
+        return get_agent().run(case_id, actor_id=user.id, mode="batch" if mode == "batch" else "single")
     except ValueError as exc:
         raise HTTPException(404, detail={"error": str(exc), "category": "DATABASE_ERROR"})
+
+
+@router.post("/agent/batch-audit")
+def agent_batch_audit(body: dict[str, Any], user: UserRecord = Depends(require("compare"))):
+    """Desk-level AGENT_BATCH_RUN row for a batch the browser fanned out per case (serverless deployments)."""
+    fields = {k: int(body.get(k) or 0) for k in ("count", "ok", "failed", "paused", "parallel")}
+    if fields["count"] <= 0:
+        raise HTTPException(400, detail={"error": "count is required", "category": "DATABASE_ERROR"})
+    CaseServiceAudit.audit(user.id, "AGENT_BATCH_RUN", {**fields, "fan_out": True})
+    return {"recorded": True, "audit": fields}
 
 
 @router.get("/agent/state/{case_id}")
