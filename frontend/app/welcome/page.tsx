@@ -92,9 +92,9 @@ export default function WelcomePage() {
           <h2 className="text-lg font-semibold text-ink-900">Pages</h2>
           <ul className="mt-2 space-y-1.5 text-sm text-ink-700">
             <li><Link className="text-accent hover:underline" href="/">Inbox</Link>: metrics, case table, filters, batch actions.</li>
-            <li><Link className="text-accent hover:underline" href="/verification">Seven fields</Link>: per-field mismatch statistics and every case per field.</li>
+            <li><Link className="text-accent hover:underline" href="/#case-table">Seven field checks</Link>: on the Inbox, click a field to list every case where it differs.</li>
             <li><Link className="text-accent hover:underline" href="/security">Security</Link>: what the security agent flagged and why.</li>
-            <li><Link className="text-accent hover:underline" href="/workbench">Workbench</Link>: run the LangGraph on a case, see the pause, resume with a decision.</li>
+            <li><Link className="text-accent hover:underline" href="/workbench">Workbench</Link>: batch-run the agent on selected cases, see each pause, resume with a decision.</li>
             <li><Link className="text-accent hover:underline" href="/audit">Audit</Link>: global append-only history.</li>
             <li><Link className="text-accent hover:underline" href="/policies">Policies</Link>: versioned thresholds and rules (Admin edits).</li>
           </ul>

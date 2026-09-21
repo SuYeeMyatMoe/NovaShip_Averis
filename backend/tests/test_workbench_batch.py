@@ -151,3 +151,30 @@ def test_case_marked_complete_by_a_person_moves_from_inbox_to_history():
     assert cid in {r["case_id"] for r in client.get("/history", params={"run_by": "me"}, headers=SUP).json()["items"]}
     assert all(r["case_id"] != cid for r in client.get("/history", params={"result": "paused"}, headers=SUP).json()["items"])
     assert cid in client.get("/export/history.csv", headers=SUP).text
+
+
+def test_field_filter_lists_only_cases_where_that_field_differs():
+    """`GET /cases?field=container_count` = the Inbox 'Seven field checks' filter: cases whose comparison flagged that field."""
+    bad = _ingest("wb_field_001")             # container count 3 vs 4
+    ok = _ingest("wb_field_002", bl=BL_OK)
+    flagged = {r["id"] for r in client.get("/cases", params={"field": "container_count", "agent": "any", "limit": 500}, headers=SUP).json()["items"]}
+    assert bad in flagged and ok not in flagged
+    clean = {r["id"] for r in client.get("/cases", params={"field": "shipper", "agent": "any", "limit": 500}, headers=SUP).json()["items"]}
+    assert bad not in clean and ok not in clean
+    for cid in flagged:
+        fields = client.get(f"/cases/{cid}", headers=SUP).json()["comparison"]["fields"]
+        assert any(f["field"] == "container_count" and f["result"] != "MATCH" for f in fields)
+
+
+def test_case_parked_for_a_person_shows_as_paused_in_history():
+    """A case the pipeline hands to a person (HUMAN_REVIEW / SECURITY_REVIEW) is listed under History 'paused' even though the agent never ran it."""
+    cid = _ingest("wb_hist_005", bl=BL_OK)
+    assert all(r["case_id"] != cid for r in client.get("/history", params={"result": "all"}, headers=SUP).json()["items"])
+    assert client.post(f"/cases/{cid}/request-review", json={"note": "please double check"}, headers=SUP).status_code == 200
+    assert client.get(f"/cases/{cid}", headers=SUP).json()["status"] == "HUMAN_REVIEW"
+    paused = client.get("/history", params={"result": "paused"}, headers=SUP).json()
+    row = next(r for r in paused["items"] if r["case_id"] == cid)
+    assert row["result"] == "paused" and row["mode"] == "pipeline" and row["run_by"] == "pipeline" and row["status_after"] == "HUMAN_REVIEW"
+    assert paused["counts"]["paused"] >= 1
+    # it still belongs to the Inbox (not run by the agent), so the default Inbox view keeps it
+    assert cid in {r["id"] for r in client.get("/cases", params={"agent": "pending", "limit": 500}, headers=SUP).json()["items"]}

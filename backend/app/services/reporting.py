@@ -90,10 +90,20 @@ def closed_by_person(c) -> bool:
     return c.status == CaseStatus.COMPLETED and not (c.agent_run and c.agent_run.result == "completed")
 
 
+_WAITING_STATUSES = {CaseStatus.SECURITY_REVIEW, CaseStatus.HUMAN_REVIEW}
+
+
+def parked_for_person(c) -> bool:
+    """The pipeline / security agent handed the case to a person (no agent run has finished or paused it): History shows it as paused."""
+    return c.status in _WAITING_STATUSES and not (c.agent_run and c.agent_run.result in {"completed", "paused"})
+
+
 def history_result_of(c) -> Optional[str]:
-    """done | paused | error for a processed case, None for a case that still belongs in the Inbox."""
+    """done | paused | error for a processed case, None for a case that still belongs only in the Inbox."""
     if closed_by_person(c):
         return "done"
+    if parked_for_person(c):
+        return "paused"
     if c.agent_run is None:
         return None
     return "done" if c.agent_run.result == "completed" else c.agent_run.result
@@ -141,6 +151,11 @@ def history_rows(repo, user_id: str, *, result: str = "done", run_by: Optional[s
             note = ((ev.after or {}).get("note") if ev else None) or ""
             detail = {"run_by": actor, "decision": note or "MARKED_COMPLETE", "status_after": CaseStatus.COMPLETED.value, "ms": 0,
                       "runs": a.runs if a else 0, "mode": "human", "error": ""}
+        elif parked_for_person(c):
+            actor = "security agent" if c.status == CaseStatus.SECURITY_REVIEW else "pipeline"
+            stamp = c.updated_at.isoformat()
+            detail = {"run_by": actor, "decision": "WAITING_FOR_HUMAN_DECISION", "status_after": c.status.value, "ms": c.processing_ms or 0,
+                      "runs": a.runs if a else 0, "mode": "pipeline", "error": ""}
         else:
             actor = a.last_run_by
             stamp = a.last_run_at.isoformat()

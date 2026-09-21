@@ -3,7 +3,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, post, getSession, downloadFile, type CaseRow } from "@/lib/api";
 import { Badge, Button, Card, Empty, KV, StatusBadge, Toast } from "@/components/ui";
-import { CaseMultiPicker, CasePicker } from "@/components/case-picker";
+import { CaseMultiPicker } from "@/components/case-picker";
 import { useOperatorWarning } from "@/lib/operator-warning";
 
 function downloadBase64Xlsx(b64: string, filename: string) {
@@ -83,11 +83,10 @@ export default function WorkbenchPage() {
   const loadRag = useCallback(() => { api("/rag/info").then(setRag).catch(() => {}); }, []);
   useEffect(() => { loadRag(); }, [loadRag]);
 
-  const run = async () => {
-    setBusy(true);
-    try { setSt(await post(`/agent/run/${caseId}`)); say("Graph ran"); }
+  const inspect = async (id: string) => {
+    setCaseId(id);
+    try { setSt(await api(`/agent/state/${id}`)); document.getElementById("graph-state")?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
     catch (e: any) { say(e.message, "err"); }
-    finally { setBusy(false); }
   };
   const resume = async (id: string, action: string) => {
     setBusy(true);
@@ -180,7 +179,7 @@ export default function WorkbenchPage() {
       <header>
         <Link href="/" className="inline-flex items-center gap-2 text-sm font-bold text-accent-fg transition hover:-translate-x-1 hover:text-accent">← <span>Back to inbox</span></Link>
         <h1 className="dashboard-number mt-6 text-4xl font-bold tracking-[-.04em] text-[#583521] sm:text-5xl">Workbench</h1>
-        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251]">Run the AI agent, batch-process selected cases in parallel, and export CSV, Excel or the overall report. External email is never sent from this page.</p>
+        <p className="mt-3 max-w-3xl text-base font-semibold leading-relaxed text-[#7d6251]">Batch-run the AI agent on selected cases in parallel, review each pause, and export CSV, Excel or the overall report. External email is never sent from this page.</p>
       </header>
 
       <Card title="AI providers and privacy" className="border-orange-200">
@@ -221,17 +220,44 @@ export default function WorkbenchPage() {
         </Card>
 
         <div className="space-y-4">
-          <Card title="Run agent on one case" className="border-orange-200">
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <CasePicker value={caseId} onChange={setCaseId} className="flex-1" />
-              <Button kind="primary" disabled={busy || !canCompare} onClick={run}>Run graph</Button>
-              <Button disabled={busy} onClick={() => api(`/agent/state/${caseId}`).then(setSt).catch((e) => say(e.message, "err"))}>Refresh state</Button>
+        <Card title="Batch run (Supervisor / Admin)" className="border-orange-200">
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-orange-200 bg-[#fffaf5] px-3 py-2 text-xs text-ink-700">
+              <span className="font-semibold">Before run:</span>
+              {pending ? <span><b>{pending.pending}</b> case(s) not run by the agent yet · <b>{pending.paused}</b> paused for a decision</span> : <span className="text-ink-400">counting…</span>}
+              <span className="ml-auto flex gap-1">
+                <Button kind="ghost" disabled={busy || !pending?.pending} onClick={() => addPending("pending", 20)}>Add 20 newest not-run</Button>
+                <Button kind="ghost" disabled={busy || !pending?.paused} onClick={() => addPending("paused", 50)}>Add all paused</Button>
+                <Link href="/history"><Button kind="ghost">Processed ↗</Button></Link>
+              </span>
             </div>
-            <p className="mt-2 text-xs text-ink-500">Run or refresh to highlight nodes that executed and to see interrupt/resume controls.</p>
+            <label className="text-xs font-semibold text-ink-600">Cases</label>
+            <CaseMultiPicker ids={ids} onChange={setIds} className="mt-1" />
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-ink-500">
+              <span>{ids.length} selected · External sending is never batched.</span>
+              <label className="inline-flex items-center gap-1">parallel
+                <select value={parallel} onChange={(e) => setParallel(Number(e.target.value))} className="rounded border border-ink-200 px-1 py-0.5 text-[11px]">
+                  {[1, 2, 4, 8].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              {ids.length > 0 && <button type="button" className="text-accent hover:underline" onClick={() => setIds([])}>clear</button>}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button kind="primary" disabled={busy || !canCompare} onClick={() => runAgentBatch()}>Run agent on selected</Button>
+              <Button disabled={busy || !canBatch} onClick={() => batch("classify")}>Classify</Button>
+              <Button disabled={busy || !canBatch} onClick={() => batch("compare")}>Compare</Button>
+              <Button disabled={busy || !canBatch} onClick={() => batch("draft")}>Prepare drafts</Button>
+              <Button disabled={busy || !canBatch} onClick={() => batch("request_review")}>Request review</Button>
+              <Button disabled={busy || !canExport} onClick={() => batch("export")}>Export CSV</Button>
+              <Button disabled={busy || !canExport} onClick={() => batch("export_xlsx")}>Export Excel</Button>
+              <Button disabled={busy || !canExport} onClick={() => batch("report_xlsx")}>Report (selected)</Button>
+              <Button kind="ghost" disabled={busy || !canExport} onClick={overallReport}>Overall report (Excel)</Button>
+            </div>
+            {!canBatch && <p className="mt-2 text-xs text-review-fg">Batch actions need Supervisor or Admin. Export needs export_data.</p>}
           </Card>
 
+          <div id="graph-state" className="scroll-mt-16" />
           <Card title="Graph state" className="border-orange-200">
-            {!st ? <Empty text="Run the graph or refresh the state for a case." /> : (
+            {!st ? <Empty text="Run the agent on selected cases, then press Inspect on a row to see its graph state here." /> : (
               <div className="space-y-2 text-sm">
                 <KV k="Paused" v={st.paused ? <Badge className="bg-review text-white">waiting for human</Badge> : <Badge className="bg-match-bg text-match-fg">not paused</Badge>} />
                 <KV k="Next node" v={<span className="font-mono text-xs">{st.next?.join(", ") || "END"}</span>} />
@@ -264,41 +290,6 @@ export default function WorkbenchPage() {
         </div>
       </div>
 
-      <Card title="Batch run (Supervisor / Admin)" className="border-orange-200">
-          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-orange-200 bg-[#fffaf5] px-3 py-2 text-xs text-ink-700">
-            <span className="font-semibold">Before run:</span>
-            {pending ? <span><b>{pending.pending}</b> case(s) not run by the agent yet · <b>{pending.paused}</b> paused for a decision</span> : <span className="text-ink-400">counting…</span>}
-            <span className="ml-auto flex gap-1">
-              <Button kind="ghost" disabled={busy || !pending?.pending} onClick={() => addPending("pending", 20)}>Add 20 newest not-run</Button>
-              <Button kind="ghost" disabled={busy || !pending?.paused} onClick={() => addPending("paused", 50)}>Add all paused</Button>
-              <Link href="/history"><Button kind="ghost">Processed ↗</Button></Link>
-            </span>
-          </div>
-          <label className="text-xs font-semibold text-ink-600">Cases</label>
-          <CaseMultiPicker ids={ids} onChange={setIds} className="mt-1" />
-          <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-ink-500">
-            <span>{ids.length} selected · External sending is never batched.</span>
-            <label className="inline-flex items-center gap-1">parallel
-              <select value={parallel} onChange={(e) => setParallel(Number(e.target.value))} className="rounded border border-ink-200 px-1 py-0.5 text-[11px]">
-                {[1, 2, 4, 8].map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </label>
-            {ids.length > 0 && <button type="button" className="text-accent hover:underline" onClick={() => setIds([])}>clear</button>}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button kind="primary" disabled={busy || !canCompare} onClick={() => runAgentBatch()}>Run agent on selected</Button>
-            <Button disabled={busy || !canBatch} onClick={() => batch("classify")}>Classify</Button>
-            <Button disabled={busy || !canBatch} onClick={() => batch("compare")}>Compare</Button>
-            <Button disabled={busy || !canBatch} onClick={() => batch("draft")}>Prepare drafts</Button>
-            <Button disabled={busy || !canBatch} onClick={() => batch("request_review")}>Request review</Button>
-            <Button disabled={busy || !canExport} onClick={() => batch("export")}>Export CSV</Button>
-            <Button disabled={busy || !canExport} onClick={() => batch("export_xlsx")}>Export Excel</Button>
-            <Button disabled={busy || !canExport} onClick={() => batch("report_xlsx")}>Report (selected)</Button>
-            <Button kind="ghost" disabled={busy || !canExport} onClick={overallReport}>Overall report (Excel)</Button>
-          </div>
-          {!canBatch && <p className="mt-2 text-xs text-review-fg">Batch actions need Supervisor or Admin. Export needs export_data.</p>}
-        </Card>
-
       {rowList.length > 0 && (
         <Card title={`Last run · ${lastAction === "agent" ? "agent" : lastAction} · ${rowList.length} case(s)`} className="border-orange-200"
           right={<div className="flex flex-wrap gap-1">
@@ -327,6 +318,7 @@ export default function WorkbenchPage() {
                     <td className="px-2 py-1.5">
                       <div className="flex flex-wrap gap-1">
                         <Link href={`/cases/${id}`}><Button kind="primary">Open</Button></Link>
+                        <Button kind="ghost" disabled={busy} title="Show this case's graph state above" onClick={() => inspect(id)}>Inspect</Button>
                         {r.paused && r.interrupt && (r.interrupt.allowed_actions || RESUME_ACTIONS).filter((a: string) => a !== "notify_party" && a !== "reassign").map((a: string) => (
                           <Button key={a} kind={a === "approve" ? "success" : a === "reject" ? "danger" : "ghost"} disabled={busy} onClick={() => resume(id, a)}>{a.replace("_", " ")}</Button>
                         ))}

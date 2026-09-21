@@ -3,7 +3,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { agentStateOf, api, post, getSession, ApiError, FIELD_LABELS, type CaseRow, type Metrics } from "@/lib/api";
+import { agentStateOf, api, post, getSession, ApiError, FIELD_LABELS, SEVEN_FIELDS, type CaseRow, type Metrics } from "@/lib/api";
 import { Badge, Button, Confidence, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
 import { CaseColHandle, caseColStyle as caseColBox, useCaseColWidth } from "@/components/col-resize";
 import { MailboxCard } from "@/components/mailbox-card";
@@ -12,7 +12,7 @@ import { useOperatorWarning } from "@/lib/operator-warning";
 
 const STATUSES = ["RECEIVED","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","WAITING_DOCUMENTS","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const INTENTS = ["DOCUMENT_VERIFICATION","DOCUMENT_CORRECTION","PREPARE_SHIPPING_INSTRUCTION","INVOICE_QUERY","OPERATIONAL_UPDATE","GENERAL_ENQUIRY","INFORMATION_ONLY","NO_ACTION_REQUIRED","UNKNOWN_REVIEW"];
-const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "", mailbox: "", agent: "pending" };
+const EMPTY_FILTERS = { status: "", priority: "", intent: "", mismatch: "", assigned: "", shared: "", sender: "", q: "", min_confidence: "", security: "", sort: "updated_desc", date_from: "", date_to: "", attention: "", mailbox: "", agent: "pending", field: "" };
 const AGENT_LABELS: Record<string, string> = { pending: "Not run yet", paused: "Paused – waiting for you", done: "Processed", any: "All (incl. processed)" };
 const STATUS_ORDER = ["RECEIVED","SECURITY_CHECK","SECURITY_REVIEW","CLASSIFIED","NO_ACTION_INFO","DOCUMENTS_DETECTED","WAITING_DOCUMENTS","EXTRACTING","COMPARING","NO_MISMATCH_DETECTED","MISMATCH_DETECTED","HUMAN_REVIEW","DRAFT_READY","NOTIFY_PARTY","AWAITING_RESPONSE","ASSIGNED","COMPLETED","ERROR"];
 const SORT_LABELS: Record<string, string> = { updated_desc: "Last update", received_desc: "Received", priority: "Priority", confidence: "Confidence, low first", run_desc: "Last agent run" };
@@ -21,7 +21,7 @@ type ColKey = (typeof COLUMN_KEYS)[number];
 const DEFAULT_COLS: ColKey[] = ["case","subject","action","priority","docs","mismatch","status","updated","actions"];
 const COLS_KEY = "novaship.inbox.columns";
 const CASE_COL_KEY = "novaship.inbox.caseColWidth";
-const PANEL_FILTER_KEYS = ["status","priority","intent","mailbox","mismatch","security","assigned","shared","sender","min_confidence","date_from","date_to"];
+const PANEL_FILTER_KEYS = ["status","priority","intent","mailbox","mismatch","field","security","assigned","shared","sender","min_confidence","date_from","date_to"];
 const TOOLBAR_BTN = "inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-3 py-2 text-xs font-semibold text-ink-800 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
 const KEBAB_BTN = "rounded-lg border border-ink-200 bg-white px-2 py-1.5 text-sm font-bold leading-none text-ink-700 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
 const STATUS_TONE: Record<string, string> = { HUMAN_REVIEW: "bg-review", MISMATCH_DETECTED: "bg-mismatch", SECURITY_REVIEW: "bg-mismatch", ERROR: "bg-mismatch", WAITING_DOCUMENTS: "bg-review", NO_MISMATCH_DETECTED: "bg-match", COMPLETED: "bg-match", NO_ACTION_INFO: "bg-ink-300" };
@@ -32,7 +32,6 @@ export default function Dashboard() {
   const [fields, setFields] = useState<any[]>([]);
   const [attention, setAttention] = useState<CaseRow[] | null>(null);
   const [security, setSecurity] = useState<any[] | null>(null);
-  const [activity, setActivity] = useState<any[] | null>(null);
   const [rows, setRows] = useState<CaseRow[] | null>(null);
   const [total, setTotal] = useState(0);
   const [users, setUsers] = useState<any[]>([]);
@@ -83,7 +82,6 @@ export default function Dashboard() {
         setFields(d.fields || []);
         setAttention(d.attention || []);
         setSecurity(d.security || []);
-        setActivity(d.activity);
         setUsers(d.users || []);
       })
       .catch(() => {
@@ -263,38 +261,46 @@ export default function Dashboard() {
         </Panel>
       </section>
 
-      {activity && (
-        <section className="grid gap-3 lg:grid-cols-[1.2fr_.8fr]">
-          <div className="contents">
-          <Panel className="lg:col-start-2 lg:row-start-1" title="Security agent" link={{ href: "/security", label: "Open queue" }}>
-            {security === null ? <Skeleton n={2} /> : (
-              <div className="flex items-center gap-2.5">
-                <Ring value={m ? m.security_flagged : 0} total={m ? m.incoming_emails : 1} />
-                <ul className="flex-1 space-y-1 text-[11px]">
-                  {[["SECURITY_REVIEW", "bg-mismatch"], ["SUSPICIOUS", "bg-review"], ["SPAM", "bg-ink-400"]].map(([k, c]) => (
-                    <li key={k} className="flex items-center gap-1.5"><span className={`h-1.5 w-1.5 rounded-full ${c}`} aria-hidden /><span className="flex-1 text-ink-600">{k.replace(/[_-]+/g, " ").toLowerCase()}</span><span className="font-mono font-semibold text-ink-800">{secCounts[k] || 0}</span></li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </Panel>
-          <Panel className="lg:col-start-1 lg:row-span-2" title="Latest activity" link={{ href: "/audit", label: "Full audit" }}>
-            <ul className="space-y-1.5 text-[11px]">
-              {activity.map((e) => (
-                <li key={e.event_id} className="flex gap-2">
-                  <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${e.actor_type === "USER" ? "bg-accent" : e.actor_type === "AI" ? "bg-review" : "bg-ink-300"}`} aria-hidden />
-                  <div className="min-w-0 flex-1"><span className="font-medium text-ink-800">{e.action.replace(/_/g, " ").toLowerCase()}</span>{e.case_id && <Link href={`/cases/${e.case_id}`} className="ml-1 font-mono text-accent hover:underline">{e.case_id.replace("case_", "")}</Link>}<div className="text-ink-400">{e.actor_type.toLowerCase()} {e.actor_id}, {fmtDate(e.timestamp)}</div></div>
-                </li>
-              ))}
+      <section className="grid gap-3 lg:grid-cols-2">
+        <Panel title="Security agent" link={{ href: "/security", label: "Open queue" }}>
+          {security === null ? <Skeleton n={2} /> : (
+            <div className="flex items-center gap-4">
+              <Ring value={m ? m.security_flagged : 0} total={m ? m.incoming_emails : 1} />
+              <ul className="flex-1 space-y-1.5 text-xs">
+                {[["SECURITY_REVIEW", "bg-mismatch"], ["SUSPICIOUS", "bg-review"], ["SPAM", "bg-ink-400"]].map(([k, c]) => (
+                  <li key={k}>
+                    <button onClick={() => applyPreset({ security: k })} className="group flex w-full items-center gap-2 text-left" title={`Show ${k.replace(/_/g, " ").toLowerCase()} cases in the work queue`}>
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${c}`} aria-hidden /><span className="flex-1 text-ink-700 transition group-hover:text-accent">{k.replace(/[_-]+/g, " ").toLowerCase()}</span><span className="font-mono font-semibold text-ink-800">{secCounts[k] || 0}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Seven field checks" link={{ href: "", label: "" }} right={
+          <button onClick={() => f.field ? setFilter("field", "") : applyPreset({ mismatch: "yes" })} aria-pressed={!f.field} className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${!f.field ? "border-accent bg-accent text-white" : "border-ink-200 bg-white text-ink-600 hover:border-accent hover:text-accent-fg"}`} title="All fields: every case with a mismatch">All fields</button>
+        }>
+          {fields.length === 0 ? <Skeleton n={4} /> : (
+            <ul className="grid gap-x-5 gap-y-1.5 sm:grid-cols-2">
+              {fields.map((x, i) => {
+                const active = f.field === x.field;
+                return (
+                  <li key={x.field}>
+                    <button onClick={() => applyPreset(active ? {} : { field: x.field })} aria-pressed={active} className={`group flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition ${active ? "bg-accent-bg text-accent-fg" : ""}`} title={`Show cases where ${FIELD_LABELS[x.field]} differs between SI and Draft BL`}>
+                      <span className="w-4 text-ink-400">{i + 1}</span>
+                      <span className={`min-w-0 flex-1 truncate ${active ? "font-semibold" : "text-ink-700 group-hover:text-accent"}`}>{FIELD_LABELS[x.field]}</span>
+                      <span className="h-1.5 w-16 overflow-hidden rounded-full bg-ink-100"><span className="block h-full rounded-full bg-gradient-to-r from-[#f58a38] to-[#9d6b5d]" style={{ width: `${(x.mismatch / fieldMax) * 100}%` }} /></span>
+                      <span className="font-mono text-ink-800">{x.mismatch}</span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
-            <ActivityTrend events={activity} />
-          </Panel>
-          <Panel className="lg:col-start-2 lg:row-start-2" title="Seven field checks" link={{ href: "/verification", label: "View all" }}>
-            {fields.length === 0 ? <Skeleton n={4} /> : <ul className="grid gap-x-5 gap-y-1.5 sm:grid-cols-2">{fields.map((x, i) => <li key={x.field}><Link href="/verification" className="group flex items-center gap-2 text-xs"><span className="w-4 text-ink-400">{i + 1}</span><span className="min-w-0 flex-1 truncate text-ink-700 group-hover:text-accent">{FIELD_LABELS[x.field]}</span><span className="h-1.5 w-16 overflow-hidden rounded-full bg-ink-100"><span className="block h-full rounded-full bg-gradient-to-r from-[#f58a38] to-[#9d6b5d]" style={{ width: `${(x.mismatch / fieldMax) * 100}%` }} /></span><span className="font-mono text-ink-800">{x.mismatch}</span></Link></li>)}</ul>}
-          </Panel>
-          </div>
-        </section>
-      )}
+          )}
+        </Panel>
+      </section>
 
       {/* ---- case table --------------------------------------------------------- */}
       {canIngest && <MailboxCard compact />}
@@ -415,10 +421,6 @@ function Trend({ direction }: { direction: "up" | "down" }) {
   const points = direction === "up" ? "2,20 11,16 18,17 27,9 36,12 46,4" : "2,6 11,10 18,9 27,16 36,13 46,21";
   return <svg viewBox="0 0 48 24" className="h-7 w-14 overflow-visible" aria-label={`${direction}ward trend`}><polyline points={points} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#4b2818]" /><path d={direction === "up" ? "M42 4h4v4" : "M42 21h4v-4"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-[#4b2818]" /></svg>;
 }
-function ActivityTrend({ events }: { events: any[] }) {
-  const heights = events.slice(0, 8).map((event, index) => event.actor_type === "USER" ? 72 - index * 3 : event.actor_type === "AI" ? 52 - index * 2 : 34 + index * 2);
-  return <div className="mt-4 border-t border-orange-100 pt-3"><div className="mb-2 text-[10px] font-bold uppercase tracking-[.12em] text-accent">Activity pulse</div><div className="flex h-12 items-end gap-1.5">{heights.map((height, index) => <span key={index} className="flex-1 rounded-t-full bg-gradient-to-t from-[#d66a1d] to-[#f7b46f] opacity-85" style={{ height: `${Math.max(18, height)}%` }} />)}</div></div>;
-}
 function Ring({ value, total }: { value: number; total: number }) {
   const pct = total ? Math.min(100, Math.round((value / total) * 100)) : 0;
   const r = 26, c = 2 * Math.PI * r;
@@ -475,12 +477,13 @@ function FilterPanel({ open, onClose, f, setFilter, onClear, users, myMailbox, s
           <Field label="Intent"><select className={inputClass} value={f.intent} onChange={(e) => setFilter("intent", e.target.value)}><option value="">Any intent</option>{INTENTS.map((s) => opt(s))}</select></Field>
           <Field label="Mailbox"><select className={inputClass} value={f.mailbox} onChange={(e) => setFilter("mailbox", e.target.value)}><option value="">Any mailbox</option>{myMailbox && opt("me", `My mailbox (${myMailbox})`)}{sharedMailbox && opt("shared", "Shared desk mailbox")}</select></Field>
           <Field label="Mismatch"><select className={inputClass} value={f.mismatch} onChange={(e) => setFilter("mismatch", e.target.value)}><option value="">Any result</option>{opt("yes", "Mismatch")}{opt("no", "No mismatch")}</select></Field>
+          <Field label="Field" hint="Cases where this SI field differs from the Draft BL."><select className={inputClass} value={f.field} onChange={(e) => setFilter("field", e.target.value)}><option value="">Any field</option>{SEVEN_FIELDS.map((k) => opt(k, FIELD_LABELS[k]))}</select></Field>
           <Field label="Security"><select className={inputClass} value={f.security} onChange={(e) => setFilter("security", e.target.value)}><option value="">Any outcome</option>{["SAFE","SPAM","SUSPICIOUS","SECURITY_REVIEW"].map((s) => opt(s))}</select></Field>
           <Field label="Assigned to"><select className={inputClass} value={f.assigned} onChange={(e) => setFilter("assigned", e.target.value)}><option value="">Anyone</option>{userOpts}</select></Field>
           <Field label="Shared with"><select className={inputClass} value={f.shared} onChange={(e) => setFilter("shared", e.target.value)}><option value="">Anyone</option>{userOpts}</select></Field>
           <Field label="Sender"><input className={inputClass} placeholder="name@company.com" value={f.sender} onChange={(e) => setFilter("sender", e.target.value)} /></Field>
           <Field label="Minimum confidence"><input type="number" step="0.05" min="0" max="1" placeholder="e.g. 0.80" className={inputClass} value={f.min_confidence} onChange={(e) => setFilter("min_confidence", e.target.value)} /></Field>
-          <Field label="Agent run" hint="Processed cases live on the Processed page."><select className={inputClass} value={f.agent} onChange={(e) => setFilter("agent", e.target.value || "any")}>{["pending","paused","done","any"].map((s) => opt(s, AGENT_LABELS[s]))}</select></Field>
+          <Field label="Agent run" hint="Finished cases are listed under Processed."><select className={inputClass} value={f.agent} onChange={(e) => setFilter("agent", e.target.value || "any")}>{["pending","paused","done","any"].map((s) => opt(s, AGENT_LABELS[s]))}</select></Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Received from"><input type="date" className={inputClass} value={f.date_from} onChange={(e) => setFilter("date_from", e.target.value)} /></Field>
             <Field label="Received to"><input type="date" className={inputClass} value={f.date_to.slice(0, 10)} onChange={(e) => setFilter("date_to", e.target.value ? e.target.value + "T23:59:59" : "")} /></Field>

@@ -217,4 +217,6 @@ export type Metrics = Record<string, any>;
 export type NotificationItem = { kind?: "needs_person"; case_id: string; subject: string; status: string; priority: string; reason: string; updated_at: string };
 /** A case that arrived through the signed-in user's own mailbox (Outlook/Gmail) in the last 48 h. */
 export type NewMailItem = { kind: "new_mail"; case_id: string; email_id: string; mailbox?: string | null; subject: string; sender: string; status: string; priority: string; action_required: boolean; received_at: string; created_at: string };
-export type NotificationFeed = { items: NotificationItem[]; total: number; new_mail?: NewMailItem[]; new_mail_total?: number };
+/** A case a colleague shared with the signed-in user in the last 7 days. */
+export type SharedItem = { kind: "shared"; share_id: string; case_id: string; shared_by: string; shared_by_name: string; subject: string; message: string; status: string; priority: string; shared_at: string };
+export type NotificationFeed = { items: NotificationItem[]; total: number; new_mail?: NewMailItem[]; new_mail_total?: number; shared?: SharedItem[]; shared_total?: number };

@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { AUTH_PATHS, api, getSession, logout, redirectToLogin, type NewMailItem, type NotificationFeed, type NotificationItem } from "@/lib/api";
+import { AUTH_PATHS, api, getSession, logout, redirectToLogin, type NewMailItem, type NotificationFeed, type SharedItem } from "@/lib/api";
 import { ROLE_LABELS } from "@/components/auth";
 
 type Me = { id: string; email: string; display_name: string; roles: string[]; permissions: string[]; mailbox?: { connected: boolean; address?: string; status?: string; provider?: string } };
@@ -11,7 +11,6 @@ type Me = { id: string; email: string; display_name: string; roles: string[]; pe
 const NAV: { href: string; label: string; icon: string; perm?: string }[] = [
   { href: "/", label: "Inbox", icon: "inbox" },
   { href: "/workbench", label: "Workbench", icon: "bench" },
-  { href: "/verification", label: "Seven fields", icon: "check" },
   { href: "/security", label: "Security", icon: "shield" },
   { href: "/history", label: "Processed", icon: "history" },
   { href: "/audit", label: "Audit", icon: "audit", perm: "view_audit" },
@@ -96,33 +95,32 @@ export function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * The bell: two short lists, "New mail" (cases that arrived through your own mailbox) and "Shared with you" (a colleague
+ * shared a case). An entry disappears once opened or dismissed; the browser remembers that. The queue of cases that need
+ * a person lives in the Inbox ("Needs human"), not here.
+ */
 function NotificationBell() {
-  const [items, setItems] = useState<NotificationItem[]>([]);
   const [mail, setMail] = useState<NewMailItem[]>([]);
+  const [shared, setShared] = useState<SharedItem[]>([]);
   const [open, setOpen] = useState(false);
-  const [seen, setSeen] = useState<Set<string>>(new Set());
-  const [closed, setClosed] = useState<Set<string>>(new Set());
-  const [closedItems, setClosedItems] = useState<Set<string>>(new Set());   // "needs a person" entries already opened or dismissed
+  const [closed, setClosed] = useState<Set<string>>(new Set());      // keys of entries already opened or dismissed
   const [prevMailIds, setPrevMailIds] = useState<Set<string> | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem("novaship.seenNotifications");
-      if (raw) setSeen(new Set(JSON.parse(raw) as string[]));
-      const rawClosed = localStorage.getItem("novaship.closedNewMail");
-      if (rawClosed) setClosed(new Set(JSON.parse(rawClosed) as string[]));
-      const rawItems = localStorage.getItem("novaship.closedNotifications");
-      if (rawItems) setClosedItems(new Set(JSON.parse(rawItems) as string[]));
+      const raw = localStorage.getItem("novaship.closedNotifications");
+      if (raw) setClosed(new Set(JSON.parse(raw) as string[]));
     } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
     const load = () => {
       api<NotificationFeed>("/me/notifications").then((d) => {
-        setItems(d.items || []);
         const incoming = d.new_mail || [];
         setMail(incoming);
+        setShared(d.shared || []);
         // a mail that was not in the previous poll -> short toast, so the arrival is visible even with the bell closed
         setPrevMailIds((prev) => {
           if (prev) {
@@ -138,41 +136,26 @@ function NotificationBell() {
     return () => window.clearInterval(t);
   }, []);
 
-  const keyOf = (n: NotificationItem) => `${n.case_id}:${n.updated_at}`;
-  const visibleMail = mail.filter((m) => !closed.has(m.case_id));
-  // an item is keyed by case + last update, so a case that changes again shows up as a fresh notification
-  const visibleItems = items.filter((n) => !closedItems.has(keyOf(n)));
-  const unseen = visibleItems.filter((n) => !seen.has(keyOf(n))).length + visibleMail.length;
-  const closeItems = (keys: string[]) => {
-    const next = new Set([...closedItems, ...keys]);
-    setClosedItems(next);
+  const mailKey = (m: NewMailItem) => `mail:${m.case_id}`;
+  const shareKey = (x: SharedItem) => `share:${x.share_id}`;
+  const visibleMail = mail.filter((m) => !closed.has(mailKey(m)));
+  const visibleShared = shared.filter((x) => !closed.has(shareKey(x)));
+  const count = visibleMail.length + visibleShared.length;
+
+  const dismiss = (keys: string[]) => {
+    const next = new Set([...closed, ...keys]);
+    setClosed(next);
     try { localStorage.setItem("novaship.closedNotifications", JSON.stringify([...next].slice(-500))); } catch { /* ignore */ }
   };
-
-  const persistSeen = (next: Set<string>) => {
-    setSeen(next);
-    try { localStorage.setItem("novaship.seenNotifications", JSON.stringify([...next])); } catch { /* ignore */ }
-  };
-  const closeMail = (ids: string[]) => {
-    const next = new Set([...closed, ...ids]);
-    setClosed(next);
-    try { localStorage.setItem("novaship.closedNewMail", JSON.stringify([...next].slice(-500))); } catch { /* ignore */ }
-  };
-
-  const toggle = () => {
-    setOpen((was) => {
-      if (!was) persistSeen(new Set([...seen, ...items.map(keyOf)]));
-      return !was;
-    });
-  };
+  const openItem = (key: string) => { dismiss([key]); setOpen(false); };
   const when = (iso: string) => { try { return new Date(iso).toLocaleString(undefined, { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" }); } catch { return iso; } };
 
   return (
     <div className="relative lg:w-full">
-      <button type="button" onClick={toggle} aria-expanded={open} aria-label={unseen ? `${unseen} notifications` : "Notifications"} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-ink-700 transition hover:border-accent hover:text-accent-fg lg:w-full lg:justify-center">
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={count ? `${count} notifications` : "Notifications"} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-ink-700 transition hover:border-accent hover:text-accent-fg lg:w-full lg:justify-center">
         <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M6 8a6 6 0 1 1 12 0c0 7 3 7 3 9H3s3-2 3-9" /><path d="M10 21a2 2 0 0 0 4 0" /></svg>
         <span className="hidden sm:inline">Alerts</span>
-        {unseen > 0 && <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-white">{unseen > 9 ? "9+" : unseen}</span>}
+        {count > 0 && <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-white">{count > 9 ? "9+" : count}</span>}
       </button>
       {flash && !open && (
         <div role="status" className="fixed bottom-4 right-4 z-50 max-w-[22rem] rounded-xl border border-orange-200 bg-white px-3 py-2 text-xs text-ink-800 shadow-lg">
@@ -181,51 +164,47 @@ function NotificationBell() {
         </div>
       )}
       {open && (
-        <div className="absolute right-0 z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-ink-200 bg-white shadow-lg lg:bottom-full lg:right-auto lg:left-0 lg:mb-2 lg:mt-0 lg:w-full">
-          <div className="flex items-center justify-between border-b border-ink-100 px-3 py-2 text-[11px] font-semibold text-ink-800">
-            <span>New mail{visibleMail.length ? ` (${visibleMail.length})` : ""}</span>
-            {visibleMail.length > 0 && (
-              <span className="flex gap-2">
-                <Link href={`/cases/${visibleMail[0].case_id}`} onClick={() => { closeMail([visibleMail[0].case_id]); setOpen(false); }} className="font-semibold text-accent-fg hover:underline">Open latest</Link>
-                <button type="button" onClick={() => closeMail(visibleMail.map((m) => m.case_id))} className="text-ink-500 hover:text-ink-800">Clear all</button>
-              </span>
-            )}
-          </div>
-          {visibleMail.length === 0 ? <p className="px-3 py-3 text-center text-[11px] text-ink-500">No new mail in your mailbox.</p> : (
-            <ul className="max-h-56 overflow-y-auto">
-              {visibleMail.map((m) => (
-                <li key={m.case_id} className="flex items-stretch border-b border-ink-50">
-                  <Link href={`/cases/${m.case_id}`} onClick={() => { closeMail([m.case_id]); setOpen(false); }} className="min-w-0 flex-1 px-3 py-2 hover:bg-accent-bg">
-                    <div className="truncate text-xs font-semibold text-ink-900">{m.subject}</div>
-                    <div className="truncate text-[10px] text-ink-500">{m.sender} · {when(m.received_at)}</div>
-                    <div className="text-[10px] text-ink-500">{m.status.replace(/_/g, " ")}{m.action_required ? " · needs a person" : ""}</div>
-                  </Link>
-                  <button type="button" onClick={() => closeMail([m.case_id])} className="px-2 text-ink-400 hover:bg-ink-50 hover:text-ink-800" aria-label="Close notification" title="Close">×</button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <div className="flex items-center justify-between border-b border-t border-ink-100 px-3 py-2 text-[11px] font-semibold text-ink-800">
-            <span>Needs a person{visibleItems.length ? ` (${visibleItems.length})` : ""}</span>
-            {visibleItems.length > 0 && <button type="button" onClick={() => closeItems(visibleItems.map(keyOf))} className="text-ink-500 hover:text-ink-800">Clear all</button>}
-          </div>
-          {visibleItems.length === 0 ? <p className="px-3 py-6 text-center text-xs text-ink-500">Queue is clear.</p> : (
-            <ul className="max-h-64 overflow-y-auto">
-              {visibleItems.map((n) => (
-                <li key={keyOf(n)} className="flex items-stretch border-b border-ink-50">
-                  <Link href={`/cases/${n.case_id}`} onClick={() => { closeItems([keyOf(n)]); setOpen(false); }} className="min-w-0 flex-1 px-3 py-2 hover:bg-accent-bg">
-                    <div className="text-[10px] font-bold uppercase tracking-wide text-accent">{n.reason}</div>
-                    <div className="truncate text-xs font-semibold text-ink-900">{n.subject || n.case_id}</div>
-                    <div className="text-[10px] text-ink-500">{n.status.replace(/_/g, " ")} · {n.priority}</div>
-                  </Link>
-                  <button type="button" onClick={() => closeItems([keyOf(n)])} className="px-2 text-ink-400 hover:bg-ink-50 hover:text-ink-800" aria-label="Dismiss notification" title="Dismiss">×</button>
-                </li>
-              ))}
-            </ul>
-          )}
+        <div className="absolute right-0 z-50 mt-2 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-ink-200 bg-white shadow-lg lg:bottom-full lg:left-0 lg:right-auto lg:mb-2 lg:mt-0 lg:w-[22rem]">
+          <NotificationSection title="New mail" n={visibleMail.length} onClearAll={visibleMail.length > 1 ? () => dismiss(visibleMail.map(mailKey)) : undefined} empty="No new mail in your mailbox.">
+            {visibleMail.map((m) => (
+              <NotificationRow key={mailKey(m)} href={`/cases/${m.case_id}`} onOpen={() => openItem(mailKey(m))} onDismiss={() => dismiss([mailKey(m)])}
+                title={m.subject} meta={`${m.sender} · ${when(m.received_at)}`} tag={m.action_required ? "needs a person" : undefined} />
+            ))}
+          </NotificationSection>
+          <NotificationSection title="Shared with you" n={visibleShared.length} onClearAll={visibleShared.length > 1 ? () => dismiss(visibleShared.map(shareKey)) : undefined} empty="Nobody has shared a case with you this week.">
+            {visibleShared.map((x) => (
+              <NotificationRow key={shareKey(x)} href={`/cases/${x.case_id}?tab=collab`} onOpen={() => openItem(shareKey(x))} onDismiss={() => dismiss([shareKey(x)])}
+                title={x.subject} meta={`${x.shared_by_name} · ${when(x.shared_at)}`} note={x.message} />
+            ))}
+          </NotificationSection>
         </div>
       )}
     </div>
+  );
+}
+
+function NotificationSection({ title, n, onClearAll, empty, children }: { title: string; n: number; onClearAll?: () => void; empty: string; children: React.ReactNode }) {
+  return (
+    <section>
+      <div className="flex items-center justify-between border-b border-ink-100 bg-ink-50/60 px-3 py-2">
+        <span className="text-[11px] font-semibold text-ink-800">{title}{n > 0 && <span className="ml-1.5 rounded-full bg-accent-bg px-1.5 text-[10px] font-bold text-accent-fg">{n}</span>}</span>
+        {onClearAll && <button type="button" onClick={onClearAll} className="text-[11px] text-ink-500 hover:text-ink-800">Clear all</button>}
+      </div>
+      {n === 0 ? <p className="px-3 py-4 text-center text-[11px] text-ink-500">{empty}</p> : <ul className="max-h-56 overflow-y-auto scrollbar-thin">{children}</ul>}
+    </section>
+  );
+}
+
+function NotificationRow({ href, onOpen, onDismiss, title, meta, tag, note }: { href: string; onOpen: () => void; onDismiss: () => void; title: string; meta: string; tag?: string; note?: string }) {
+  return (
+    <li className="flex items-stretch border-b border-ink-50 last:border-b-0">
+      <Link href={href} onClick={onOpen} className="min-w-0 flex-1 px-3 py-2 hover:bg-accent-bg">
+        <div className="truncate text-xs font-semibold text-ink-900">{title}</div>
+        <div className="truncate text-[10px] text-ink-500">{meta}{tag && <span className="ml-1.5 rounded-full bg-accent-bg px-1.5 text-[10px] font-semibold text-accent-fg">{tag}</span>}</div>
+        {note && <div className="mt-0.5 truncate text-[10px] italic text-ink-500">“{note}”</div>}
+      </Link>
+      <button type="button" onClick={onDismiss} className="px-2.5 text-ink-400 transition hover:bg-ink-50 hover:text-ink-800" aria-label="Dismiss" title="Dismiss">×</button>
+    </li>
   );
 }
 

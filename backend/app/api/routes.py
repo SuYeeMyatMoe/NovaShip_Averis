@@ -23,6 +23,7 @@ from app.contracts.schemas import (
     CaseStatus,
     DraftDecision,
     DraftRequest,
+    FieldResult,
     Role,
     ShareRequest,
     UserRecord,
@@ -103,6 +104,13 @@ def _case_row(c, e) -> dict[str, Any]:
         "mailbox_user_id": e.mailbox_user_id if e else None, "mailbox": e.mailbox_address if e else None,
         "agent_run": c.agent_run.summary() if c.agent_run else None,
     }
+
+
+def _field_flagged(c, field: str) -> bool:
+    """True when the seven-field comparison flagged `field` (mismatch, missing on one side, or low-confidence review)."""
+    if not c.comparison:
+        return False
+    return any(f.field == field and f.result != FieldResult.MATCH for f in c.comparison.fields)
 
 
 def _agent_state(c) -> str:
@@ -247,7 +255,33 @@ def my_notifications(user: UserRecord = Depends(require("view_case")), limit: in
         "updated_at": case.updated_at.isoformat(),
     } for case in candidates[:cap]]
     new_mail = _new_mail_notifications(repo, user.id, cap)
-    return {"items": items, "total": total, "new_mail": new_mail, "new_mail_total": len(new_mail)}
+    shared_with_me = _shared_with_me_notifications(repo, user.id, cap)
+    return {"items": items, "total": total, "new_mail": new_mail, "new_mail_total": len(new_mail), "shared": shared_with_me, "shared_total": len(shared_with_me)}
+
+
+SHARED_WINDOW_D = 7
+
+
+def _shared_with_me_notifications(repo, user_id: str, cap: int) -> list[dict[str, Any]]:
+    """Cases a colleague shared with the caller in the last 7 days (delivered internal shares), newest first."""
+    since = datetime.utcnow() - timedelta(days=SHARED_WINDOW_D)
+    names = {u.id: u.display_name for u in repo.list_users()}
+    out: list[dict[str, Any]] = []
+    shares = [s for s in repo.list_shares() if s.recipient_user_id == user_id and s.status in {"SENT", "SIMULATED", "VIEWED"} and s.sent_at and s.sent_at >= since]
+    shares.sort(key=lambda s: s.sent_at or datetime.min, reverse=True)
+    for share in shares:
+        case = repo.get_case(share.case_id)
+        if not case:
+            continue
+        email = repo.get_email(case.source_email_id)
+        out.append({
+            "kind": "shared", "share_id": share.id, "case_id": case.id, "shared_by": share.shared_by, "shared_by_name": names.get(share.shared_by, share.shared_by),
+            "subject": (email.subject if email and email.subject else case.id), "message": (share.message or "")[:160], "status": case.status.value,
+            "priority": case.priority.value, "shared_at": share.sent_at.isoformat(),
+        })
+        if len(out) >= cap:
+            break
+    return out
 
 
 NEW_MAIL_WINDOW_H = 48
@@ -423,6 +457,7 @@ def dashboard_bootstrap(user: UserRecord = Depends(require("view_case"))):
 def list_cases(
     status: Optional[str] = None, priority: Optional[str] = None, intent: Optional[str] = None, category: Optional[str] = None,
     mismatch: Optional[str] = Query(default=None, description="yes|no"), assigned: Optional[str] = None, shared: Optional[str] = None,
+    field: Optional[str] = Query(default=None, description="one of the seven fields: keep cases whose comparison of that field is not a MATCH"),
     sender: Optional[str] = None, q: Optional[str] = None, min_confidence: Optional[float] = None, security: Optional[str] = None,
     date_from: Optional[str] = None, date_to: Optional[str] = None, attention: Optional[str] = Query(default=None, description="yes to restrict to human-needed cases"),
     mailbox: Optional[str] = Query(default=None, description="user id of a connected mailbox, 'me', or 'shared'"),
@@ -453,6 +488,8 @@ def list_cases(
         if mismatch == "yes" and c.mismatch_count == 0:
             continue
         if mismatch == "no" and (c.mismatch_count > 0 or not c.comparison):
+            continue
+        if field and not _field_flagged(c, field):
             continue
         if assigned and c.assigned_user_id != assigned:
             continue
