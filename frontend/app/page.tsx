@@ -19,10 +19,38 @@ const COLUMN_KEYS = ["case","subject","intent","security","action","priority","d
 type ColKey = (typeof COLUMN_KEYS)[number];
 const DEFAULT_COLS: ColKey[] = ["case","subject","action","priority","docs","mismatch","status","updated","actions"];
 const COLS_KEY = "novaship.inbox.columns";
+const CASE_COL_KEY = "novaship.inbox.caseColWidth";
+const CASE_COL_DEFAULT = 80;
+const CASE_COL_MIN = 72;
+const CASE_COL_MAX = 448;
 const PANEL_FILTER_KEYS = ["status","priority","intent","mailbox","mismatch","security","assigned","shared","sender","min_confidence","date_from","date_to"];
 const TOOLBAR_BTN = "inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-3 py-2 text-xs font-semibold text-ink-800 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
 const KEBAB_BTN = "rounded-lg border border-ink-200 bg-white px-2 py-1.5 text-sm font-bold leading-none text-ink-700 transition hover:bg-ink-50 aria-expanded:border-accent aria-expanded:text-accent-fg";
 const STATUS_TONE: Record<string, string> = { HUMAN_REVIEW: "bg-review", MISMATCH_DETECTED: "bg-mismatch", SECURITY_REVIEW: "bg-mismatch", ERROR: "bg-mismatch", WAITING_DOCUMENTS: "bg-review", NO_MISMATCH_DETECTED: "bg-match", COMPLETED: "bg-match", NO_ACTION_INFO: "bg-ink-300" };
+
+function clampCaseCol(n: number) {
+  return Math.min(CASE_COL_MAX, Math.max(CASE_COL_MIN, Math.round(n)));
+}
+
+function persistCaseCol(n: number) {
+  const w = clampCaseCol(n);
+  try { localStorage.setItem(CASE_COL_KEY, String(w)); } catch { /* ignore */ }
+  return w;
+}
+
+function measureCaseFit(labels: string[]) {
+  if (typeof document === "undefined" || !labels.length) return CASE_COL_MAX;
+  const el = document.createElement("span");
+  el.style.cssText = "position:absolute;left:-9999px;top:0;white-space:nowrap;font:11px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace";
+  document.body.appendChild(el);
+  let max = CASE_COL_DEFAULT;
+  for (const label of labels) {
+    el.textContent = label;
+    max = Math.max(max, el.offsetWidth + 24);
+  }
+  el.remove();
+  return clampCaseCol(max);
+}
 
 export default function Dashboard() {
   const router = useRouter();
@@ -50,6 +78,7 @@ export default function Dashboard() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const closeFilters = useCallback(() => setFiltersOpen(false), []);
   const [visibleCols, setVisibleCols] = useState<ColKey[]>(DEFAULT_COLS);
+  const [caseColWidth, setCaseColWidth] = useState(CASE_COL_DEFAULT);
   useEffect(() => {
     try {
       const raw = localStorage.getItem(COLS_KEY);
@@ -58,6 +87,12 @@ export default function Dashboard() {
       if (!Array.isArray(arr)) return;
       const ok = arr.filter((k): k is ColKey => (COLUMN_KEYS as readonly string[]).includes(k));
       if (ok.length) setVisibleCols(ok);
+    } catch { /* ignore */ }
+    try {
+      const raw = localStorage.getItem(CASE_COL_KEY);
+      if (!raw) return;
+      const n = Number(raw);
+      if (Number.isFinite(n)) setCaseColWidth(clampCaseCol(n));
     } catch { /* ignore */ }
   }, []);
   const persistCols = (next: ColKey[]) => { try { localStorage.setItem(COLS_KEY, JSON.stringify(next)); } catch { /* ignore */ } return next; };
@@ -166,7 +201,7 @@ export default function Dashboard() {
 
   type Col = { key: ColKey; label: string; title?: string; td?: string | ((r: CaseRow) => string); render: (r: CaseRow) => React.ReactNode };
   const columns: Col[] = [
-    { key: "case", label: "Case", td: "font-mono text-[11px]", render: (r) => <Link href={`/cases/${r.id}`} className="text-accent hover:underline">{r.id.replace("case_", "")}</Link> },
+    { key: "case", label: "Case", td: "overflow-hidden font-mono text-[11px]", render: (r) => <Link href={`/cases/${r.id}`} title={r.id} className="block truncate text-accent hover:underline">{r.id.replace("case_", "")}</Link> },
     { key: "subject", label: "Subject / sender", td: "max-w-[360px]", render: (r) => (
       <>
         <Link href={`/cases/${r.id}`} className="line-clamp-1 font-medium text-ink-900 hover:text-accent">{r.subject || "(no subject)"}</Link>
@@ -190,7 +225,7 @@ export default function Dashboard() {
     { key: "status", label: "Status", render: (r) => <><StatusBadge status={r.status} />{r.errors > 0 && <div className="mt-0.5 text-[10px] text-mismatch">{r.errors} error(s)</div>}</> },
     { key: "run", label: "Run", title: "Last AI-agent run", td: "whitespace-nowrap text-[11px]", render: (r) => <RunCell r={r} /> },
     { key: "updated", label: "Updated", td: "whitespace-nowrap text-[11px] text-ink-500", render: (r) => fmtDate(r.updated_at) },
-    { key: "actions", label: "Actions", render: (r) => (
+    { key: "actions", label: "Actions", td: "whitespace-nowrap", render: (r) => (
       <div className="flex items-center gap-1">
         <Button kind="primary" onClick={() => router.push(`/cases/${r.id}`)}>Open</Button>
         <Menu label={`More actions for ${r.id.replace("case_", "")}`} width={200} triggerClassName={KEBAB_BTN} trigger={<span aria-hidden>⋯</span>}>
@@ -206,6 +241,8 @@ export default function Dashboard() {
   ];
   const visible = columns.filter((c) => visibleCols.includes(c.key));
   const pages = Math.max(1, Math.ceil(total / limit));
+  const caseColStyle = { width: caseColWidth, maxWidth: caseColWidth, minWidth: caseColWidth };
+  const caseLabels = (rows || []).map((r) => r.id.replace("case_", ""));
 
   return (
     <div className="dashboard-type space-y-3">
@@ -353,10 +390,23 @@ export default function Dashboard() {
 
         <div className="overflow-x-auto scrollbar-thin">
           <table className="w-full min-w-[880px] text-left text-xs">
+            <colgroup>
+              <col className="w-8" />
+              {visible.map((c) => <col key={c.key} style={c.key === "case" ? { width: caseColWidth } : undefined} />)}
+            </colgroup>
             <thead className="bg-ink-50 text-[11px] uppercase tracking-wide text-ink-500">
               <tr>
                 <th className="px-2 py-2"><input type="checkbox" aria-label="Select all on page" checked={!!rows?.length && rows.every((r) => sel.has(r.id))} onChange={(e) => setSel(e.target.checked ? new Set((rows || []).map((r) => r.id)) : new Set())} /></th>
-                {visible.map((c) => <th key={c.key} className="px-2 py-2" title={c.title}>{c.label}</th>)}
+                {visible.map((c) => (
+                  <th key={c.key} className={`px-2 py-2 ${c.key === "case" ? "relative overflow-hidden" : ""}`} title={c.title} style={c.key === "case" ? caseColStyle : undefined}>
+                    {c.key === "case" ? (
+                      <>
+                        <span className="block truncate pr-1">{c.label}</span>
+                        <CaseColHandle width={caseColWidth} onChange={setCaseColWidth} labels={caseLabels} />
+                      </>
+                    ) : c.label}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -364,7 +414,7 @@ export default function Dashboard() {
               {rows?.map((r) => (
                 <tr key={r.id} className={`border-t border-ink-100 align-top transition hover:bg-accent-bg/30 ${sel.has(r.id) ? "bg-accent-bg/40" : ""} ${agentStateOf(r) === "done" ? "opacity-70" : ""}`}>
                   <td className="px-2 py-2"><input type="checkbox" aria-label={`Select ${r.id}`} checked={sel.has(r.id)} onChange={() => toggle(r.id)} /></td>
-                  {visible.map((c) => <td key={c.key} className={`px-2 py-2 ${typeof c.td === "function" ? c.td(r) : c.td || ""}`}>{c.render(r)}</td>)}
+                  {visible.map((c) => <td key={c.key} className={`px-2 py-2 ${c.key === "case" ? "overflow-hidden" : ""} ${typeof c.td === "function" ? c.td(r) : c.td || ""}`} style={c.key === "case" ? caseColStyle : undefined}>{c.render(r)}</td>)}
                 </tr>
               ))}
               {rows?.length === 0 && <tr><td colSpan={visible.length + 1} className="px-4 py-10 text-center text-sm text-ink-500">{apiDown ? "The API is offline. Start the backend on port 8000 and refresh." : f.agent === "pending" ? <span>Every case in this view has been run by the agent — see <Link href="/history" className="font-semibold text-accent-fg hover:underline">History</Link> or <button type="button" onClick={() => setFilter("agent", "any")} className="font-semibold text-accent-fg hover:underline">show processed cases</button>.</span> : <span>No cases match these filters. <button type="button" onClick={() => { setF(EMPTY_FILTERS); setPage(0); }} className="font-semibold text-accent-fg hover:underline">Clear filters</button></span>}</td></tr>}
@@ -378,6 +428,54 @@ export default function Dashboard() {
       </div>
       <FilterPanel open={filtersOpen} onClose={closeFilters} f={f} setFilter={setFilter} onClear={() => { setF(EMPTY_FILTERS); setPage(0); }} users={users} myMailbox={myMailbox} sharedMailbox={sharedMailbox} />
     </div>
+  );
+}
+
+function CaseColHandle({ width, onChange, labels }: { width: number; onChange: (n: number) => void; labels: string[] }) {
+  const widthRef = useRef(width);
+  widthRef.current = width;
+  const drag = useRef<{ x: number; w: number } | null>(null);
+  const apply = (n: number) => { const w = persistCaseCol(n); onChange(w); };
+
+  return (
+    <button
+      type="button"
+      aria-orientation="vertical"
+      aria-valuemin={CASE_COL_MIN}
+      aria-valuemax={CASE_COL_MAX}
+      aria-valuenow={width}
+      aria-label="Resize Case column"
+      title="Drag to expand the case id. Double-click to fit or reset."
+      className="absolute inset-y-0 right-0 z-10 w-2 cursor-col-resize touch-none border-0 bg-transparent p-0 hover:bg-accent/40"
+      onPointerDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { x: e.clientX, w: widthRef.current };
+      }}
+      onPointerMove={(e) => {
+        if (!drag.current) return;
+        onChange(clampCaseCol(drag.current.w + e.clientX - drag.current.x));
+      }}
+      onPointerUp={() => {
+        if (!drag.current) return;
+        drag.current = null;
+        persistCaseCol(widthRef.current);
+      }}
+      onPointerCancel={() => { drag.current = null; }}
+      onDoubleClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        drag.current = null;
+        apply(Math.abs(widthRef.current - CASE_COL_DEFAULT) <= 4 ? measureCaseFit(labels) : CASE_COL_DEFAULT);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowRight") { e.preventDefault(); apply(widthRef.current + 16); }
+        if (e.key === "ArrowLeft") { e.preventDefault(); apply(widthRef.current - 16); }
+        if (e.key === "Home") { e.preventDefault(); apply(CASE_COL_DEFAULT); }
+        if (e.key === "End") { e.preventDefault(); apply(measureCaseFit(labels)); }
+      }}
+    />
   );
 }
 
