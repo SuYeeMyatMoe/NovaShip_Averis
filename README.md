@@ -11,7 +11,7 @@ AI-assisted shipping inbox and deterministic Shipping Instruction (SI) to Draft 
 | Default mode | Offline demo, in-memory repository, no API keys required |
 | Demo data | 520 emails and 250 attachments |
 | Demo performance | Inbox and other pages can feel slow: each navigation refetches from the in-memory 520-case dataset. See [§17](#pages-load-slowly-after-sign-in) |
-| Verified test baseline | **197 backend tests passed**, frontend production build passed, Compose configuration valid (20 September 2026) |
+| Test suite | **279** backend tests collected in `backend/tests/` (see [§15](#15-tests-evaluation-and-reproducibility)) |
 | Recorded SDOC score | `1.0000`; reproducing the score requires the private organiser `ground_truth.json` |
 | Demo password | `novaship123` for every seeded account |
 
@@ -36,8 +36,7 @@ AI-assisted shipping inbox and deterministic Shipping Instruction (SI) to Draft 
 - [17. Troubleshooting](#17-troubleshooting)
 - [18. Repository map](#18-repository-map)
 - [19. Known limitations](#19-known-limitations)
-- [20. Additional documentation](#20-additional-documentation)
-- [21. End-to-end shipping workflow](#21-end-to-end-shipping-workflow)
+- [20. End-to-end shipping workflow](#20-end-to-end-shipping-workflow)
 
 ## 1. Overview
 
@@ -85,10 +84,13 @@ The inbox has 124 messages with two attachments, two with one attachment, and 39
 ### Inbox and case operations
 
 - Converts each unique email into an idempotent case.
-- Shows status, priority, intent, category, confidence, assignment, document availability, security outcome, mismatch count, and open errors.
-- Supports search, pagination, sorting, and filters for status, priority, intent, category, mismatch, assignee, recipient, sender, confidence, security outcome, and date.
+- Shows status, priority, intent, category, confidence, assignment, document availability, security outcome, mismatch count, agent-run state, and open errors.
+- Defaults the Inbox work queue to cases the agent has **not run yet** (`agent=pending`). Finished runs live on **Processed** (`/history`).
+- Supports search, pagination, sorting, and filters for status, priority, intent, category, mismatch, per-field mismatch, assignee, recipient, sender, confidence, security outcome, mailbox, agent run, attention (needs a person), and date. Presets include **Needs human**, **Needs me**, and **My mailbox**.
+- Seven-field mismatch counts sit on the Inbox: click a field to list every case where that field differs (there is no separate `/verification` page).
 - Provides batch drafting and review actions; batch operations never send external email.
-- Exports cases as CSV and SDOC-compatible results as JSON.
+- Exports cases as CSV or Excel, processed history as CSV/Excel, an overall desk report as Excel, and SDOC-compatible results as JSON.
+- The shell notification bell polls `GET /me/notifications`: cases that need a person, new mail from the caller's connected mailbox (last 48 hours), and cases shared with the caller (last 7 days).
 
 ### Document verification
 
@@ -98,7 +100,7 @@ The inbox has 124 messages with two attachments, two with one attachment, and 39
 - Preserves original values alongside normalised values.
 - Routes missing, blank, unsupported, corrupt, scanned, or low-confidence data to review instead of guessing.
 - Produces a field-by-field discrepancy report and an exact summary message.
-- Treats SI vs Draft BL verification as the first major checkpoint. Incomplete data is meant to keep the case moving (request, upload, re-check) rather than stop the workflow. The intended continuation, including a separate customer view, is in [§21](#21-end-to-end-shipping-workflow).
+- Treats SI vs Draft BL verification as the first major checkpoint. Incomplete data is meant to keep the case moving (request, upload, re-check) rather than stop the workflow. The intended continuation, including a separate customer view, is in [§20](#20-end-to-end-shipping-workflow).
 
 ### Human review and collaboration
 
@@ -110,10 +112,11 @@ The inbox has 124 messages with two attachments, two with one attachment, and 39
 
 ### Oversight
 
-- Provides a seven-field analytics page, Workbench run console (case autocomplete, parallel batch, multi-case agent runs with per-case review), security queue, AI-agent diagram, global audit page, policy editor, an overall Excel report, and in-app guide.
+- Provides Inbox seven-field mismatch filters, a Workbench run console (case autocomplete, parallel batch, multi-case agent runs with per-case review and graph inspect, self-evaluation against the hackathon reference), a security queue, Processed history, a global audit page, a versioned policy editor with optional learned suggestions, an overall Excel report, and an in-app guide.
+- `/agent` redirects to `/workbench`. LangGraph pause/resume, graph state, and per-case traces live on Workbench and on the case **AI Agent** tab.
 - Stores actor type (`USER`, `AI`, or `SYSTEM`), before/after state, evidence references, and policy version in audit events.
 - Uses role-based access control (RBAC) for every protected API operation.
-- Keeps policy changes versioned and audited.
+- Keeps policy changes versioned and audited. Admins can accept or dismiss security-gate suggestions; the desk never applies a suggestion by itself.
 
 ## 3. Verification contract
 
@@ -204,7 +207,7 @@ Email
   -> audit
 ```
 
-The security and intent stages can end the flow early. A security-review message is quarantined. Informational and spam messages are stored and summarised without document comparison. A verification request with missing documents becomes `WAITING_DOCUMENTS`; unreadable or uncertain content becomes `HUMAN_REVIEW`. Those incomplete states are not a stop: staff can upload a replacement and retry. The intended customer portal and post-verification shipment stages are in [§21](#21-end-to-end-shipping-workflow).
+The security and intent stages can end the flow early. A security-review message is quarantined. Informational and spam messages are stored and summarised without document comparison. A verification request with missing documents becomes `WAITING_DOCUMENTS`; unreadable or uncertain content becomes `HUMAN_REVIEW`. Those incomplete states are not a stop: staff can upload a replacement and retry. The intended customer portal and post-verification shipment stages are in [§20](#20-end-to-end-shipping-workflow).
 
 ### Responsibility boundary
 
@@ -324,7 +327,9 @@ Self-registration at `/register` creates an account on the **shared desk** (seed
 
 Each user works their **own** mailbox: the desk reads it and approved replies leave from it. No shared desk mailbox is needed (`EMAIL_PROVIDER=none`); when none is configured, Fetch shows *Connect a mailbox* and a reply to a case that did not arrive through a connected mailbox fails with a clear, retryable `502` instead of going out from somewhere else.
 
-**Continue with Microsoft** (`/login`, `/register`) asks for identity only (`openid profile email User.Read`) and creates or opens the desk account for that address. **Connect Outlook** (Guide page or the Inbox banner) is a second consent for `Mail.Read Mail.Send offline_access`; the refresh token is stored encrypted and Microsoft's rotated tokens are persisted on every refresh. Graph delegated mail permissions need no publisher review, so users see at most a small "unverified" tag (removed by Publisher Verification). Setup: `docs/MICROSOFT_SETUP.md`.
+**Continue with Microsoft** (`/login`, `/register`) asks for identity only (`openid profile email User.Read`) and creates or opens the desk account for that address. **Connect Outlook** (Guide page or the Inbox banner) is a second consent for `Mail.Read Mail.Send offline_access`; the refresh token is stored encrypted and Microsoft's rotated tokens are persisted on every refresh. Graph delegated mail permissions need no publisher review, so users see at most a small "unverified" tag (removed by Publisher Verification).
+
+Entra setup in short: App registration → Web platform redirect `MICROSOFT_REDIRECT_URI` (`http://localhost:8000/auth/microsoft/callback` locally, `https://<domain>/api/auth/microsoft/callback` on Vercel) → put Application ID and client-secret *value* in `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET`; `MICROSOFT_TENANT=common` unless you restrict to one organisation.
 
 **Continue with Google** does account + Gmail in one consent (`openid email profile gmail.readonly gmail.send`):
 
@@ -519,6 +524,8 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 | `GMAIL_ADDRESS` | empty | *Optional shared mailbox only.* Monitored and sending desk address |
 | `OCR_ENABLED` | `auto` | `auto` = on when `GOOGLE_API_KEY` is set; `1` forces on, `0` off. Gemini vision then pytesseract for scanned PDFs and image attachments; policy `ai_privacy.allow_vision_ocr` can veto it |
 | `LLM_PRIVACY` | `mask` | `mask` replaces company names, references, addresses and document values with `__IDn__` tokens before any OpenAI/Gemini prompt; `off` sends plain text |
+| `EVAL_GROUND_TRUTH` | `sdoc-hackathon-docker/data_v2/ground_truth.json` | Private organiser reference for Workbench / `GET /evaluate`. Gitignored; Compose mounts it when present. Absent → 404 unless the Workbench card uploads a file |
+| `EVAL_SCORING` | `sdoc-hackathon-docker/server/scoring.py` | Organiser `scoring.py` used by self-evaluation (no pipeline replay) |
 | `BATCH_PARALLELISM` | `4` | Default worker count for `/cases/batch` and `/agent/run-batch` (1–16) |
 | `MAX_UPLOAD_BYTES` | `10485760` | Maximum bytes accepted for one attachment |
 | `MAX_ATTACHMENT_COUNT` | `10` | Maximum attachments accepted in one inbound message |
@@ -533,7 +540,7 @@ The PostgreSQL LangGraph checkpointer dependencies are included in `backend/requ
 
 Gemini vision OCR needs only `GOOGLE_API_KEY`; the pytesseract fallback additionally needs `pytesseract`, `pdf2image`, Tesseract, and Poppler, which the default image does not install. OCR never decides MATCH/MISMATCH; scans that stay unreadable still escalate to review. `scripts/run_bundle.py` keeps OCR off unless `--ocr` is passed so scoring stays deterministic.
 
-Only if you run an optional **shared** desk mailbox (`EMAIL_PROVIDER=gmail`): after setting the `GMAIL_*` client ID and secret in a local `.env`, create or rotate its refresh token without printing it with `python backend/scripts/gmail_authorize.py`. Individual mailboxes (Outlook / Gmail per user) need none of this; see §7 and `docs/MICROSOFT_SETUP.md`.
+Only if you run an optional **shared** desk mailbox (`EMAIL_PROVIDER=gmail`): after setting the `GMAIL_*` client ID and secret in a local `.env`, create or rotate its refresh token without printing it with `python backend/scripts/gmail_authorize.py`. Individual Outlook/Gmail connections need none of that; they use the consents in §7.
 
 ## 10. Using the application
 
@@ -541,25 +548,25 @@ Only if you run an optional **shared** desk mailbox (`EMAIL_PROVIDER=gmail`): af
 
 | Route | Purpose |
 | --- | --- |
-| `/` | Inbox dashboard, metrics, filters, case table, and batch actions |
-| `/cases/{id}` | Email, documents, comparison, evidence, drafts, actions, collaboration, errors, and timeline |
-| `/verification` | Per-field match, mismatch, and review statistics |
+| `/` | Inbox: metrics, seven-field mismatch strip, work queue (default: agent not yet run), filters, Fetch inbox, batch |
+| `/cases/{id}` | Email, documents, comparison, evidence, drafts, actions, collaboration, Ask AI, agent tab, errors, and timeline |
 | `/security` | Security-review, suspicious, spam, and anomaly queue |
-| `/workbench` | Operator run console: agent run/resume, supervisor batch (never sends email), CSV/Excel export, and RAG provider info |
-| `/agent` | LangGraph diagram and run/state/resume controls |
+| `/workbench` | Operator run console: LangGraph inspect, parallel agent/batch (never sends email), CSV/Excel export, RAG/privacy posture, self-evaluation |
+| `/history` | Processed: cases the AI agent has run or a person marked complete; Excel/CSV export. Distinct from Audit (event log) |
+| `/agent` | Redirects to `/workbench` so old bookmarks and Guide links still work |
 | `/audit` | Global audit log for Supervisor, Admin, and Auditor |
-| `/policies` | Effective policy for permitted roles; editing for Admin only |
-| `/welcome` | Product guide |
+| `/policies` | Effective policy for permitted roles; editing and learned suggestions for Admin only |
+| `/welcome` | Product guide and Connect Outlook / Connect Gmail |
 | `/login` | Sign in and demo account picker |
-| `/register` | Self-registration onto the shared desk (password or Google); roles come from `REGISTER_ALLOWED_ROLES` |
-| `/auth/callback` | Landing page after Google consent; stores the session from the URL fragment and continues |
+| `/register` | Self-registration onto the shared desk (password, Microsoft, or Google); roles come from `REGISTER_ALLOWED_ROLES` |
+| `/auth/callback` | Landing page after Microsoft/Google consent; stores the session from the URL fragment and continues |
 
-There is no customer portal route yet. The pages above are the internal operations UI. The first open of Seven fields, Security, Audit, Agent, or a case can be slow on the 520-case demo; see [§17](#pages-load-slowly-after-sign-in).
+There is no `/verification` route. Per-field mismatch counts are on the Inbox; click a field to filter the table. There is no customer portal yet. The first open of Security, Audit, Workbench, Processed, or a case can be slow on the 520-case demo; see [§17](#pages-load-slowly-after-sign-in).
 
 ### Recommended operator workflow
 
-1. Sign in and open the Inbox.
-2. Filter for `HUMAN_REVIEW`, mismatches, or high priority.
+1. Sign in and open the Inbox. The queue defaults to cases the agent has not run yet.
+2. Use **Needs human**, **Mismatch**, a seven-field strip click, or **My mailbox** to narrow the list.
 3. Open a case and review the source email and document status.
 4. Inspect all seven field results and the literal evidence snippets.
 5. If a document is missing or unreadable, upload a replacement and retry.
@@ -567,8 +574,12 @@ There is no customer portal route yet. The pages above are the internal operatio
 7. Approve, reject, assign, request review, or mark the case complete.
 8. For Notify Party, select an authorised recipient and inspect the disclosure preview.
 9. Confirm an external share if your role permits it.
-10. Use the case timeline or Audit page to verify the recorded action.
-11. For multi-case runs, open Workbench (`/workbench`): pick cases with the autocomplete, run the agent on all of them in parallel, review each paused case from the results table, batch classify/compare/draft/review with per-case errors and *Retry failed*, and export CSV, Excel or the overall report. Batch never sends external email.
+10. Use the case timeline, Audit, or **Processed** (`/history`) to verify the recorded action.
+11. For multi-case runs, open Workbench (`/workbench`): pick cases with the autocomplete, run the agent on all of them in parallel, review each paused case from the results table, batch classify/compare/draft/review with per-case errors and *Retry failed*, and export CSV, Excel or the overall report. Batch never sends external email. Supervisors/Admins can run **Self-evaluation** there against the organiser reference.
+
+To prove a **connected mailbox** without the fixture bundle: send yourself an SI + Draft BL pair, Fetch inbox, open the case, confirm seven fields and a draft that is not sent. Repeat with a missing attachment (`WAITING_DOCUMENTS`) and a phishing-style subject (Security queue) if you want those gates.
+
+`AUTH_MODE=demo` is the hackathon default (signed sessions plus `X-User-Id`). `local` is the same sessions without the header shortcut. `jwt` is Supabase tokens only. Keep `EMAIL_SEND_MODE=simulate` until approval, recipient, and recovery checks are proven; then set `live`.
 
 ### Case states
 
@@ -595,11 +606,11 @@ COMPLETED
 ERROR
 ```
 
-Not every case visits every state. The pipeline may finish early for spam, information-only mail, security review, missing documents, or extraction uncertainty. `WAITING_DOCUMENTS`, `HUMAN_REVIEW`, and `AWAITING_RESPONSE` are the current incomplete-data holding states. The intended customer portal would sit on those states instead of ending the shipment there. See [§21](#21-end-to-end-shipping-workflow).
+Not every case visits every state. The pipeline may finish early for spam, information-only mail, security review, missing documents, or extraction uncertainty. `WAITING_DOCUMENTS`, `HUMAN_REVIEW`, and `AWAITING_RESPONSE` are the current incomplete-data holding states. The intended customer portal would sit on those states instead of ending the shipment there. See [§20](#20-end-to-end-shipping-workflow).
 
 ## 11. API reference
 
-Swagger UI at `/docs` is the source of truth for request and response schemas. The service currently exposes 58 routes.
+Swagger UI at `/docs` is the source of truth for request and response schemas. The service currently exposes **79** routes.
 
 ### Authentication
 
@@ -632,8 +643,9 @@ curl 'http://localhost:8000/cases?mismatch=yes&limit=5' \
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/health` | Repository type, case/email counts, timestamp |
+| GET | `/health` | Repository type, case/email counts, LLM posture, mailbox-migration flag, timestamp |
 | GET | `/me` | Current user and permissions |
+| GET | `/me/notifications` | Needs-person queue, new mail from the caller's mailbox (48 h), and shares to the caller (7 d) |
 | GET | `/users` | Users, teams, and approved parties |
 | GET | `/contracts/fields` | Seven field names and exact no-mismatch message |
 
@@ -668,6 +680,7 @@ The webhook is idempotent on message content. A duplicate returns the existing c
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/dashboard/metrics` | Operational metrics grouped by status, intent, and priority |
+| GET | `/dashboard/bootstrap` | One payload for the Inbox widgets (metrics, fields, attention, security counts, recent audit, users) |
 | GET | `/dashboard/fields` | Aggregate results for each verification field |
 | GET | `/dashboard/field/{field}` | Cases for one field and optional result filter |
 | GET | `/cases` | Search, filter, sort, and paginate cases |
@@ -679,7 +692,7 @@ The webhook is idempotent on message content. A duplicate returns the existing c
 | GET | `/cases/{case_id}/documents/{attachment_id}` | Attachment metadata and optional signed URL |
 | GET | `/cases/{case_id}/documents/{attachment_id}/raw` | Raw attachment bytes with `nosniff` |
 
-`GET /cases` supports `status`, `priority`, `intent`, `category`, `mismatch=yes|no`, `assigned`, `shared`, `sender`, `q`, `min_confidence`, `security`, `date_from`, `date_to`, `mailbox=<user_id>|me|shared`, `limit`, `offset`, and `sort`.
+`GET /cases` supports `status`, `priority`, `intent`, `category`, `mismatch=yes|no`, `field` (one of the seven fields: keep cases whose comparison of that field is not MATCH), `assigned`, `shared`, `sender`, `q`, `min_confidence`, `security`, `date_from`, `date_to`, `attention=yes`, `mailbox=<user_id>|me|shared`, `agent=pending|paused|done|any`, `limit`, `offset`, and `sort`. The Inbox defaults to `agent=pending`.
 
 #### Pipeline and recovery
 
@@ -712,7 +725,7 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | POST | `/shares/{share_id}/acknowledge` | Record view, acknowledgement, and response |
 | POST | `/cases/batch` | Confirmed batch operations run in parallel (`params.parallel`, default `BATCH_PARALLELISM`) with a per-case `ok/error/ms` row, `failed_ids`, and `params.retry_failed=[ids]`; `export` returns CSV, `export_xlsx` / `report_xlsx` a base64 `.xlsx` blob. Never sends email. |
 
-#### Ask AI, translation, export, and policy
+#### Ask AI, translation, export, history, evaluation, and policy
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -721,10 +734,19 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | GET | `/export/cases.csv` | Export cases as CSV |
 | GET | `/export/cases.xlsx` | Export cases as Excel (Cases, Field results, Summary sheets) |
 | GET | `/export/report.xlsx` | Overall desk report: Overview, Seven fields, Cases, Field results, Security, Drafts & delivery, Operator activity, Mailboxes, Errors |
+| GET | `/history` | Processed cases (agent run or marked complete); `result=done\|paused\|error\|all`, `run_by=me`, `q`, dates |
+| GET | `/export/history.xlsx` | Same list as Excel (`export_data`) |
+| GET | `/export/history.csv` | Same list as CSV (`export_data`) |
 | GET | `/me/operator-profile` | What the operator guard has learned for the caller (pace, hours, effective limits) |
-| GET | `/export/submission.json` | Export SDOC submission JSON |
+| GET | `/export/submission.json` | Export SDOC submission JSON for every case the desk holds |
+| GET | `/evaluate` | Score current desk results against the organiser reference (no pipeline replay; `export_data`) |
+| POST | `/evaluate` | Same scoreboard against an uploaded `ground_truth.json` (scored in memory, never stored) |
+| GET | `/evaluate/report.md` | Markdown report of the last local-file evaluation |
+| GET | `/evaluate/submission.json` | Bundle-id submission (missing ids filled with the placeholder) |
 | GET | `/policies` | Active, effective, explained, and versioned policy |
-| PUT | `/policies` | Update policy with an audit note; Admin only |
+| PUT | `/policies` | Update policy with an audit note; Admin only. Optional `accepted_suggestions` |
+| GET | `/policies/suggestions` | Learned security-gate proposals; nothing is applied until an Admin saves |
+| POST | `/policies/suggestions/{id}/dismiss` | Dismiss a suggestion (Admin; audited) |
 
 #### LangGraph, RAG, security, and global audit
 
@@ -742,13 +764,13 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | GET | `/security/queue` | Security and anomaly cases |
 | GET | `/audit` | Filtered global audit log |
 
-## Self-evaluation against the hackathon reference
+### Self-evaluation against the hackathon reference
 
-The brief ships a self-evaluation (one JSON keyed by `email_id`, shape of `sample_submission.json`). NovaShip scores the results it **already holds** — no pipeline replay:
+The brief ships a self-evaluation (one JSON keyed by `email_id`, shape of `sample_submission.json`). NovaShip scores the results it **already holds** — no pipeline replay.
 
-- **Workbench → Self-evaluation** → *Evaluate current results*: final score, classification accuracy / macro-F1, mismatch precision / recall / field-F1, end-to-end, escalation recall / precision, per-category table, and every disagreement with the reference as a link to the case. *Download report (MD)* / *Download submission.json*.
-- CLI: `python backend/scripts/evaluate.py` (reads `GET /export/submission.json` from the running API, scores with the organiser's `sdoc-hackathon-docker/server/scoring.py` against `sdoc-hackathon-docker/data_v2/ground_truth.json`, writes `evaluation/report.md`, `scoreboard.json`, `submission.json`). `--file submission.json` scores a file, `--server http://localhost:8081` also POSTs to the organiser server (`docker compose up --build` in `sdoc-hackathon-docker`; map a free host port — 8080 may be taken), `--fail-below 0.95` gates CI.
-- API: `GET /evaluate`, `GET /evaluate/report.md`, `GET /evaluate/submission.json` (permission `export_data`; 404 when the reference files are absent, e.g. on Vercel).
+- **Workbench → Self-evaluation** → *Evaluate current results*: final score, classification accuracy / macro-F1, mismatch precision / recall / field-F1, end-to-end, escalation recall / precision, per-category table, and every disagreement with the reference as a link to the case. *Download report (MD)* / *Download submission.json*. On a host without `ground_truth.json` (typical Vercel), choose the judges' file in the card; `POST /evaluate` scores it in memory and never stores it.
+- CLI: `python backend/scripts/evaluate.py` (reads `GET /export/submission.json` from the running API, scores with the organiser's `scoring.py` against `ground_truth.json`, writes `evaluation/report.md`, `scoreboard.json`, `submission.json`). `--file submission.json` scores a file, `--server http://localhost:8081` also POSTs to the organiser server, `--fail-below 0.95` gates CI.
+- API: `GET /evaluate`, `POST /evaluate`, `GET /evaluate/report.md`, `GET /evaluate/submission.json` (permission `export_data`). Paths come from `EVAL_GROUND_TRUTH` and `EVAL_SCORING`. `GET` returns 404 when those files are absent.
 
 Per the brief, the scoreboard is a development aid: it cannot judge whether the desk asked for human review at the right moment. When the desk disagrees with the reference, check the source documents first; if the desk's decision is reasonable, record the reason on the case.
 
@@ -788,7 +810,7 @@ cd backend
 python -m app.seed.make_seed --push
 ```
 
-The server-side repository uses `SUPABASE_SERVICE_ROLE_KEY` and enforces permissions in FastAPI. RLS is still configured to protect direct authenticated access. Attachments use a private `documents` bucket and five-minute signed URLs.
+The server-side repository uses `SUPABASE_SERVICE_ROLE_KEY` and enforces permissions in FastAPI. RLS is still configured to protect direct authenticated access. Attachments use a private `documents` bucket and five-minute signed URLs. Core tables: `tenants`, `users`, `email_messages`, `attachments`, `cases`, `extracted_fields`, `comparisons`, `drafts`, `shares`, `audit_events`, `policies`, `user_mailboxes`, `case_embeddings`.
 
 Regenerate the snapshot and SQL after changing the pipeline:
 
@@ -796,8 +818,6 @@ Regenerate the snapshot and SQL after changing the pipeline:
 cd backend
 python -m app.seed.make_seed
 ```
-
-See [supabase/README.md](supabase/README.md) for schema verification queries and the full table list.
 
 ## 13. AI, RAG, and LangGraph
 
@@ -879,6 +899,10 @@ After `operator_guard.auto_draft_after` (default 3) operator mutations on a case
 
 Limits live in the `operator_guard` policy section (Policies page, Admin) and are **adaptive**: the guard reads the user's own audit history (`audit_events`, last `baseline_days`) and, once `min_baseline_events` actions exist, tightens the burst limit to `baseline_multiplier` × the user's median actions per active minute (never below `min_effective_burst`, never above `burst_limit`). It also learns the user's usual working hours and flags actions far outside them (`OPERATOR_OFF_HOURS`, LOW). Because everything is computed from the audit log there is no in-process state to lose on restart, and every instance sees the same window. `GET /me/operator-profile` shows what was learned.
 
+### Policy learning (security gate)
+
+Flagged cases that a person **archives** without review or reply can produce policy *suggestions*: block a repeated subject phrase, flag a domain word, or block a sender. Suggestions are recomputed on every `GET /policies/suggestions` from cases plus the audit log. An Admin accepts a suggestion into the unsaved draft and **Save**s a new policy version, or dismisses it. Both are audited (`POLICY_SUGGESTION_ACCEPTED` / `_DISMISSED`). The desk never applies a suggestion by itself. Settings live in the `learning` policy section (`enabled`, `min_archives`, `window_days`).
+
 ### What the model provider sees
 
 | Data | With `LLM_PROVIDER=none` | With OpenAI / Gemini and `LLM_PRIVACY=mask` (default) | With `LLM_PRIVACY=off` |
@@ -911,27 +935,9 @@ Production operators must replace `SESSION_SECRET`, use `AUTH_MODE=jwt` or anoth
 
 ### Current verification
 
-The following checks were run on 20 September 2026:
+`backend/tests/` collects **279** tests (`python -m pytest --collect-only`). Coverage includes comparator and normalisation edge cases, extraction evidence, document readers, upload hardening, Gmail and Outlook mailbox grants, duplicate handling, recoverable external delivery, RBAC, login/register/logout, policy permissions and learned suggestions, operator guard, batch confirmation, trained-classifier fallback, LangGraph persistence and interrupt/resume, RAG case scoping, field analytics, security queue, Processed history, and self-evaluation endpoints.
 
-| Check | Result |
-| --- | --- |
-| Backend tests in the API container | **187 passed in 13.52s** |
-| Frontend `npm run build` | Passed, including TypeScript and Next.js page generation |
-| `docker compose config --quiet` | Passed |
-| Offline 520-email replay | Completed in 2.8s on the verification machine; timing is machine-dependent |
-
-Backend coverage includes comparator and normalisation edge cases, extraction evidence, document readers, upload hardening, Gmail polling and delivery, duplicate handling, recoverable external delivery, RBAC, login/register/logout, policy permissions, batch confirmation, trained-classifier fallback, LangGraph persistence and interrupt/resume, RAG case scoping, field analytics, and security queue endpoints.
-
-### Run backend tests locally
-
-```bash
-cd backend
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
-```
-
-### Run backend tests with Docker
-
-The API image does not contain the test directory, so mount the repository and set the working directory:
+Run them in the API image (pinned dependencies) rather than an arbitrary host Python:
 
 ```bash
 docker compose run --rm --no-deps \
@@ -950,6 +956,15 @@ docker compose run --rm --no-deps `
   -e LLM_PROVIDER=none `
   api pytest -q
 ```
+
+### Run backend tests locally
+
+```bash
+cd backend
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
+```
+
+On PowerShell: `$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; python -m pytest -q`. Host Python must match `backend/requirements.txt` (including `xlrd`) or some reader tests fail.
 
 ### Build the frontend
 
@@ -982,6 +997,18 @@ The project records a prior official result of `FINAL SCORE = 1.0000`, including
 
 Keep `LLM_PROVIDER=none` during regression scoring to make the run deterministic, offline, and free of provider cost.
 
+### Score the desk without replaying the pipeline
+
+To score *current* repository results (Workbench **Evaluate current results**, or CLI):
+
+```bash
+python backend/scripts/evaluate.py
+python backend/scripts/evaluate.py --file submission.json
+python backend/scripts/evaluate.py --server http://localhost:8081 --fail-below 0.95
+```
+
+Output files under `evaluation/` are gitignored. See [§11 Self-evaluation](#self-evaluation-against-the-hackathon-reference).
+
 ## 16. Deployment notes
 
 ### Container deployment
@@ -994,7 +1021,7 @@ Keep `LLM_PROVIDER=none` during regression scoring to make the run deterministic
 
 ### Vercel Services deployment
 
-The repository also supports a single Vercel project: the root `vercel.json` builds `frontend/` as Next.js, exposes `backend/` as FastAPI under `/api`, and lets the browser use the same-origin API by default. Start with `.env.vercel.example`, keep server credentials out of `NEXT_PUBLIC_*`, and follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the exact handoff and smoke tests.
+The repository also supports a single Vercel project: `vercel.json` builds `frontend/` as Next.js and exposes `backend/` as FastAPI under `/api`, so the browser can use the same-origin API. Copy values from `.env.vercel.example` into the Vercel project (never `NEXT_PUBLIC_*` for secrets). After deploy, smoke-test `/api/health`, sign-in, open a case, and one Agent pause. Rebuild the frontend if `NEXT_PUBLIC_API_BASE` changes.
 
 ### Production checklist
 
@@ -1072,6 +1099,10 @@ The vector dimensions no longer match. Rebuild the index. For Supabase, also upd
 
 Default images do not include OCR system packages. With `OCR_ENABLED=1` and `GOOGLE_API_KEY`, Gemini vision is tried first; otherwise install Tesseract, Poppler, `pytesseract`, and `pdf2image`. If both fail, the case stays `HUMAN_REVIEW` / unreadable rather than inventing field values.
 
+### Self-evaluation returns 404
+
+`GET /evaluate` needs `EVAL_GROUND_TRUTH` and `EVAL_SCORING` on disk (Compose mounts `sdoc-hackathon-docker/` when the private `ground_truth.json` is present). On Vercel or any host without that file, use Workbench → Self-evaluation → choose the judges' `ground_truth.json` (`POST /evaluate`). The file is scored in memory and never stored.
+
 ### An approved draft did not send real email
 
 Check `EMAIL_SEND_MODE`. In the safe default `simulate` mode, the item is recorded as simulated and no provider call occurs. For live delivery set `EMAIL_SEND_MODE=live`; the reply then leaves from the mailbox the case arrived in (the user's Outlook via Microsoft Graph, or their Gmail). A case that did not arrive through a connected mailbox needs the optional shared `GMAIL_*` mailbox, otherwise approval returns a retryable `502 no mailbox can send this reply` and the draft becomes `SEND_FAILED`. If an item reaches `DELIVERY_UNKNOWN`, do not retry automatically: reconcile the audited recipient, subject, and approval time against the mailbox's Sent folder first.
@@ -1088,17 +1119,17 @@ What happens on a typical click:
 
 | Surface | What it loads |
 | --- | --- |
-| Every authenticated page | Shell calls `/me`, `/health`, and `/me/notifications`. Notifications also poll every 30 seconds. `/me/notifications` walks cases that still need a person. |
-| Inbox `/` | `/cases` (paginated, 5 rows), `/dashboard/metrics`, `/dashboard/fields`, `/cases?limit=60` for the attention list, `/security/queue`, `/users`, and recent audit when the role allows it. Metrics and field stats scan all 520 cases. |
-| Seven fields `/verification` | `/dashboard/fields` plus every case that has a result for the selected field. |
+| Every authenticated page | Shell calls `/me`, `/health`, and `/me/notifications`. Notifications also poll every 30 seconds (needs-person, new mail, shares). |
+| Inbox `/` | `/dashboard/bootstrap` (metrics, fields, attention, security, activity, users) plus paginated `/cases` (5 rows, default `agent=pending`). Bootstrap still scans the in-memory 520 cases once. |
+| Processed `/history` | Paginated `/history` (agent-run or completed cases). |
 | Security `/security` | The security queue across flagged cases. |
 | Audit `/audit` | Last 200 audit events by default; the filter can request 1,000. |
-| Workbench `/workbench` | `/rag/info` plus on-demand agent and batch calls for the selected case ids. |
+| Workbench `/workbench` | `/rag/info` plus on-demand agent, batch, export, and `/evaluate` calls. |
 | Case `/cases/{id}` | The full case view: email, attachments, comparison, drafts, errors, and pipeline trace. |
 
 Workarounds while using the demo:
 
-- Stay on Inbox filters instead of opening Seven fields or Audit until you need them.
+- Stay on Inbox filters instead of opening Audit until you need it.
 - Keep Audit at "last 200", not 1,000.
 - After the first paint, wait for the skeleton to finish; a slow response is usually a large in-memory scan, not a hung API.
 - Check `/health` if the sidebar still says "API offline".
@@ -1109,9 +1140,7 @@ This is a known demo limitation, not a failed load. Planned mitigations (not shi
 
 ```text
 NovaShip_Averis/
-├── README.md                         Main project guide
-├── AGENT.md                          AI, agent, RAG, and provider guide
-├── P1.md ... P4.md                   Team workstream guides
+├── README.md                         This guide
 ├── .env.example                      Configuration template
 ├── docker-compose.yml                Baked demo stack
 ├── docker-compose.dev.yml            Live-reload overlay
@@ -1124,66 +1153,46 @@ NovaShip_Averis/
 │   ├── app/contracts/schemas.py      Shared enums and data contracts
 │   ├── app/pipeline/orchestrator.py  Main audited pipeline
 │   ├── app/agents/                   LangGraph state, nodes, tools, RAG
-│   ├── app/ai/                       Classifiers, extraction, drafts, assistant
+│   ├── app/ai/                       Classifiers, extraction, drafts, assistant, policy learning
 │   ├── app/core/                     Normaliser, comparator, policy, recommendation
 │   ├── app/readers/                  Safe attachment readers
 │   ├── app/repositories/             Memory and Supabase implementations
-│   ├── app/services/                 Case actions and submission conversion
+│   ├── app/services/                 Case actions, reporting, submission, self-evaluation
 │   ├── app/auth/                     Accounts, sessions, JWT, RBAC
-│   ├── app/connectors/               Bundle and Gmail inbound/outbound adapters
+│   ├── app/connectors/               Bundle, Gmail, and Microsoft mailbox adapters
 │   ├── app/seed/                      Snapshot and SQL seed generator
 │   ├── data/                          RAG knowledge files and local index target
 │   ├── models/                        Trained classifier and evaluation artifacts
-│   ├── scripts/                       Bundle replay and model training
-│   └── tests/                         187 passing backend tests at the documented baseline
+│   ├── scripts/                       Bundle replay, evaluate.py, and model training
+│   └── tests/                         279 collected backend tests
 ├── frontend/
-│   ├── app/                           10 App Router pages
-│   ├── components/                    Shell, comparison, policy, collaboration UI
+│   ├── app/                           App Router pages (Inbox, case, security, workbench, history, agent redirect, audit, policies, welcome, login, register, auth callback)
+│   ├── components/                    Shell, comparison, policy editor, collaboration, mailbox, evaluation card
 │   ├── lib/api.ts                     Authenticated API client and mirrored types
 │   └── public/                        Product assets
 ├── supabase/
-│   ├── migrations/                    Schema, RLS, vector, and account migrations
+│   ├── migrations/                    Schema, RLS, vector, account, and mailbox migrations
 │   └── seed/                          SQL, snapshot, and per-table JSON data
-├── docs/                               Contracts, deployment, demo/live-mode, AI, and handoff guides
 ├── sdoc-hackathon-bundle/              520-email runtime fixture bundle
 └── sdoc-hackathon-docker/              Dataset generator and optional scorer service
 ```
 
 ## 19. Known limitations
 
-- Gmail is the live email provider, but the safe default keeps outbound delivery simulated until an operator explicitly enables it.
+- Outlook and Gmail are the live mailbox providers; the safe default keeps outbound delivery simulated until an operator explicitly enables `EMAIL_SEND_MODE=live`.
 - A `DELIVERY_UNKNOWN` outcome requires manual reconciliation against Gmail Sent; automatic resend is intentionally blocked.
 - OCR is optional and its packages are not included in the default environment.
 - The default local RAG embedding is deterministic keyword-level hashing, not a semantic production embedding.
 - Supabase pgvector is fixed at 768 dimensions; every deployed embedding provider must be configured for 768 dimensions or the schema must be migrated and the index rebuilt.
 - Memory mode loses runtime mutations on restart.
 - The Bash run-mode helper is Windows-oriented; use direct commands on macOS/Linux.
-- The private scorer ground truth is not included in Git.
+- The private scorer ground truth is not included in Git. Self-evaluation returns 404 until that file is present locally or uploaded in the Workbench card.
 - There is no repository `LICENSE` file. Do not assume redistribution or commercial-use rights until the maintainers add one.
 - Demo UI navigation can be slow. Secondary pages refetch large in-memory scans of the 520-case dataset; there is no shared client cache across routes. See [§17](#pages-load-slowly-after-sign-in).
-- Incomplete-data handling today is staff-side (`WAITING_DOCUMENTS` / `HUMAN_REVIEW`, upload and retry). Automatic customer-facing action cards, a customer portal, shipment milestones, and a no-overwrite re-check loop are the intended continuation in [§21](#21-end-to-end-shipping-workflow), not shipped UI.
+- Incomplete-data handling today is staff-side (`WAITING_DOCUMENTS` / `HUMAN_REVIEW`, upload and retry). Automatic customer-facing action cards, a customer portal, shipment milestones, and a no-overwrite re-check loop are the intended continuation in [§20](#20-end-to-end-shipping-workflow), not shipped UI.
 - The project is a production-style prototype. It still needs deployment-specific Gmail acceptance testing, load testing, observability, rate limiting, operational backups, and a formal security review before production use.
 
-## 20. Additional documentation
-
-| Document | Purpose |
-| --- | --- |
-| [AGENT.md](AGENT.md) | AI components, LangGraph, RAG, keys, rebuilds, and test scenarios |
-| [docs/CONTRACTS.md](docs/CONTRACTS.md) | Frozen fields, enums, API contracts, and submission shape |
-| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Five-minute demonstration flow |
-| [docs/AI_REPORT_SECTION.md](docs/AI_REPORT_SECTION.md) | AI architecture and recorded evaluation |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | One-project Vercel Services deployment and smoke-test checklist |
-| [docs/DEMO_AND_LIVE_MODES.md](docs/DEMO_AND_LIVE_MODES.md) | Exact boundaries between demo-safe, hackathon-live, and production modes |
-| [docs/BACKEND_HANDOFF.md](docs/BACKEND_HANDOFF.md) | Backend deployment contract and acceptance checks |
-| [docs/P2_VERIFICATION.md](docs/P2_VERIFICATION.md) | Assistant, safety, RBAC, RAG, translation, and sharing evidence |
-| [docs/P4_EVIDENCE_HANDOFF.md](docs/P4_EVIDENCE_HANDOFF.md) | Frontend evidence semantics |
-| [supabase/README.md](supabase/README.md) | Supabase schema, seed, verification, and auth model |
-| [P1.md](P1.md) | AI extraction and verification workstream |
-| [P2.md](P2.md) | Assistant and safety workstream |
-| [P3.md](P3.md) | Backend, Supabase, and cloud workstream |
-| [P4.md](P4.md) | Frontend and end-to-end workstream |
-
-## 21. End-to-end shipping workflow
+## 20. End-to-end shipping workflow
 
 SI vs Draft BL verification is the first major checkpoint, not the end of the shipment. Incomplete, mismatched, or missing data should keep the case moving: request the missing item, wait, ingest the new document through the same guarded pipeline, and never overwrite earlier evidence.
 
