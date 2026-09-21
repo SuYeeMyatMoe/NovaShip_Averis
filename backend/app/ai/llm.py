@@ -58,7 +58,7 @@ class LLMClient:
             try:
                 from openai import OpenAI
 
-                self._client = OpenAI()
+                self._client = OpenAI(timeout=float(os.environ.get("LLM_TIMEOUT_S", "60")), max_retries=int(os.environ.get("LLM_MAX_RETRIES", "1")))   # SDK default 600 s / 2 retries can hang a run for minutes
                 self.model = self.model or "gpt-4o-mini"
             except Exception:
                 self.provider = "none"

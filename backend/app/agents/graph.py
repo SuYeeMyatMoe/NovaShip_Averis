@@ -131,25 +131,27 @@ class CaseAgent:
             raise ValueError(f"unknown case {case_id}")
         init: GraphState = {"case_id": case_id, "email_id": case.source_email_id, "actor_id": actor_id, "trace": [], "errors": [], "rag_context": [], "notified": False}
         t0 = time.time()
-        try:
-            self.graph.invoke(init, config=self._cfg(case_id))
-        except Exception as exc:
-            self._record_run(case_id, actor_id, mode, t0, "AGENT_RUN", error=exc)
-            raise
-        st = self.state(case_id)
-        st["agent_run"] = self._record_run(case_id, actor_id, mode, t0, "AGENT_RUN", paused=bool(st["paused"]))
+        with self.repo.batch_writes():   # one flush of projections + audit for the whole run (≈200 round trips -> ≈20)
+            try:
+                self.graph.invoke(init, config=self._cfg(case_id))
+            except Exception as exc:
+                self._record_run(case_id, actor_id, mode, t0, "AGENT_RUN", error=exc)
+                raise
+            st = self.state(case_id)
+            st["agent_run"] = self._record_run(case_id, actor_id, mode, t0, "AGENT_RUN", paused=bool(st["paused"]))
         return st
 
     def resume(self, case_id: str, decision: dict[str, Any]) -> dict[str, Any]:
         actor_id = str(decision.get("user_id") or "agent")
         t0 = time.time()
-        try:
-            self.graph.invoke(Command(resume=decision), config=self._cfg(case_id))
-        except Exception as exc:
-            self._record_run(case_id, actor_id, "single", t0, "AGENT_RESUMED", error=exc, decision=str(decision.get("action") or ""))
-            raise
-        st = self.state(case_id)
-        st["agent_run"] = self._record_run(case_id, actor_id, "single", t0, "AGENT_RESUMED", paused=bool(st["paused"]), decision=str(decision.get("action") or ""))
+        with self.repo.batch_writes():
+            try:
+                self.graph.invoke(Command(resume=decision), config=self._cfg(case_id))
+            except Exception as exc:
+                self._record_run(case_id, actor_id, "single", t0, "AGENT_RESUMED", error=exc, decision=str(decision.get("action") or ""))
+                raise
+            st = self.state(case_id)
+            st["agent_run"] = self._record_run(case_id, actor_id, "single", t0, "AGENT_RESUMED", paused=bool(st["paused"]), decision=str(decision.get("action") or ""))
         return st
 
     def _record_run(self, case_id: str, actor_id: str, mode: str, t0: float, action: str, *, paused: bool = False,

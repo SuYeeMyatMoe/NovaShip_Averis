@@ -137,6 +137,10 @@ class Pipeline:
 
     # ------------------------------------------------------------- pipeline
     def run(self, email: EmailMessage, actor_id: str = "pipeline", force: bool = False) -> CaseRecord:
+        with self.repo.batch_writes():   # ingest / reprocess: one flush of projections + audit instead of one round trip per step
+            return self._run(email, actor_id=actor_id, force=force)
+
+    def _run(self, email: EmailMessage, actor_id: str = "pipeline", force: bool = False) -> CaseRecord:
         job_key = f"run:{email.checksum}"
         existing = self.repo.get_case_by_email(email.id)
         if existing and not force and self.repo.seen_job(job_key):

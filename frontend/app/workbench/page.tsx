@@ -71,7 +71,7 @@ export default function WorkbenchPage() {
   const [runtime, setRuntime] = useState<{ runtime: string; max_request_s: number } | null>(null);
   // live progress of the batch that is running now: drives the loading UI in the Graph state card
   type CaseProgress = "queued" | "running" | "done" | "paused" | "error";
-  const [progress, setProgress] = useState<{ mode: "fan-out" | "server"; parallel: number; startedAt: number; cases: Record<string, CaseProgress> } | null>(null);
+  const [progress, setProgress] = useState<{ mode: "fan-out" | "server"; parallel: number; startedAt: number; cases: Record<string, CaseProgress>; startedCase?: Record<string, number> } | null>(null);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { if (!progress) return; const t = window.setInterval(() => setNow(Date.now()), 500); return () => window.clearInterval(t); }, [progress]);
   useEffect(() => { api<{ runtime: string; max_request_s: number }>("/health", {}, { auth: false }).then((h) => setRuntime({ runtime: h.runtime, max_request_s: h.max_request_s })).catch(() => {}); }, []);
@@ -130,7 +130,7 @@ export default function WorkbenchPage() {
     setRows((prev) => ({ ...(only ? prev : {}), ...Object.fromEntries(targets.map((id) => [id, { action: "agent", ok: true, status: "RUNNING", running: true } as RunRow])) }));
     const workers = Math.max(1, Math.min(parallel, targets.length));
     setProgress({ mode: "fan-out", parallel: workers, startedAt: Date.now(), cases: Object.fromEntries(targets.map((id) => [id, "queued" as CaseProgress])) });
-    const mark = (id: string, state: CaseProgress) => setProgress((p) => (p ? { ...p, cases: { ...p.cases, [id]: state } } : p));
+    const mark = (id: string, state: CaseProgress) => setProgress((p) => (p ? { ...p, cases: { ...p.cases, [id]: state }, startedCase: state === "running" ? { ...(p.startedCase || {}), [id]: Date.now() } : p.startedCase } : p));
     const queue = [...targets];
     let okCount = 0, failed = 0, paused = 0;
     const worker = async () => {
@@ -299,7 +299,7 @@ export default function WorkbenchPage() {
           <div id="graph-state" className="scroll-mt-16" />
           <Card title={progress ? "Graph state · running" : "Graph state"} className="border-orange-200"
             right={progress && <span className="text-[11px] text-ink-500" aria-live="polite">{Math.round((now - progress.startedAt) / 1000)} s elapsed</span>}>
-            {progress ? <BatchProgress progress={progress} /> : !st ? <Empty text="Run the agent on selected cases, then press Inspect on a row to see its graph state here." /> : (
+            {progress ? <BatchProgress progress={progress} serverless={serverless} now={now} /> : !st ? <Empty text="Run the agent on selected cases, then press Inspect on a row to see its graph state here." /> : (
               <div className="space-y-2 text-sm">
                 <KV k="Paused" v={st.paused ? <Badge className="bg-review text-white">waiting for human</Badge> : <Badge className="bg-match-bg text-match-fg">not paused</Badge>} />
                 <KV k="Next node" v={<span className="font-mono text-xs">{st.next?.join(", ") || "END"}</span>} />
@@ -331,7 +331,6 @@ export default function WorkbenchPage() {
           </Card>
         </div>
       </div>
-
 
       {rowList.length > 0 && (
         <Card title={`Last run · ${lastAction === "agent" ? "agent" : lastAction} · ${rowList.length} case(s)`} className="border-orange-200"
@@ -385,7 +384,7 @@ export default function WorkbenchPage() {
  * the Docker batch is one request, so it shows an indeterminate sweep), per-case chips and a skeleton in the
  * shape of the state rows that will replace it. Motion is gated by prefers-reduced-motion.
  */
-function BatchProgress({ progress }: { progress: { mode: "fan-out" | "server"; parallel: number; cases: Record<string, "queued" | "running" | "done" | "paused" | "error"> } }) {
+function BatchProgress({ progress, serverless, now }: { progress: { mode: "fan-out" | "server"; parallel: number; startedAt: number; cases: Record<string, "queued" | "running" | "done" | "paused" | "error">; startedCase?: Record<string, number> }; serverless: boolean; now: number }) {
   const entries = Object.entries(progress.cases);
   const finished = entries.filter(([, s]) => s === "done" || s === "paused" || s === "error").length;
   const running = entries.filter(([, s]) => s === "running").length;
@@ -405,7 +404,7 @@ function BatchProgress({ progress }: { progress: { mode: "fan-out" | "server"; p
       </div>
       <ul className="flex flex-wrap gap-1.5">
         {entries.map(([id, state]) => (
-          <li key={id} className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${chip[state]}`}>{id.replace("case_", "")} · {state}</li>
+          <li key={id} className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${chip[state]}`}>{id.replace("case_", "")} · {state}{state === "running" && progress.startedCase?.[id] ? ` ${Math.round((now - progress.startedCase[id]) / 1000)} s` : ""}</li>
         ))}
       </ul>
       <div className="space-y-2 pt-1" aria-hidden>
@@ -416,7 +415,7 @@ function BatchProgress({ progress }: { progress: { mode: "fan-out" | "server"; p
           </div>
         ))}
       </div>
-      <p className="text-[11px] text-ink-500">Each case takes roughly 20-45 s (security, classification, extraction, comparison, draft). The first finished case opens here automatically.</p>
+      <p className="text-[11px] text-ink-500">{serverless ? "Each case takes roughly 30-60 s on the serverless deployment (security, classification, extraction, comparison, draft); the first run after a quiet period can take longer while the function starts up." : "Each case takes roughly 20-45 s (security, classification, extraction, comparison, draft)."} The first finished case opens here automatically.</p>
     </div>
   );
 }

@@ -68,6 +68,7 @@ class SupabaseRepository(BaseRepository):
         self._url, self._key = url, key
         self._create_client = create_client
         self._clients = threading.local()          # supabase-py's sync client mutates shared session state per request: one per thread
+        self._batch = threading.local()            # per-thread write batch (see batch_writes)
         self.client = create_client(url, key)      # main-thread client; also validates credentials eagerly
         self.bucket = os.environ.get("SUPABASE_STORAGE_BUCKET", "documents")
         self.tenant = os.environ.get("TENANT_ID", "tenant_april")
@@ -119,6 +120,18 @@ class SupabaseRepository(BaseRepository):
 
     # ---- emails -----------------------------------------------------------
     def save_email(self, email: EmailMessage) -> None:
+        batch = self._active_batch()
+        with self._lock:
+            self._emails_by_id[email.id] = email
+            if self._emails is not None:
+                self._emails = [e for e in self._emails if e.id != email.id]
+                self._emails.append(email)
+        if batch is not None:
+            batch["emails"][email.id] = email         # written once when the batch closes
+            return
+        self._write_email(email)
+
+    def _write_email(self, email: EmailMessage) -> None:
         row = {
             "id": email.id, "tenant_id": self.tenant, "provider": email.provider, "provider_message_id": email.provider_message_id,
             "conversation_id": email.conversation_id, "sender": email.sender, "sender_name": email.sender_name,
@@ -137,11 +150,6 @@ class SupabaseRepository(BaseRepository):
                 "extraction_status": a.extraction_status.value, "extraction_confidence": a.extraction_confidence,
                 "raw_text": a.raw_text, "page_count": a.page_count, "is_duplicate_of": a.is_duplicate_of,
             }).execute()
-        with self._lock:
-            self._emails_by_id[email.id] = email
-            if self._emails is not None:
-                self._emails = [e for e in self._emails if e.id != email.id]
-                self._emails.append(email)
 
     def get_email(self, email_id: str) -> Optional[EmailMessage]:
         with self._lock:
@@ -233,8 +241,20 @@ class SupabaseRepository(BaseRepository):
             "updated_at": case.updated_at.isoformat(), "payload": _j(case),
         }
         self._t("cases").upsert(row).execute()
-        # Replace case-owned projections so they exactly mirror the canonical payload.
-        # Audit history and shares are intentionally append/persist-only and untouched.
+        batch = self._active_batch()
+        if batch is not None:
+            batch["cases"][case.id] = case            # projections are rewritten once, when the batch closes
+        else:
+            self._write_projections(case)
+        with self._lock:
+            self._cases_by_id[case.id] = case
+            if self._cases is not None:
+                self._cases = [c for c in self._cases if c.id != case.id]
+                self._cases.insert(0, case)
+
+    def _write_projections(self, case: CaseRecord) -> None:
+        """Replace case-owned projections so they exactly mirror the canonical payload (7 deletes + up to ~8 upserts).
+        Audit history and shares are intentionally append/persist-only and untouched."""
         for table in ("comparison_fields", "extracted_fields", "case_summaries", "action_recommendations", "drafts", "assignments", "comparisons"):
             self._t(table).delete().eq("case_id", case.id).execute()
         # normalized children
@@ -274,11 +294,61 @@ class SupabaseRepository(BaseRepository):
         if case.assigned_user_id or case.assigned_team_id:
             self._t("assignments").upsert({"id": f"asg_{case.id}", "case_id": case.id, "tenant_id": self.tenant, "assigned_user_id": case.assigned_user_id,
                                             "assigned_team_id": case.assigned_team_id, "assigned_at": case.updated_at.isoformat()}).execute()
-        with self._lock:
-            self._cases_by_id[case.id] = case
-            if self._cases is not None:
-                self._cases = [c for c in self._cases if c.id != case.id]
-                self._cases.insert(0, case)
+
+    # ------------------------------------------------------------- write batching (one processing run = one flush)
+    def _thread_batch(self) -> threading.local:
+        batch = self.__dict__.get("_batch")
+        if batch is None:  # test doubles built with __new__ skip __init__
+            batch = self.__dict__["_batch"] = threading.local()
+        return batch
+
+    def _active_batch(self) -> Optional[dict[str, Any]]:
+        return getattr(self._thread_batch(), "state", None)
+
+    def batch_writes(self):
+        """Coalesce the writes of one pipeline / agent run on this thread:
+        - `save_case` upserts the canonical `cases` row immediately (reads stay fresh) but rewrites the child projections once at the end;
+        - `save_email` writes once at the end;
+        - `append_audit` buffers and flushes with a single bulk insert (also on error, so a crashing run keeps its trail);
+        - `get_active_policy` is read once and memoised.
+        Nested use is safe (only the outermost context flushes). ~200 round trips per run become ~20."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            if self._active_batch() is not None:   # nested: the outer batch owns the flush
+                yield
+                return
+            local = self._thread_batch()
+            local.state = {"cases": {}, "emails": {}, "audits": [], "policy": None}
+            try:
+                yield
+            finally:
+                state = local.state
+                local.state = None
+                errors: list[Exception] = []
+                try:
+                    if state["audits"]:
+                        self._t("audit_events").insert([{**_j(ev), "tenant_id": self.tenant} for ev in state["audits"]]).execute()
+                        with self._lock:
+                            self._audit_recent = None
+                except Exception as exc:  # keep going: projections/emails still get written
+                    errors.append(exc)
+                for email in state["emails"].values():
+                    try:
+                        self._write_email(email)
+                    except Exception as exc:
+                        errors.append(exc)
+                for case in state["cases"].values():
+                    try:
+                        self._write_projections(case)
+                    except Exception as exc:
+                        errors.append(exc)
+                if errors:
+                    log.warning("batch flush: %d write(s) failed (%s)", len(errors), type(errors[0]).__name__)
+                    raise errors[0]
+
+        return _ctx()
 
     def get_case(self, case_id: str) -> Optional[CaseRecord]:
         with self._lock:
@@ -327,6 +397,10 @@ class SupabaseRepository(BaseRepository):
 
     # ---- audit / errors / shares -----------------------------------------
     def append_audit(self, event: AuditEvent) -> None:
+        batch = self._active_batch()
+        if batch is not None:
+            batch["audits"].append(event)             # one bulk insert when the batch closes
+            return
         self._t("audit_events").insert({**_j(event), "tenant_id": self.tenant}).execute()
         with self._lock:
             self._audit_recent = None
@@ -597,13 +671,23 @@ class SupabaseRepository(BaseRepository):
         return PartyContact(**res.data[0]) if res.data else None
 
     def get_active_policy(self) -> PolicyRecord:
+        batch = self._active_batch()
+        if batch is not None and batch.get("policy") is not None:
+            return batch["policy"]
         res = self._t("policy_versions").select("*").eq("tenant_id", self.tenant).order("created_at", desc=True).limit(1).execute()
         if not res.data:
-            return PolicyRecord(id="pol_default", version="v1", name="default", values=DEFAULT_POLICY, updated_by="system", updated_at=datetime.utcnow())
-        r = res.data[0]
-        return PolicyRecord(id=r["id"], version=r["version"], name=r["name"], values=r["values"], updated_by=r["updated_by"], updated_at=r["created_at"], change_note=r.get("change_note", ""))
+            policy = PolicyRecord(id="pol_default", version="v1", name="default", values=DEFAULT_POLICY, updated_by="system", updated_at=datetime.utcnow())
+        else:
+            r = res.data[0]
+            policy = PolicyRecord(id=r["id"], version=r["version"], name=r["name"], values=r["values"], updated_by=r["updated_by"], updated_at=r["created_at"], change_note=r.get("change_note", ""))
+        if batch is not None:
+            batch["policy"] = policy                  # one read per run; a policy save clears it
+        return policy
 
     def save_policy_version(self, policy: PolicyRecord) -> None:
+        batch = self._active_batch()
+        if batch is not None:
+            batch["policy"] = None
         self._t("policies").upsert({"id": "policy_active", "tenant_id": self.tenant, "name": policy.name, "active_version": policy.version}).execute()
         self._t("policy_versions").insert({"id": policy.id, "tenant_id": self.tenant, "policy_id": "policy_active", "version": policy.version, "name": policy.name,
                                            "values": policy.values, "updated_by": policy.updated_by, "change_note": policy.change_note, "created_at": policy.updated_at.isoformat()}).execute()

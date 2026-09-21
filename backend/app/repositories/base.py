@@ -39,6 +39,12 @@ class StorageProviderError(StorageError):
 class BaseRepository(ABC):
     # ---- emails -----------------------------------------------------------
     @abstractmethod
+    def batch_writes(self):
+        """Context manager: coalesce the writes of one processing run (pipeline / agent). Default: no batching."""
+        from contextlib import nullcontext
+
+        return nullcontext()
+
     def save_email(self, email: EmailMessage) -> None: ...
     @abstractmethod
     def get_email(self, email_id: str) -> Optional[EmailMessage]: ...
