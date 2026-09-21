@@ -374,15 +374,26 @@ export function Timeline({ c }: { c: CaseView }) {
   const statusesHit = new Set<string>();
   c.trace.forEach((t) => { if (t.output?.status) statusesHit.add(t.output.status); });
   const stages = ORDER.map((s) => { const opts = s.split("|"); const hit = opts.find((o) => o === c.status) || opts.find((o) => statusesHit.has(o)); return { label: (hit || opts[0]).replace(/_/g, " "), key: s, active: !!hit || (opts.length === 1 && isReached(opts[0], c)) }; });
+  const currentLabel = c.status.replace(/_/g, " ");
+  const currentIndex = stages.findIndex((s) => s.label === currentLabel);
+  const strip = useRef<HTMLDivElement>(null);
+  // on phones the strip scrolls sideways: keep the current step in view
+  useEffect(() => { strip.current?.querySelector<HTMLElement>("[data-current='true']")?.scrollIntoView({ block: "nearest", inline: "center" }); }, [c.status]);
   return (
-    <div className="flex flex-wrap items-center gap-1 text-[10px]">
-      {stages.map((s, i) => (
-        <div key={s.key} className="flex items-center gap-1">
-          <span className={`rounded-full px-2 py-0.5 ${s.label === c.status.replace(/_/g, " ") ? "bg-ink-900 text-white" : s.active ? "bg-accent-bg text-accent-fg" : "bg-ink-100 text-ink-400"}`}>{s.label}</span>
-          {i < stages.length - 1 && <span className="text-ink-300">›</span>}
-        </div>
-      ))}
-      <span className="ml-2 text-ink-400">{c.processing_ms} ms pipeline · {seen.size} nodes</span>
+    <div className="text-[10px]">
+      <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px] sm:hidden">
+        <span className="font-semibold text-ink-800">Step {currentIndex + 1} of {stages.length} · <span className="capitalize">{currentLabel.toLowerCase()}</span></span>
+      </div>
+      <div ref={strip} className="flex snap-x items-center gap-1 overflow-x-auto pb-1 scrollbar-thin sm:flex-wrap sm:overflow-visible sm:pb-0">
+        {stages.map((s, i) => (
+          <div key={s.key} className="flex shrink-0 snap-start items-center gap-1">
+            <span data-current={s.label === currentLabel} className={`whitespace-nowrap rounded-full px-2 py-0.5 ${s.label === currentLabel ? "bg-ink-900 text-white" : s.active ? "bg-accent-bg text-accent-fg" : "bg-ink-100 text-ink-400"}`}>{s.label}</span>
+            {i < stages.length - 1 && <span className="text-ink-300">›</span>}
+          </div>
+        ))}
+        <span className="ml-2 hidden whitespace-nowrap text-ink-400 sm:inline">{c.processing_ms} ms pipeline · {seen.size} nodes</span>
+      </div>
+      <div className="mt-1 text-right text-ink-400 sm:hidden">{c.processing_ms} ms pipeline · {seen.size} nodes</div>
     </div>
   );
 }

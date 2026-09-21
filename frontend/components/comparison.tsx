@@ -23,10 +23,10 @@ export function SevenFieldCard({ cmp, reviewReason, onEvidence }: { cmp: Compari
           <div className="text-[11px] uppercase tracking-wide text-ink-500">Seven-field verification · SI is source of truth</div>
           <div className={`text-lg font-semibold ${passed ? "text-match-fg" : cmp.mismatch_count > 0 ? "text-mismatch-fg" : "text-review-fg"}`}>{cmp.message}</div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs sm:ml-auto">
+        <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1.5 text-xs sm:ml-auto sm:w-auto">
           <Badge className={passed ? "bg-match text-white" : cmp.mismatch_count > 0 ? "bg-mismatch text-white" : "bg-review text-white"}>{cmp.comparison_status.replace(/_/g, " ")}</Badge>
-          <span className="text-ink-500">{cmp.mismatch_count}/{cmp.required_field_count} mismatch · {cmp.review_fields.length} review</span>
-          <label className="flex items-center gap-1 text-ink-500"><input type="checkbox" checked={showMatches} onChange={(e) => setShowMatches(e.target.checked)} />show matches</label>
+          <span className="whitespace-nowrap text-ink-500">{cmp.mismatch_count}/{cmp.required_field_count} mismatch · {cmp.review_fields.length} review</span>
+          <label className="flex items-center gap-1 whitespace-nowrap text-ink-500"><input type="checkbox" checked={showMatches} onChange={(e) => setShowMatches(e.target.checked)} />show matches</label>
         </div>
       </div>
       <div className="max-w-full overflow-x-auto"><table className="w-full min-w-[860px] text-sm">

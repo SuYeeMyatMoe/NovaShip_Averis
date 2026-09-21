@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, post, getSession, type CaseView, type ComparisonField } from "@/lib/api";
 import { Badge, Button, Card, Confidence, Empty, KV, PRIORITY_COLORS, StatusBadge, Toast, fmtDate } from "@/components/ui";
 import { EvidencePanel, SevenFieldCard } from "@/components/comparison";
@@ -23,6 +23,10 @@ export default function CasePage() {
   const [perms, setPerms] = useState<string[]>([]);
   const [evField, setEvField] = useState<ComparisonField | null>(null);
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 3500); };
+  const copyId = (value: string) => { try { navigator.clipboard?.writeText(value); say("Copied"); } catch { /* ignore */ } };
+  const tabStrip = useRef<HTMLDivElement>(null);
+  // the tab strip scrolls sideways on small screens: keep the active tab in view
+  useEffect(() => { tabStrip.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" }); }, [tab]);
   const load = useCallback(() => api<CaseView>(`/cases/${id}`).then((d) => { setC(d); setErr(null); }).catch((e) => setErr(e.message)), [id]);
   useEffect(() => {
     load();
@@ -57,31 +61,36 @@ export default function CasePage() {
       <div className="min-w-0 rounded-2xl border border-ink-200 bg-white/95 p-3 shadow-card sm:p-5">
         <div className="flex flex-wrap items-start gap-3">
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-500"><Link href="/" className="hover:underline">← Inbox</Link><span>·</span><span className="font-mono">{c.id}</span><span>·</span><Link href={`/cases/${c.id}?tab=email`} onClick={() => setTab("email")} className="text-accent hover:underline">source email {e.id}</Link></div>
-            <div className="mt-3 text-[10px] font-bold uppercase tracking-[0.18em] text-accent">Case command view</div>
+            {/* breadcrumb: long ids truncate on small screens (full id in the tooltip, tap to copy); shown in full from sm up */}
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-500">
+              <Link href="/" className="shrink-0 hover:underline">← Inbox</Link><span aria-hidden>·</span>
+              <button type="button" onClick={() => copyId(c.id)} title={`${c.id} (tap to copy)`} className="max-w-[46vw] truncate font-mono hover:text-ink-800 sm:max-w-none">{c.id}</button><span aria-hidden>·</span>
+              <Link href={`/cases/${c.id}?tab=email`} onClick={() => setTab("email")} title={`source email ${e.id}`} className="inline-flex max-w-[46vw] items-baseline gap-1 text-accent hover:underline sm:max-w-none"><span className="shrink-0">source email</span><span className="truncate font-mono">{e.id}</span></Link>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2"><span className="text-[10px] font-bold uppercase tracking-[0.18em] text-accent">Case command view</span><StatusBadge status={c.status} /></div>
             <h1 className="mt-1 break-words text-lg font-semibold tracking-tight text-ink-900 sm:text-xl">{e.subject}</h1>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-600">
-              <span className="font-mono">{e.sender}</span><span>·</span><span>{fmtDate(e.received_at)}</span><span>·</span>
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-600">
+              <span className="break-all font-mono">{e.sender}</span><span aria-hidden>·</span><span className="whitespace-nowrap">{fmtDate(e.received_at)}</span>
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-ink-600">
               <Badge className="bg-ink-100 text-ink-700">{c.intent.replace(/_/g, " ")}</Badge>
               <Badge className={c.security.outcome === "SAFE" ? "bg-match-bg text-match-fg" : "bg-mismatch-bg text-mismatch-fg"}>{c.security.outcome}</Badge>
-              <span className={PRIORITY_COLORS[c.priority]}>{c.priority}</span>
+              <span className={`font-semibold ${PRIORITY_COLORS[c.priority]}`}>{c.priority}</span>
               <Confidence value={c.classification.confidence} label="intent confidence" />
               {!c.action_required && <Badge className="bg-ink-100 text-ink-600">No reply needed</Badge>}
             </div>
           </div>
-          <div className="flex w-full flex-col items-start gap-2 xl:w-auto xl:items-end">
-            <StatusBadge status={c.status} />
-            <div className="flex w-full flex-wrap justify-start gap-1 xl:w-auto xl:justify-end">
-              <Button onClick={() => act("/retry")} title="Re-run the whole pipeline">Retry</Button>
-              <Button onClick={() => { setTab("drafts"); }}>Draft Reply</Button>
-              <Button onClick={() => { setTab("collab"); }}>Assign / Notify Party</Button>
-              <Button onClick={() => act("/request-review", { note: "Manual review requested" })}>Request review</Button>
-              {c.action_required && <Button onClick={() => act("/no-action")}>Mark no action</Button>}
-              <Button kind="success" onClick={() => act("/complete", { note: "Completed from UI" })}>Mark complete</Button>
-            </div>
+          {/* actions: an even 2-column grid on phones (primary action full width), inline from sm up, right-aligned on xl */}
+          <div className="grid w-full grid-cols-2 gap-1.5 sm:flex sm:flex-wrap sm:justify-start sm:gap-1 xl:w-auto xl:justify-end">
+            <Button onClick={() => act("/retry")} title="Re-run the whole pipeline">Retry</Button>
+            <Button onClick={() => { setTab("drafts"); }}>Draft Reply</Button>
+            <Button onClick={() => { setTab("collab"); }}>Assign / Notify Party</Button>
+            <Button onClick={() => act("/request-review", { note: "Manual review requested" })}>Request review</Button>
+            {c.action_required && <Button onClick={() => act("/no-action")}>Mark no action</Button>}
+            <Button kind="success" className={c.action_required ? "" : "col-span-2 sm:col-span-1"} onClick={() => act("/complete", { note: "Completed from UI" })}>Mark complete</Button>
           </div>
         </div>
-        <div className="mt-3"><Timeline c={c} /></div>
+        <div className="mt-3 border-t border-ink-100 pt-3"><Timeline c={c} /></div>
       </div>
 
       {c.errors.filter((x) => !x.resolved).length > 0 && (
@@ -89,14 +98,14 @@ export default function CasePage() {
           <div className="mb-1 font-semibold text-mismatch-fg">Processing issues — visible and recoverable</div>
           {c.errors.map((x) => (
             <div key={x.id} className="flex flex-wrap items-center gap-2 py-0.5"><Badge className="bg-mismatch text-white">{x.category}</Badge><span className="text-ink-500">step {x.step}:</span><span>{x.message}</span><span className="text-ink-500">→ {x.recovery}</span>
-              <span className="ml-auto flex gap-1"><Button onClick={() => act("/retry")}>Retry</Button><Button onClick={() => setTab("attachments")}>Upload missing file</Button><Button onClick={() => setTab("collab")}>Reassign</Button><Button onClick={() => act("/request-review")}>Human review</Button></span></div>
+              <span className="flex w-full flex-wrap gap-1 pt-1 sm:ml-auto sm:w-auto sm:pt-0"><Button onClick={() => act("/retry")}>Retry</Button><Button onClick={() => setTab("attachments")}>Upload missing file</Button><Button onClick={() => setTab("collab")}>Reassign</Button><Button onClick={() => act("/request-review")}>Human review</Button></span></div>
           ))}
         </div>
       )}
 
-      <div className="max-w-full overflow-x-auto rounded-xl border border-ink-200 bg-white/80 p-1.5 shadow-sm">
+      <div ref={tabStrip} role="tablist" aria-label="Case sections" className="max-w-full snap-x overflow-x-auto rounded-xl border border-ink-200 bg-white/80 p-1.5 shadow-sm scrollbar-thin [mask-image:linear-gradient(to_right,transparent,black_12px,black_calc(100%-12px),transparent)]">
         <div className="flex min-w-max gap-1">
-        {TABS.map(([k, label]) => <button key={k} onClick={() => { setTab(k); router.replace(`/cases/${c.id}?tab=${k}`); }} className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm transition ${tab === k ? "bg-ink-900 font-semibold text-white shadow-sm" : "text-ink-500 hover:bg-ink-100 hover:text-ink-800"}`}>{label}{k === "compare" && c.mismatch_count > 0 && <span className="ml-1 rounded-full bg-mismatch px-1.5 text-[10px] text-white">{c.mismatch_count}</span>}{k === "drafts" && c.drafts.length > 0 && <span className="ml-1 rounded-full bg-accent px-1.5 text-[10px] text-white">{c.drafts.length}</span>}</button>)}
+        {TABS.map(([k, label]) => <button key={k} role="tab" aria-selected={tab === k} onClick={() => { setTab(k); router.replace(`/cases/${c.id}?tab=${k}`); }} className={`snap-start whitespace-nowrap rounded-lg px-3 py-2 text-sm transition ${tab === k ? "bg-ink-900 font-semibold text-white shadow-sm" : "text-ink-500 hover:bg-ink-100 hover:text-ink-800"}`}>{label}{k === "compare" && c.mismatch_count > 0 && <span className="ml-1 rounded-full bg-mismatch px-1.5 text-[10px] text-white">{c.mismatch_count}</span>}{k === "drafts" && c.drafts.length > 0 && <span className="ml-1 rounded-full bg-accent px-1.5 text-[10px] text-white">{c.drafts.length}</span>}</button>)}
         </div>
       </div>
 
