@@ -19,6 +19,8 @@ services:
       AUTH_MODE: ${AUTH_MODE:-demo}
       BUNDLE_DIR: /data/bundle
       SEED_SNAPSHOT: /data/seed/snapshot.json
+      EVAL_GROUND_TRUTH: /data/eval/data_v2/ground_truth.json   # self-evaluation (Workbench card / GET /evaluate); 404 when the file is absent
+      EVAL_SCORING: /data/eval/server/scoring.py
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
       VECTOR_STORE: ${VECTOR_STORE:-local}
       LANGGRAPH_CHECKPOINT: ${LANGGRAPH_CHECKPOINT:-memory}
@@ -27,6 +29,8 @@ services:
     volumes:
       - ./sdoc-hackathon-bundle:/data/bundle:ro
       - ./supabase/seed/snapshot.json:/data/seed/snapshot.json:ro
+      - ./sdoc-hackathon-docker/data_v2:/data/eval/data_v2:ro   # ground_truth.json (gitignored locally; absent = evaluation disabled)
+      - ./sdoc-hackathon-docker/server:/data/eval/server:ro     # the organiser's scoring.py
       - ./backend/data:/app/data          # RAG knowledge folder + local index (writable)
     restart: unless-stopped
 

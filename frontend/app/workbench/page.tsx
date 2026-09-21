@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, post, getSession, downloadFile } from "@/lib/api";
 import { Badge, Button, Card, Empty, KV, StatusBadge, Toast } from "@/components/ui";
 import { CaseMultiPicker } from "@/components/case-picker";
+import { EvaluationCard } from "@/components/evaluation-card";
 import { useOperatorWarning } from "@/lib/operator-warning";
 
 function downloadBase64Xlsx(b64: string, filename: string) {
@@ -264,6 +265,8 @@ export default function WorkbenchPage() {
           </Card>
         </div>
       </div>
+
+      <EvaluationCard canExport={canExport} say={say} />
 
       {rowList.length > 0 && (
         <Card title={`Last run · ${lastAction === "agent" ? "agent" : lastAction} · ${rowList.length} case(s)`} className="border-orange-200"

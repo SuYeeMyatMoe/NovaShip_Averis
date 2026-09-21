@@ -897,6 +897,70 @@ def export_report_xlsx(user: UserRecord = Depends(require("export_data"))):
     )
 
 
+# ---------------------------------------------------------------- self-evaluation (hackathon reference)
+def _evaluation_ready() -> None:
+    from app.services import evaluation as ev
+
+    if not ev.GROUND_TRUTH.exists() or not ev.SCORING.exists():
+        raise HTTPException(404, detail={"error": "the hackathon reference is not available on this server (sdoc-hackathon-docker/data_v2/ground_truth.json + server/scoring.py)",
+                                         "category": "DATABASE_ERROR", "recovery": "Run the evaluation on a machine that has the docker bundle: python backend/scripts/evaluate.py", "retryable": False})
+
+
+@router.get("/evaluate")
+def evaluate_desk(server: Optional[str] = None, user: UserRecord = Depends(require("export_data"))):
+    """Score the desk's current results against the organiser's reference with the organiser's scoring.py; no pipeline replay."""
+    from app.services import evaluation as ev
+
+    _evaluation_ready()
+    result = ev.evaluate(get_repo(), server=server or None)
+    svc().pipe.audit(None, ActorType.USER, user.id, "SELF_EVALUATION", after={"final_score": result["scoreboard"].get("final_score"), "answered": result["counts"]["answered"],
+                                                                                "missing": result["counts"]["missing"], "server": bool(server)})
+    return {k: v for k, v in result.items() if k != "submission"}
+
+
+@router.post("/evaluate")
+async def evaluate_desk_with_upload(ground_truth: UploadFile = File(...), server: str = Form(default=""), user: UserRecord = Depends(require("export_data"))):
+    """Same scoreboard, but against an uploaded ground_truth.json: lets a deployment without the private file evaluate.
+    The file is scored in memory and never stored; the report Markdown is returned inline so no re-upload is needed."""
+    from app.services import evaluation as ev
+
+    if not ev.SCORING.exists():
+        raise HTTPException(404, detail={"error": "the organiser's scoring.py is not available on this server", "category": "DATABASE_ERROR", "retryable": False})
+    raw = await ground_truth.read()
+    if len(raw) > 2_000_000:
+        raise HTTPException(400, detail={"error": "ground truth file too large (max 2 MB)", "category": "ATTACHMENT_UPLOAD_ERROR"})
+    try:
+        truth = ev.validate_truth(json.loads(raw.decode("utf-8")))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, detail={"error": f"ground_truth.json is not valid: {exc}", "category": "ATTACHMENT_UPLOAD_ERROR", "retryable": False})
+    result = ev.evaluate(get_repo(), server=server.strip() or None, truth=truth)
+    svc().pipe.audit(None, ActorType.USER, user.id, "SELF_EVALUATION", after={"final_score": result["scoreboard"].get("final_score"), "answered": result["counts"]["answered"],
+                                                                                "missing": result["counts"]["missing"], "server": bool(server.strip()), "reference": "uploaded"})
+    out = {k: v for k, v in result.items() if k != "submission"}
+    out["reference"] = "uploaded"
+    out["report_md"] = ev.render_report_md(result)
+    return out
+
+
+@router.get("/evaluate/report.md", response_class=PlainTextResponse)
+def evaluate_report(server: Optional[str] = None, user: UserRecord = Depends(require("export_data"))):
+    from app.services import evaluation as ev
+
+    _evaluation_ready()
+    return Response(content=ev.render_report_md(ev.evaluate(get_repo(), server=server or None)), media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=novaship-evaluation.md"})
+
+
+@router.get("/evaluate/submission.json")
+def evaluate_submission(user: UserRecord = Depends(require("export_data"))):
+    """The submission the evaluation scores: bundle ids only, missing ones filled with the placeholder."""
+    from app.services import evaluation as ev
+
+    submission, missing = ev.build_submission(get_repo(), ev.bundle_ids())
+    return Response(content=json.dumps(submission, indent=2), media_type="application/json",
+                    headers={"Content-Disposition": "attachment; filename=submission.json", "X-Missing": str(len(missing))})
+
+
 @router.get("/export/submission.json")
 def export_submission(user: UserRecord = Depends(require("export_data"))):
     repo = get_repo()

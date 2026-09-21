@@ -742,6 +742,16 @@ The current service re-runs the complete pipeline for the classify/extract/compa
 | GET | `/security/queue` | Security and anomaly cases |
 | GET | `/audit` | Filtered global audit log |
 
+## Self-evaluation against the hackathon reference
+
+The brief ships a self-evaluation (one JSON keyed by `email_id`, shape of `sample_submission.json`). NovaShip scores the results it **already holds** — no pipeline replay:
+
+- **Workbench → Self-evaluation** → *Evaluate current results*: final score, classification accuracy / macro-F1, mismatch precision / recall / field-F1, end-to-end, escalation recall / precision, per-category table, and every disagreement with the reference as a link to the case. *Download report (MD)* / *Download submission.json*.
+- CLI: `python backend/scripts/evaluate.py` (reads `GET /export/submission.json` from the running API, scores with the organiser's `sdoc-hackathon-docker/server/scoring.py` against `sdoc-hackathon-docker/data_v2/ground_truth.json`, writes `evaluation/report.md`, `scoreboard.json`, `submission.json`). `--file submission.json` scores a file, `--server http://localhost:8081` also POSTs to the organiser server (`docker compose up --build` in `sdoc-hackathon-docker`; map a free host port — 8080 may be taken), `--fail-below 0.95` gates CI.
+- API: `GET /evaluate`, `GET /evaluate/report.md`, `GET /evaluate/submission.json` (permission `export_data`; 404 when the reference files are absent, e.g. on Vercel).
+
+Per the brief, the scoreboard is a development aid: it cannot judge whether the desk asked for human review at the right moment. When the desk disagrees with the reference, check the source documents first; if the desk's decision is reasonable, record the reason on the case.
+
 ## 12. Persistence and Supabase
 
 ### Applying migrations
