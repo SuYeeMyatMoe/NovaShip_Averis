@@ -119,7 +119,7 @@ def microsoft_start(intent: str = "login", role: Optional[str] = None, next: str
     scopes = MAIL_SCOPES if intent == "connect" else LOGIN_SCOPES
     query = urlencode({
         "client_id": client_id, "response_type": "code", "redirect_uri": redirect_uri(), "response_mode": "query",
-        "scope": " ".join(scopes), "state": state, "prompt": "consent" if intent == "connect" else "select_account",
+        "scope": " ".join(scopes), "state": state, "prompt": "select_account",  # always show the account picker so a different Outlook account can be connected; consent is still shown for scopes not yet granted
     })
     return {"url": f"{_authority(tenant)}/authorize?{query}", "redirect_uri": redirect_uri(), "intent": intent, "connect": bool(connect_user_id and intent == "connect")}
 

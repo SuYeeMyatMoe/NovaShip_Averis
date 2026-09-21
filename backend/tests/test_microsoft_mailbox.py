@@ -68,7 +68,7 @@ def test_start_login_asks_identity_only_and_connect_asks_mail(monkeypatch):
     token = _login(monkeypatch)
     r = client.get("/auth/microsoft/start", params={"intent": "connect", "next": "/"}, headers={"Authorization": f"Bearer {token}"}).json()
     q = parse_qs(urlparse(r["url"]).query)
-    assert r["connect"] is True and {"Mail.Read", "Mail.Send", "offline_access"} <= set(q["scope"][0].split()) and q["prompt"] == ["consent"]
+    assert r["connect"] is True and {"Mail.Read", "Mail.Send", "offline_access"} <= set(q["scope"][0].split()) and q["prompt"] == ["select_account"]
 
 
 def test_login_creates_account_without_mailbox_then_connect_links_outlook(monkeypatch):
