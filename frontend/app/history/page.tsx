@@ -4,8 +4,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { api, downloadFile, getSession, type HistoryRow } from "@/lib/api";
 import { Badge, Button, StatusBadge, Toast, fmtDate } from "@/components/ui";
+import { CaseColHandle, caseColStyle, useCaseColWidth } from "@/components/col-resize";
 
 const PAGE = 25;
+const CASE_COL_KEY = "novaship.history.caseColWidth";
 const RESULT_LABELS: Record<string, string> = { done: "Processed", paused: "Paused – waiting", error: "Failed", all: "All runs" };
 
 /**
@@ -33,7 +35,10 @@ function HistoryInner() {
   const [counts, setCounts] = useState<{ done: number; paused: number; error: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [caseColWidth, setCaseColWidth] = useCaseColWidth(CASE_COL_KEY);
   const say = (msg: string, kind: "ok" | "err" = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 4000); };
+  const colStyle = caseColStyle(caseColWidth);
+  const caseLabels = (rows || []).map((r) => r.case_id.replace("case_", ""));
 
   const query = useCallback(() => {
     const p = new URLSearchParams({ result, limit: String(PAGE), offset: String(page * PAGE) });
@@ -98,9 +103,16 @@ function HistoryInner() {
         </div>
         <div className="overflow-x-auto scrollbar-thin">
           <table className="w-full min-w-[1200px] text-left text-xs">
+            <colgroup>
+              <col />
+              <col style={{ width: caseColWidth }} />
+              <col /><col /><col /><col /><col /><col /><col /><col /><col /><col />
+            </colgroup>
             <thead className="bg-ink-50 text-[11px] uppercase tracking-wide text-ink-500">
               <tr>
-                <th className="px-2 py-2">Run time</th><th className="px-2 py-2">Case</th><th className="px-2 py-2">Subject / sender</th><th className="px-2 py-2">Mailbox</th>
+                <th className="px-2 py-2">Run time</th>
+                <th className="relative overflow-hidden px-2 py-2" style={colStyle}><span className="block truncate pr-1">Case</span><CaseColHandle storageKey={CASE_COL_KEY} width={caseColWidth} onChange={setCaseColWidth} labels={caseLabels} /></th>
+                <th className="px-2 py-2">Subject / sender</th><th className="px-2 py-2">Mailbox</th>
                 <th className="px-2 py-2">Ran by</th><th className="px-2 py-2">Result</th><th className="px-2 py-2">Status after</th><th className="px-2 py-2">Mismatch</th>
                 <th className="px-2 py-2">Decision</th><th className="px-2 py-2">Duration</th><th className="px-2 py-2">Runs</th><th className="px-2 py-2" />
               </tr>
@@ -111,7 +123,7 @@ function HistoryInner() {
                 <tr key={r.case_id} onClick={(e) => { if ((e.target as HTMLElement).closest("button, a")) return; router.push(`/cases/${r.case_id}`); }} title="Open the case"
                     className={`cursor-pointer border-t border-ink-100 align-top transition hover:bg-accent-bg/30 ${highlight === r.case_id ? "bg-accent-bg/50" : ""}`}>
                   <td className="whitespace-nowrap px-2 py-2 text-ink-600">{fmtDate(r.run_at)}</td>
-                  <td className="px-2 py-2 font-mono text-[11px]"><Link href={`/cases/${r.case_id}`} className="text-accent hover:underline">{r.case_id.replace("case_", "")}</Link></td>
+                  <td className="overflow-hidden px-2 py-2 font-mono text-[11px]" style={colStyle}><Link href={`/cases/${r.case_id}`} title={r.case_id} className="block truncate text-accent hover:underline">{r.case_id.replace("case_", "")}</Link></td>
                   <td className="max-w-[380px] px-2 py-2"><div className="line-clamp-1 font-medium text-ink-900">{r.subject || "(no subject)"}</div><div className="truncate text-[11px] text-ink-500">{r.sender}</div></td>
                   <td className="px-2 py-2 text-[11px] text-ink-600">{r.mailbox || <span className="text-ink-400">shared / webhook</span>}</td>
                   <td className="px-2 py-2 text-[11px]">{r.run_by_name}{r.mode === "batch" && <span className="ml-1 rounded-full bg-ink-100 px-1.5 text-[10px] text-ink-600">batch</span>}{r.mode === "human" && <span className="ml-1 rounded-full bg-accent-bg px-1.5 text-[10px] text-accent-fg" title="Marked complete by a person">by hand</span>}</td>
