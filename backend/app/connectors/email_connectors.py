@@ -499,6 +499,11 @@ def shared_mailbox_configured() -> bool:
     return all(os.environ.get(name, "").strip() for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS"))
 
 
+def shared_send_configured() -> bool:
+    """True when the optional shared desk mailbox can *send* (the four GMAIL_* settings `GmailConnector()` needs)."""
+    return all(os.environ.get(name, "").strip() for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS"))
+
+
 def google_oauth_client() -> tuple[str, str]:
     """OAuth client used for Google sign-in / per-user mailboxes; falls back to the shared Gmail client."""
     client_id = (os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or os.environ.get("GMAIL_CLIENT_ID") or "").strip()

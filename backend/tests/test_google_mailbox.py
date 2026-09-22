@@ -293,6 +293,84 @@ def test_outbound_falls_back_to_shared_mailbox_without_send_scope(monkeypatch):
     assert shared.sent and [e for e in repo.list_audit(case.id) if e.action == "NOTIFICATION_SENT"][-1].after["from"] == "shared@example.com"
 
 
+def test_reply_falls_back_to_the_approvers_own_mailbox(monkeypatch):
+    """A seeded / uploaded / webhook case has no arrival mailbox: the reply leaves from the approver's own connected mailbox."""
+    monkeypatch.setenv("EMAIL_SEND_MODE", "gmail")
+    for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS"):
+        monkeypatch.delenv(name, raising=False)
+    repo = MemoryRepository()
+    case = _tagged_case(repo, None)                       # no mailbox_user_id on the e-mail
+    repo.save_mailbox(_mailbox(user_id="u_sup_1", address="approver@gmail.com"))
+    own_conn, shared_calls = _Conn(address="approver@gmail.com"), []
+    monkeypatch.setattr(GmailConnector, "from_mailbox", classmethod(lambda cls, mb: own_conn))
+    monkeypatch.setattr("app.connectors.email_connectors.get_outbound_connector", lambda mode=None: shared_calls.append(mode) or _Conn(address="shared@example.com"))
+    service = CaseService(repo)
+    approver = repo.get_user("u_sup_1")
+    assert service.outbound_summary(case, approver) == {"mode": "live", "source": "your_mailbox", "address": "approver@gmail.com", "provider": "gmail", "mailbox_user_id": "u_sup_1", "reason": None}
+    # a stale "nothing could send" card from before the mailbox was connected is closed by the successful send
+    from app.contracts.schemas import ErrorCategory, ProcessingError
+    stale = ProcessingError(id="err_old", case_id=case.id, category=ErrorCategory.NOTIFICATION_ERROR, step="outbound_email", message="No mailbox can send this reply: old", recovery="x", retryable=True)
+    case.errors.append(stale); repo.save_case(case)
+    result = service.approve_draft(case.id, DraftDecision(draft_id="draft_owned"), approver)
+    assert result.drafts[0].status == DraftStatus.SENT and own_conn.sent and not shared_calls
+    assert result.errors[0].id == "err_old" and result.errors[0].resolved is True
+    assert [e for e in repo.list_audit(case.id) if e.action == "NOTIFICATION_SENT"][-1].after["resolved_errors"] == ["err_old"]
+    delivery = result.drafts[0].delivery
+    assert delivery.provider == "gmail" and delivery.mailbox_user_id == "u_sup_1" and delivery.from_address == "approver@gmail.com"
+    assert [e for e in repo.list_audit(case.id) if e.action == "NOTIFICATION_SENT"][-1].after["from"] == "approver@gmail.com"
+
+
+def test_arrival_mailbox_wins_over_the_approvers_when_both_can_send(monkeypatch):
+    monkeypatch.setenv("EMAIL_SEND_MODE", "gmail")
+    repo = MemoryRepository()
+    case = _tagged_case(repo, _mailbox(user_id="u_ops_1", address="owner@gmail.com"))
+    repo.save_mailbox(_mailbox(user_id="u_sup_1", address="approver@gmail.com"))
+    conns = {"owner@gmail.com": _Conn(address="owner@gmail.com"), "approver@gmail.com": _Conn(address="approver@gmail.com")}
+    monkeypatch.setattr(GmailConnector, "from_mailbox", classmethod(lambda cls, mb: conns[mb.address]))
+    service = CaseService(repo)
+    assert service.outbound_summary(case, repo.get_user("u_sup_1"))["source"] == "arrived_in"
+    result = service.approve_draft(case.id, DraftDecision(draft_id="draft_owned"), repo.get_user("u_sup_1"))
+    assert result.drafts[0].delivery.from_address == "owner@gmail.com" and conns["owner@gmail.com"].sent and not conns["approver@gmail.com"].sent
+
+
+def test_no_mailbox_reasons_name_what_to_fix(monkeypatch):
+    """Nothing can send: the 502, the case error and GET /cases/{id}.send_from all say whether a mailbox is missing, revoked or lacks the send scope."""
+    monkeypatch.setenv("EMAIL_SEND_MODE", "gmail")
+    monkeypatch.setenv("EMAIL_PROVIDER", "none")
+    for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS"):
+        monkeypatch.delenv(name, raising=False)
+    repo = MemoryRepository()
+    case = _tagged_case(repo, _mailbox(user_id="u_ops_1", address="readonly@gmail.com", scopes=(READ,)))
+    service, approver = CaseService(repo), repo.get_user("u_sup_1")
+    # 1. approver has no mailbox at all
+    s0 = service.outbound_summary(case, approver)
+    assert s0["source"] is None and "no connected mailbox" in s0["reason"] and "readonly@gmail.com" in s0["reason"] and "Guide page" in s0["recovery"]
+    with pytest.raises(Exception) as err:
+        service.approve_draft(case.id, DraftDecision(draft_id="draft_owned"), approver)
+    detail = err.value.detail
+    assert err.value.status_code == 502 and detail["error"].startswith("no mailbox can send this reply: your account has no connected mailbox") and detail["retryable"] is True
+    failed = repo.get_case(case.id)
+    assert failed.drafts[0].status == DraftStatus.SEND_FAILED and failed.errors[-1].message.startswith("No mailbox can send this reply: your account has no connected mailbox")
+    # 2. approver's mailbox lacks the send scope
+    repo.save_mailbox(_mailbox(user_id="u_sup_1", address="approver@gmail.com", scopes=(READ,)))
+    s1 = service.outbound_summary(case, approver)
+    assert s1["source"] is None and "no send permission" in s1["reason"] and "accept the send permission" in s1["recovery"]
+    # a second failed click supersedes the first card instead of stacking a duplicate
+    with pytest.raises(Exception):
+        service.approve_draft(case.id, DraftDecision(draft_id="draft_owned"), approver)
+    open_errors = [e for e in repo.get_case(case.id).errors if not e.resolved]
+    assert len(open_errors) == 1 and "no send permission" in open_errors[0].message
+    assert len([e for e in repo.get_case(case.id).errors if e.step == "outbound_email"]) == 2, "history is kept, only the latest is open"
+    # 3. approver's mailbox was revoked
+    repo.save_mailbox(_mailbox(user_id="u_sup_1", address="approver@gmail.com", status="revoked"))
+    s2 = service.outbound_summary(case, approver)
+    assert s2["source"] is None and "needs reconnecting (status: revoked)" in s2["reason"]
+    # 4. a shared mailbox rescues all of the above
+    for name, value in (("GMAIL_CLIENT_ID", "c"), ("GMAIL_CLIENT_SECRET", "s"), ("GMAIL_REFRESH_TOKEN", "r"), ("GMAIL_ADDRESS", "desk@example.com")):
+        monkeypatch.setenv(name, value)
+    assert service.outbound_summary(case, approver) == {"mode": "live", "source": "shared", "address": "desk@example.com", "provider": "shared", "mailbox_user_id": None, "reason": None}
+
+
 def test_simulate_mode_never_touches_owner_mailbox(monkeypatch):
     monkeypatch.setenv("EMAIL_SEND_MODE", "simulate")
     repo = MemoryRepository()
@@ -367,9 +445,14 @@ def test_individual_mailboxes_only_no_shared_mailbox_configured(monkeypatch):
     assert seeded.drafts, "a missing-document request draft is generated"
     r = client.post(f"/cases/{seeded.id}/approve", json={"draft_id": seeded.drafts[0].id}, headers={"X-User-Id": "u_sup_1"})
     assert r.status_code == 502 and "no mailbox can send" in r.json()["detail"]["error"] and r.json()["detail"]["retryable"] is True
+    assert "no connected mailbox" in r.json()["detail"]["error"], "the reason names what the approver must fix"
     failed = repo.get_case(seeded.id)
     assert failed.drafts[0].status == DraftStatus.SEND_FAILED
-    assert failed.errors and failed.errors[-1].message.startswith("No mailbox can send this reply") and "Connect your mailbox" in failed.errors[-1].recovery
+    assert failed.errors and failed.errors[-1].message.startswith("No mailbox can send this reply") and "Connect your Outlook/Gmail" in failed.errors[-1].recovery
+    view = client.get(f"/cases/{seeded.id}", headers={"X-User-Id": "u_sup_1"}).json()
+    assert view["send_from"]["source"] is None and "no connected mailbox" in view["send_from"]["reason"]
+    # the same seeded case is answerable by a colleague whose own mailbox can send
+    assert client.get(f"/cases/{seeded.id}", headers={"X-User-Id": "u_ops_4"}).json()["send_from"] == {"mode": "live", "source": "your_mailbox", "address": "solo@gmail.com", "provider": "gmail", "mailbox_user_id": "u_ops_4", "reason": None}
     cfg = client.get("/auth/config").json()
     assert cfg["shared_mailbox_configured"] is False and cfg["google_enabled"] is True and cfg["microsoft_enabled"] is False
     assert client.get("/me", headers={"X-User-Id": "u_ops_4"}).json()["mailbox"]["providers"]["shared_mailbox_configured"] is False

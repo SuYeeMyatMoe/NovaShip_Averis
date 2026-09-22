@@ -255,6 +255,35 @@ def test_outlook_mailbox_fetch_tags_case_and_reply_leaves_from_outlook(monkeypat
     assert sent_event.after["from"] == "ops@contoso.com" and sent_event.after["mode"] == "gmail"
 
 
+def test_seeded_case_reply_leaves_from_the_approvers_outlook(monkeypatch):
+    """No arrival mailbox (seeded / uploaded case) and no shared mailbox: the approver's own connected Outlook sends the reply."""
+    _ms_env(monkeypatch)
+    monkeypatch.setenv("EMAIL_PROVIDER", "none")
+    monkeypatch.setenv("EMAIL_SEND_MODE", "live")
+    for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ADDRESS"):
+        monkeypatch.delenv(name, raising=False)
+    graph = _Graph()
+    _patch_httpx(monkeypatch, graph)
+    repo = get_repo()
+    service = CaseService(repo)
+    case = next(c for c in repo.list_cases() if c.drafts and c.drafts[0].requires_external_approval and not repo.get_email(c.source_email_id).mailbox_user_id)
+    case = case.model_copy(deep=True)
+    case.drafts[0].status, case.drafts[0].to = DraftStatus.PROPOSED, ["docs@vitalsolutions.sg"]
+    repo.save_case(case)
+    repo.save_mailbox(UserMailbox(user_id="u_sup_1", provider="outlook", address="sup@contoso.com", refresh_token_enc=encrypt_token("ms-rt-1"),
+                                  scopes=["Mail.Read", "Mail.Send", "offline_access"], connected_at=datetime.utcnow()))
+    try:
+        view = client.get(f"/cases/{case.id}", headers={"X-User-Id": "u_sup_1"}).json()
+        assert view["send_from"] == {"mode": "live", "source": "your_mailbox", "address": "sup@contoso.com", "provider": "outlook", "mailbox_user_id": "u_sup_1", "reason": None}
+        approved = service.approve_draft(case.id, DraftDecision(draft_id=case.drafts[0].id), repo.get_user("u_sup_1"))
+        d = approved.drafts[0]
+        assert d.status == DraftStatus.SENT and graph.sent and graph.sent[0]["message"]["toRecipients"][0]["emailAddress"]["address"] == "docs@vitalsolutions.sg"
+        assert d.delivery.provider == "outlook" and d.delivery.from_address == "sup@contoso.com" and d.delivery.mailbox_user_id == "u_sup_1"
+        assert [e for e in repo.list_audit(case.id) if e.action == "NOTIFICATION_SENT"][-1].after["from"] == "sup@contoso.com"
+    finally:
+        repo.delete_mailbox("u_sup_1")
+
+
 def test_connect_storage_failure_returns_to_the_page_not_login(monkeypatch):
     """A failed Connect must not bounce a signed-in user through /login (where the error was never shown)."""
     _ms_env(monkeypatch)

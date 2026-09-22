@@ -68,14 +68,20 @@ def send_mode() -> str:
 
 
 class NoMailboxCanSend(RuntimeError):
-    """The case did not arrive through a connected mailbox and no shared mailbox is configured: nothing can send the reply."""
+    """Neither the mailbox the mail arrived in, nor the approver's own connected mailbox, nor a shared mailbox can send
+    the reply. `reason` / `recovery` say which of those is missing so the person can fix the right thing."""
+
+    def __init__(self, reason: str, recovery: str = "") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.recovery = recovery or "Connect your Outlook/Gmail on the Guide page, then Approve again (or set EMAIL_SEND_MODE=simulate to rehearse)."
 
     def http(self) -> HTTPException:
         return HTTPException(502, detail={
-            "error": "no mailbox can send this reply: the case did not arrive through a connected Gmail/Outlook and no shared mailbox is configured",
+            "error": "no mailbox can send this reply: " + self.reason,
             "category": "NOTIFICATION_ERROR",
-            "recovery": "Connect your mailbox on the Guide page and fetch the case through it, configure a shared mailbox, or set EMAIL_SEND_MODE=simulate",
-            "retryable": True, "safe_details": str(self)[:160],
+            "recovery": self.recovery,
+            "retryable": True, "safe_details": self.reason[:160],
         })
 
 
@@ -165,13 +171,64 @@ class CaseService:
             "payload": share.payload_preview,
         }
 
-    def _outbound_mailbox(self, case: CaseRecord):
-        """The user mailbox a reply should leave from: the one the request arrived in, when it can still send."""
+    def _mailbox_candidates(self, case: CaseRecord, user: Optional[UserRecord] = None) -> list[tuple[str, Any]]:
+        """(source, mailbox-or-None) in the order a reply may leave from: the mailbox the mail arrived in, then the
+        acting user's own connected mailbox. Seeded, uploaded and webhook cases have no arrival mailbox."""
         email = self.repo.get_email(case.source_email_id) if case.source_email_id else None
-        if not email or not email.mailbox_user_id:
-            return None
-        mailbox = self.repo.get_mailbox(email.mailbox_user_id)
-        return mailbox if mailbox and mailbox.can_send() else None
+        out: list[tuple[str, Any]] = []
+        if email and email.mailbox_user_id:
+            out.append(("arrived_in", self.repo.get_mailbox(email.mailbox_user_id)))
+        if user is not None and not any(src == "arrived_in" and mb and mb.user_id == user.id for src, mb in out):
+            out.append(("your_mailbox", self.repo.get_mailbox(user.id)))
+        return out
+
+    def _outbound_mailbox(self, case: CaseRecord, user: Optional[UserRecord] = None):
+        """The user mailbox a reply leaves from: the one the request arrived in when it can still send, otherwise the
+        approver's own connected mailbox. None means the shared desk mailbox (or nothing) has to send."""
+        for _src, mailbox in self._mailbox_candidates(case, user):
+            if mailbox and mailbox.can_send():
+                return mailbox
+        return None
+
+    @staticmethod
+    def _provider_label(mailbox) -> str:
+        return "Outlook" if mailbox.provider == "outlook" else "Gmail" if mailbox.provider == "gmail" else mailbox.provider
+
+    def outbound_summary(self, case: CaseRecord, user: Optional[UserRecord] = None) -> dict[str, Any]:
+        """Which mailbox an approved reply on this case would leave from for `user`, or why none can. Shown on the
+        Draft Actions tab before Approve and used for the NOTIFICATION_ERROR when sending is impossible."""
+        from app.connectors.email_connectors import shared_send_configured
+
+        mode = "simulate" if send_mode() == "simulate" else "live"
+        candidates = self._mailbox_candidates(case, user)
+        for source, mailbox in candidates:
+            if mailbox and mailbox.can_send():
+                return {"mode": mode, "source": source, "address": mailbox.address, "provider": mailbox.provider, "mailbox_user_id": mailbox.user_id, "reason": None}
+        if shared_send_configured():
+            return {"mode": mode, "source": "shared", "address": os.environ.get("GMAIL_ADDRESS", "").strip() or None, "provider": "shared", "mailbox_user_id": None, "reason": None}
+        # nothing can send: say which of the candidates is missing or unusable
+        own = next((mb for src, mb in candidates if src == "your_mailbox"), None)
+        arrival = next((mb for src, mb in candidates if src == "arrived_in"), None)
+        arrived = f" The mailbox this mail arrived in ({arrival.address}) cannot send either." if arrival else ""
+        if own is None:
+            reason = "your account has no connected mailbox and this mail did not arrive through one, and no shared mailbox is configured." + arrived
+            recovery = "Connect your Outlook/Gmail on the Guide page, then Approve again (or set EMAIL_SEND_MODE=simulate to rehearse)."
+        elif own.status != "active":
+            reason = f"your connected {self._provider_label(own)} ({own.address}) needs reconnecting (status: {own.status})." + arrived
+            recovery = f"Reconnect {own.address} on the Guide page, then Approve again."
+        else:
+            needed = own.SEND_SCOPES.get(own.provider, "a send scope")
+            reason = f"your connected {self._provider_label(own)} ({own.address}) has no send permission ({needed})." + arrived
+            recovery = f"Reconnect {own.address} on the Guide page and accept the send permission, then Approve again."
+        return {"mode": mode, "source": None, "address": None, "provider": None, "mailbox_user_id": None, "reason": reason, "recovery": recovery}
+
+    def _no_mailbox(self, case: CaseRecord, user: UserRecord) -> NoMailboxCanSend:
+        """The NoMailboxCanSend to surface after the shared connector refused: names what is missing for this caller."""
+        summary = self.outbound_summary(case, user)
+        if summary["source"] is None:
+            return NoMailboxCanSend(summary["reason"], summary["recovery"])
+        return NoMailboxCanSend("the shared desk mailbox is configured but could not be used (see the API log).",
+                                "Fix the GMAIL_* settings of the shared mailbox, then Approve again.")
 
     def _deliver_email(self, to: list[str], subject: str, body: str, cc: Optional[list[str]] = None,
                        mailbox=None) -> tuple[str, Optional[dict[str, Any]]]:
@@ -193,8 +250,8 @@ class CaseService:
                 connector = connector_for_mailbox(mailbox, on_refresh_token=rotate_token_callback(self, mailbox))
             else:
                 connector = get_outbound_connector(mode)
-        except ConfigurationError as exc:  # no shared mailbox and the case did not arrive through a connected mailbox
-            raise NoMailboxCanSend(str(exc))
+        except ConfigurationError as exc:  # no shared mailbox and no connected mailbox could send; approve_draft/confirm_share explain why (_no_mailbox)
+            raise NoMailboxCanSend(f"no connected mailbox can send and the shared mailbox is not configured ({exc}).")
         if connector is None:  # pragma: no cover - simulate returned above
             raise RuntimeError("configured outbound connector is unavailable")
         try:
@@ -205,12 +262,26 @@ class CaseService:
             ) from exc
         return mode, {**(result or {}), "from": getattr(connector, "address", None)}
 
+    def _resolve_outbound_errors(self, case: CaseRecord) -> list[str]:
+        """Close the case's open, retryable outbound_email errors: a newer attempt (success or a fresher failure) supersedes
+        them, so the case shows one current card instead of one per failed click. DELIVERY_UNKNOWN errors are not retryable
+        and stay open until a person reconciles the Sent folder."""
+        closed = []
+        for err in case.errors:
+            if err.step == "outbound_email" and err.retryable and not err.resolved:
+                err.resolved = True
+                self.repo.save_error(err)
+                closed.append(err.id)
+        return closed
+
     def _delivery_failure(self, case: CaseRecord, user: UserRecord, item_id: str, exc: Exception) -> None:
         from app.config import ConfigurationError
 
+        superseded = self._resolve_outbound_errors(case)
+
         if isinstance(exc, NoMailboxCanSend):
-            message = "No mailbox can send this reply: the case did not arrive through a connected Outlook/Gmail and no shared mailbox is configured."
-            recovery = "Connect your mailbox on the Guide page and fetch the mail through it, then Approve again (or set EMAIL_SEND_MODE=simulate to rehearse)."
+            message = "No mailbox can send this reply: " + exc.reason
+            recovery = exc.recovery
         elif isinstance(exc, ConfigurationError):
             message = "Outbound mailbox configuration is invalid; nothing was sent."
             recovery = "Fix the mailbox/provider settings named in the API log (Reconnect the mailbox if its permission was withdrawn), then Approve again."
@@ -222,7 +293,7 @@ class CaseService:
         case.errors.append(err)
         self.repo.save_error(err)
         self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", "NOTIFICATION_FAILED",
-                        after={"item_id": item_id, "provider": send_mode(), "error_type": type(exc).__name__, "reason": message, "retryable": True})
+                        after={"item_id": item_id, "provider": send_mode(), "error_type": type(exc).__name__, "reason": message, "retryable": True, "superseded_errors": superseded})
 
     def _delivery_unknown(self, case: CaseRecord, item_id: str, exc: Exception) -> None:
         cause = exc.__cause__ or exc
@@ -340,9 +411,11 @@ class CaseService:
         if configured_mode != "simulate":
             d.status = DraftStatus.DELIVERING
             self.repo.save_case(case)
+        outbound = self._outbound_mailbox(case, user)
         try:
-            mode, provider_result = self._deliver_email(d.to, d.subject, d.body, d.cc, mailbox=self._outbound_mailbox(case))
-        except NoMailboxCanSend as exc:
+            mode, provider_result = self._deliver_email(d.to, d.subject, d.body, d.cc, mailbox=outbound)
+        except NoMailboxCanSend:
+            exc = self._no_mailbox(case, user)
             d.status = DraftStatus.SEND_FAILED   # nothing left the desk; retry once a mailbox is connected
             self._delivery_failure(case, user, d.id or dec.draft_id, exc)
             self.repo.save_case(case)
@@ -367,7 +440,6 @@ class CaseService:
         accepted = mode == "gmail"
         d.status = DraftStatus.SENT if accepted else DraftStatus.SIMULATED
         action = "NOTIFICATION_SENT" if accepted else "NOTIFICATION_SIMULATED"
-        outbound = self._outbound_mailbox(case)
         d.delivery = DeliveryInfo(
             mode="live" if accepted else "simulate",
             provider=("simulate" if not accepted else (outbound.provider if outbound else "shared")),   # type: ignore[arg-type]
@@ -377,7 +449,8 @@ class CaseService:
         )
         self.pipe.audit(case.id, ActorType.SYSTEM, "notifier", action,
                         after={"channel": "email", "to": d.to, "subject": d.subject, "draft_id": d.id, "mode": mode, "provider_accepted": accepted,
-                               "from": d.delivery.from_address or "shared", "provider": d.delivery.provider, "provider_id": d.delivery.provider_id})
+                               "from": d.delivery.from_address or "shared", "provider": d.delivery.provider, "provider_id": d.delivery.provider_id,
+                               "resolved_errors": self._resolve_outbound_errors(case)})
         self._status(case, CaseStatus.AWAITING_RESPONSE, user)
         self.repo.save_case(case)
         return case
@@ -568,9 +641,10 @@ class CaseService:
                             [party.email],
                             f"NovaShip case {case.id}",
                             share.message,
-                            mailbox=self._outbound_mailbox(case),
+                            mailbox=self._outbound_mailbox(case, user),
                         )
-                    except NoMailboxCanSend as exc:
+                    except NoMailboxCanSend:
+                        exc = self._no_mailbox(case, user)
                         share.status = "DELIVERY_FAILED"
                         self.repo.save_share(share)
                         self._delivery_failure(case, user, share.id, exc)
@@ -600,6 +674,8 @@ class CaseService:
                     share.provider_message_id = (provider_result or {}).get("id")
                     share.delivery_accepted_at = datetime.utcnow()
                     self.repo.save_share(share)
+                    if self._resolve_outbound_errors(case):
+                        self.repo.save_case(case)
 
         confirmed_share = self.repo.complete_share_confirmation(
             share.id,

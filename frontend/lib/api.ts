@@ -185,7 +185,10 @@ export type CaseView = {
   errors: { id: string; category: string; step: string; message: string; recovery: string; retryable: boolean; resolved: boolean }[];
   trace: { node: string; actor_type: string; started_at: string; finished_at: string; output: any }[]; processing_ms: number; created_at: string; updated_at: string;
   email: { id: string; sender: string; subject: string; body: string; received_at: string; language: string; attachments: Attachment[]; recipients: string[]; cc: string[] } | null;
+  send_from?: SendFrom | null;
 };
+/** Which mailbox an approved reply would leave from for the signed-in user (GET /cases/{id}), or why none can. */
+export type SendFrom = { mode: "live" | "simulate"; source: "arrived_in" | "your_mailbox" | "shared" | null; address: string | null; provider: string | null; mailbox_user_id: string | null; reason: string | null; recovery?: string };
 export type CaseRow = {
   id: string; email_id: string; subject: string; sender: string; received_at: string | null; intent: string; category: string; security: string; action_required: boolean; priority: string;
   si_available: boolean; bl_available: boolean; attachments: number; mismatch_count: number; comparison_status: string | null; review_reason: string | null; confidence: number;

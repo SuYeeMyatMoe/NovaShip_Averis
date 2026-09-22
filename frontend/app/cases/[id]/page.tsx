@@ -96,9 +96,15 @@ export default function CasePage() {
       {c.errors.filter((x) => !x.resolved).length > 0 && (
         <div className="rounded-xl border border-mismatch/40 bg-mismatch-bg/40 p-3 text-xs">
           <div className="mb-1 font-semibold text-mismatch-fg">Processing issues — visible and recoverable</div>
-          {c.errors.map((x) => (
+          {c.errors.filter((x) => !x.resolved).map((x) => (
             <div key={x.id} className="flex flex-wrap items-center gap-2 py-0.5"><Badge className="bg-mismatch text-white">{x.category}</Badge><span className="text-ink-500">step {x.step}:</span><span>{x.message}</span><span className="text-ink-500">→ {x.recovery}</span>
-              <span className="flex w-full flex-wrap gap-1 pt-1 sm:ml-auto sm:w-auto sm:pt-0"><Button onClick={() => act("/retry")}>Retry</Button><Button onClick={() => setTab("attachments")}>Upload missing file</Button><Button onClick={() => setTab("collab")}>Reassign</Button><Button onClick={() => act("/request-review")}>Human review</Button></span></div>
+              {x.step === "outbound_email" && c.send_from?.source && <span className="font-semibold text-match-fg">A mailbox can send now ({c.send_from.address}) — open Draft Actions and Approve again.</span>}
+              {x.step === "outbound_email" ? (
+                // a failed send is retried by approving the draft again; re-running the whole pipeline would discard the draft
+                <span className="flex w-full flex-wrap gap-1 pt-1 sm:ml-auto sm:w-auto sm:pt-0"><Button onClick={() => setTab("drafts")}>Open Draft Actions</Button><Button onClick={() => setTab("collab")}>Reassign</Button><Button onClick={() => act("/request-review")}>Human review</Button></span>
+              ) : (
+                <span className="flex w-full flex-wrap gap-1 pt-1 sm:ml-auto sm:w-auto sm:pt-0"><Button onClick={() => act("/retry")}>Retry</Button><Button onClick={() => setTab("attachments")}>Upload missing file</Button><Button onClick={() => setTab("collab")}>Reassign</Button><Button onClick={() => act("/request-review")}>Human review</Button></span>
+              )}</div>
           ))}
         </div>
       )}

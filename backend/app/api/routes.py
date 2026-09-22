@@ -569,7 +569,9 @@ def suggest_cases(q: str = "", limit: int = 10, user: UserRecord = Depends(requi
 def get_case(case_id: str, user: UserRecord = Depends(require("view_case"))):
     s = svc()
     case = s.get(case_id)
-    return _mutation_view(s, case)
+    d = _mutation_view(s, case)
+    d["send_from"] = s.outbound_summary(case, user)   # which mailbox an approved reply would leave from for this caller
+    return d
 
 
 @router.get("/cases/{case_id}/comparison")

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { api, fetchDocumentBlob, post, type CaseView, type DeliveryInfo, type Draft } from "@/lib/api";
+import Link from "next/link";
+import { api, fetchDocumentBlob, post, type CaseView, type DeliveryInfo, type Draft, type SendFrom } from "@/lib/api";
 import { Badge, Button, Card, Empty, KV, fmtDate } from "@/components/ui";
 
 // ------------------------------------------------------------------ Drafts (human-in-the-loop)
@@ -23,7 +24,11 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
   };
 
   const gen = async () => { setBusy(true); try { await post(`/cases/${c.id}/draft`, { language: lang }); say("Draft generated (not sent)"); onChange(); } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); } };
-  const act = async (path: string, d: Draft, extra: any = {}) => { setBusy(true); try { await post(`/cases/${c.id}/${path}`, { draft_id: d.id, ...extra }); say("Done"); setEditing(null); onChange(); } catch (e: any) { say(e.message, "err"); } finally { setBusy(false); } };
+  const act = async (path: string, d: Draft, extra: any = {}) => { setBusy(true); try { await post(`/cases/${c.id}/${path}`, { draft_id: d.id, ...extra }); say("Done"); setEditing(null); onChange(); } catch (e: any) { say([e?.detail?.error || e.message, e?.detail?.recovery].filter(Boolean).join(" — "), "err"); } finally { setBusy(false); } };
+  // which mailbox an approved reply leaves from for *this* signed-in user (the case's arrival mailbox, else their own connected one)
+  const from: SendFrom | null | undefined = c.send_from;
+  const cannotSend = sendMode === "live" && !!from && from.source === null;
+  const approveTitle = !canApprove ? "Requires SUPERVISOR/ADMIN" : sendMode === "simulate" ? "Approve: recorded only, nothing is sent in simulate mode" : cannotSend ? `Cannot send: ${from!.reason}` : from?.address ? `Approve and send from ${from.address}` : "Approve and send from the connected mailbox";
 
   return (
     <div className="space-y-3">
@@ -35,9 +40,10 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
       </div>
       {sendMode === "simulate" && (
         <div role="note" className="rounded-xl border border-review bg-review-bg/50 px-3 py-2 text-xs text-review-fg">
-          <span className="font-semibold">Sending is simulated on this server</span> (<span className="font-mono">EMAIL_SEND_MODE=simulate</span>): approving records the decision in the audit log, but no e-mail leaves the desk. Set <span className="font-mono">EMAIL_SEND_MODE=live</span> to send replies from the connected mailbox.
+          <span className="font-semibold">Sending is simulated on this server</span> (<span className="font-mono">EMAIL_SEND_MODE=simulate</span>): approving records the decision in the audit log, but no e-mail leaves the desk. Set <span className="font-mono">EMAIL_SEND_MODE=live</span> to send replies from the connected mailbox{from?.address ? <> (would leave from <span className="font-mono">{from.address}</span>)</> : null}.
         </div>
       )}
+      {sendMode === "live" && from && <SendFromNote from={from} />}
       {c.drafts.length === 0 && <Empty text={c.action_required ? "No draft yet. Click Generate draft." : "Informational case — no reply needed. Generate a draft only if you want to respond."} />}
       {[...c.drafts].reverse().map((d) => (
         <Card key={d.id} title={<span>{d.draft_type.replace(/_/g, " ")} · v{d.version} <Badge className={{ PROPOSED: "bg-accent-bg text-accent-fg", EDITED: "bg-review-bg text-review-fg", APPROVED: "bg-match-bg text-match-fg", DELIVERING: "bg-review-bg text-review-fg", DELIVERY_UNKNOWN: "bg-mismatch-bg text-mismatch-fg", SENT: "bg-match text-white", SIMULATED: "bg-match-bg text-match-fg", SEND_FAILED: "bg-mismatch-bg text-mismatch-fg", REJECTED: "bg-mismatch-bg text-mismatch-fg" }[d.status] || ""}>{d.status}</Badge></span>}
@@ -65,13 +71,32 @@ export function DraftPanel({ c, onChange, say, perms }: { c: CaseView; onChange:
           {d.status !== "SENT" && d.status !== "SIMULATED" && d.status !== "REJECTED" && editing?.id !== d.id && (
             <div className="mt-2 flex flex-wrap gap-2">
               <Button onClick={() => { setEditing(d); setSubject(d.subject); setBody(d.body); }}>Edit</Button>
-              <Button kind="success" disabled={!canApprove || busy} title={canApprove ? (sendMode === "simulate" ? "Approve: recorded only, nothing is sent in simulate mode" : "Approve and send from the connected mailbox") : "Requires SUPERVISOR/ADMIN"} onClick={() => act("approve", d)}>{sendMode === "simulate" ? "Approve (simulated)" : "Approve & send"}</Button>
+              <Button kind="success" disabled={!canApprove || busy || cannotSend} title={approveTitle} onClick={() => act("approve", d)}>{sendMode === "simulate" ? "Approve (simulated)" : "Approve & send"}</Button>
               <Button kind="danger" disabled={busy} onClick={() => act("reject", d, { note: "Rejected by reviewer" })}>Reject</Button>
             </div>
           )}
         </Card>
       ))}
     </div>
+  );
+}
+
+/** Before Approve: which mailbox the reply will leave from for the signed-in user, or exactly why none can. */
+function SendFromNote({ from }: { from: SendFrom }) {
+  const providerName: Record<string, string> = { outlook: "Outlook (Microsoft Graph)", gmail: "Gmail API", shared: "the shared desk mailbox" };
+  if (from.source === null) {
+    return (
+      <div role="alert" className="rounded-xl border border-mismatch bg-mismatch-bg/40 px-3 py-2 text-xs text-mismatch-fg">
+        <span className="font-semibold">No mailbox can send this reply:</span> {from.reason} {from.recovery ? <span>{from.recovery}</span> : null}{" "}
+        <Link href="/welcome" className="font-semibold underline">Connect a mailbox on the Guide page</Link>
+      </div>
+    );
+  }
+  const why = from.source === "arrived_in" ? "the mailbox this mail arrived in" : from.source === "your_mailbox" ? "your connected mailbox" : "the shared desk mailbox";
+  return (
+    <p className="text-xs text-ink-600">
+      Replies leave from <span className="font-mono">{from.address || "?"}</span> — {why}{from.provider && from.provider !== "shared" ? <> via {providerName[from.provider] || from.provider}</> : null}.
+    </p>
   );
 }
 
